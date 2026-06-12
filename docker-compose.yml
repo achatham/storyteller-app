@@ -9,6 +9,11 @@ services:
       STORY_PREFETCH: "4"          # pages to draw ahead while reading
       STORY_WARM_PAGES: "2"        # first pages drawn during import (instant open)
       STORY_GEN_CONCURRENCY: "3"   # max simultaneous image generations
+      # low-sensitivity text steps on the cheaper model (~80% off text spend);
+      # registry/discovery stays on STORY_TEXT_MODEL since it pins identity.
+      STORY_ANALYZE_MODEL: "gemini-3.1-flash-lite"   # segmentation (anchors + briefs)
+      STORY_CRITIQUE_MODEL: "gemini-3.1-flash-lite"  # image quality scoring
+      STORY_CHAPTER_MODEL: "gemini-3.1-flash-lite"   # chapter classification
     volumes:
       - ./data:/data  # sqlite DB + scratch work dirs + logs persist here
     restart: unless-stopped
