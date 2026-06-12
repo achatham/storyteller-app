@@ -8,6 +8,7 @@ sheet generated and cached on first use. Result image bytes are stored in the DB
 """
 import json
 import tempfile
+import threading
 from pathlib import Path
 
 from pipeline import gem
@@ -17,6 +18,22 @@ from pipeline.run import (resolve_cast, scene_members, build_scene_prompt,
 from . import db
 
 SCENE_TRIES = 2  # keep page latency low; prefetch hides the rest
+
+# Serialize sheet generation per (book, entity): the first variant drawn becomes
+# the identity anchor, and concurrent scenes that need the same character's sheets
+# coalesce on it (no duplicate pro draws, and later variants reference the anchor).
+# Different characters still draw fully in parallel.
+_entity_locks: dict[tuple, threading.Lock] = {}
+_entity_locks_guard = threading.Lock()
+
+
+def _entity_lock(book_id, entity_id) -> threading.Lock:
+    key = (book_id, entity_id)
+    with _entity_locks_guard:
+        lk = _entity_locks.get(key)
+        if lk is None:
+            lk = _entity_locks[key] = threading.Lock()
+        return lk
 
 
 def _style_text(style_key: str) -> str:
@@ -45,25 +62,29 @@ def _ensure_sheet(book_id, member, style_text) -> bytes | None:
     prompt = (f"{style_text}\n\n{sheet_prompt}\n\nCanonical look (match exactly): "
               f"{appearance}\nSingle subject only, plain soft neutral background, "
               "even lighting, no text labels.")
-    try:
-        with tempfile.TemporaryDirectory() as td:
-            # pin identity: if another variant of THIS entity is already drawn,
-            # attach it so the same face/build carries across the character's looks
-            refs = None
-            sib = db.get_any_sheet(book_id, eid, exclude_variant_id=vid)
-            if sib:
-                sp = Path(td) / "sibling.webp"
-                sp.write_bytes(sib)
-                refs = [sp]
-                prompt += ("\n\nA reference image of THIS SAME character (a different "
-                           "outfit/moment) is attached. Keep the SAME facial identity, "
-                           "hair, and build; change only the clothing/age/form described above.")
-            data = _gen_to_bytes(prompt, refs, SHEET_IMAGE_MODEL, aspect)
-    except Exception as ex:  # noqa: BLE001
-        print(f"[scene] sheet {eid}/{vid} failed: {ex}", flush=True)
-        return None
-    db.save_sheet(book_id, eid, vid, data)
-    return data
+    with _entity_lock(book_id, eid):
+        data = db.get_sheet(book_id, eid, vid)   # another thread may have just drawn it
+        if data:
+            return data
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                # pin identity: if another variant of THIS entity is already drawn,
+                # attach it so the same face/build carries across the character's looks
+                refs = None
+                sib = db.get_any_sheet(book_id, eid, exclude_variant_id=vid)
+                if sib:
+                    sp = Path(td) / "sibling.webp"
+                    sp.write_bytes(sib)
+                    refs = [sp]
+                    prompt += ("\n\nA reference image of THIS SAME character (a different "
+                               "outfit/moment) is attached. Keep the SAME facial identity, "
+                               "hair, and build; change only the clothing/age/form described above.")
+                data = _gen_to_bytes(prompt, refs, SHEET_IMAGE_MODEL, aspect)
+        except Exception as ex:  # noqa: BLE001
+            print(f"[scene] sheet {eid}/{vid} failed: {ex}", flush=True)
+            return None
+        db.save_sheet(book_id, eid, vid, data)
+        return data
 
 
 def generate_scene(book_id: int, idx: int) -> bytes:
