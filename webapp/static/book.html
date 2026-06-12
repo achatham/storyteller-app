@@ -6,7 +6,8 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>Storyteller — book</title>
 <style>
-  :root { --bg:#f4efe6; --ink:#2b2622; --muted:#9a8a70; --panel:#fffdf8; --line:#e0d4bd; --pad:34px; --gap:54px; }
+  :root { --bg:#f4efe6; --ink:#2b2622; --muted:#9a8a70; --panel:#fffdf8; --line:#e0d4bd;
+          --pad:30px; --gap:54px; --mh:42px; }
   * { box-sizing:border-box; }
   html,body { margin:0; height:100%; background:var(--bg); color:var(--ink);
               font-family:Georgia,'Times New Roman',serif; -webkit-tap-highlight-color:transparent;
@@ -14,10 +15,11 @@
   #viewport { position:fixed; inset:0; overflow:hidden; }
   /* the flowing text laid into vertical columns that extend horizontally; we
      translate it to "turn pages". column-fill:auto + fixed height = real pages. */
-  #flow { height:100dvh; padding:var(--pad) var(--pad) 52px; column-gap:var(--gap);
-          column-fill:auto; transition:transform .28s ease; will-change:transform; }
-  @media (orientation:landscape){ #flow{ column-width:calc((100vw - 2*var(--pad) - var(--gap)) / 2); } }
-  @media (orientation:portrait){  #flow{ column-width:calc(100vw - 2*var(--pad)); } }
+  #flow { position:absolute; top:0; bottom:0; left:var(--mh); right:var(--mh);
+          padding:var(--pad) 0 50px; column-gap:var(--gap); column-fill:auto;
+          transition:transform .28s ease; will-change:transform; }
+  @media (orientation:landscape){ #flow{ column-count:2; } }
+  @media (orientation:portrait){  #flow{ column-count:1; } }
   #flow .chtitle { font-size:1.5rem; margin:0 0 .7em; }
   #flow .chtitle .ch { display:block; font-family:system-ui,sans-serif; font-size:.72rem;
           letter-spacing:2px; text-transform:uppercase; color:var(--muted); margin-bottom:.3em; }
@@ -108,14 +110,19 @@ async function loadChapter(ci, toPage){
 function esc(s){ return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
 let imgs = [];
-function pageWidth(){ return window.innerWidth; }
+// One "page" advances by the full column repeat = visible column area + one gap
+// (NOT window width -- that drifts by a gap per page and clips the left column).
+function stride(){
+  const f = $("#flow");
+  return f.clientWidth + (parseFloat(getComputedStyle(f).columnGap) || 0);
+}
 function paginate(){
-  const flow = $("#flow");
-  pages = Math.max(1, Math.round(flow.scrollWidth / pageWidth()));
+  const f = $("#flow");
+  pages = Math.max(1, Math.ceil((f.scrollWidth + (parseFloat(getComputedStyle(f).columnGap)||0)) / stride()));
 }
 function goPage(n, force){
   page = Math.max(0, Math.min(pages-1, n));
-  $("#flow").style.transform = `translateX(${-page*pageWidth()}px)`;
+  $("#flow").style.transform = `translateX(${-page*stride()}px)`;
   $("#bar").style.width = ((page+1)/pages*100) + "%";
   $("#pageno").textContent = `${(META.chapters[CH]||{}).title||""} — ${page+1}/${pages}`;
   loadVisibleImages();
@@ -124,9 +131,9 @@ function goPage(n, force){
 
 // load images on the current page + next 2 (lazy generation + prefetch)
 function loadVisibleImages(){
-  const w = pageWidth();
+  const s = stride();
   imgs.forEach(im => {
-    const pg = Math.floor(im.offsetLeft / w);
+    const pg = Math.floor(im.offsetLeft / s);
     if (pg >= page-1 && pg <= page+2 && im.dataset.src && !prefetched.has(im.dataset.src)){
       prefetched.add(im.dataset.src); im.src = im.dataset.src;
     }
