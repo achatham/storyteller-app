@@ -17,12 +17,66 @@ Scene images are NOT made here; they are generated lazily while reading.
 """
 import json
 import os
+import re
 import sys
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
 from . import db
+
+
+def _when_range(when: str):
+    """(low, high) story-chapter numbers a variant's 'when' covers, or None."""
+    nums = [int(n) for n in re.findall(r"\d+", when or "")]
+    return (min(nums), max(nums)) if nums else None
+
+
+def _variant_for_chapter(entity: dict, chapter_num: int) -> str:
+    """Pick the entity variant whose span covers this chapter (else the first)."""
+    variants = entity.get("variants") or []
+    if not variants:
+        return "default"
+    for v in variants:
+        rng = _when_range(v.get("when", ""))
+        if rng and rng[0] <= chapter_num <= rng[1]:
+            return v["id"]
+    return variants[0]["id"]
+
+
+def enrich_setting_props(bible: dict, registry: dict, chapter_num: int):
+    """Backstop for the segmenter under-listing recurring SETTINGS/PROPS (e.g. the
+    ship the characters are aboard): if a page's setting/brief names a registry
+    setting or prop, ensure it is in that page's cast (and the chapter cast) so its
+    canonical reference sheet gets drawn + attached -- keeping it consistent."""
+    props = [e for e in registry.get("entities", [])
+             if e.get("type") in ("setting", "prop")]
+    if not props:
+        return
+    matchers = []
+    for e in props:
+        names = [e.get("name", "")] + (e.get("aliases") or [])
+        pats = [re.compile(r"\b" + re.escape(n) + r"\b", re.I)
+                for n in names if n and len(n) >= 3]
+        if pats:
+            matchers.append((e, pats, _variant_for_chapter(e, chapter_num)))
+
+    chapter_cast = bible.setdefault("cast", [])
+    in_chapter = {m.get("entity_id") for m in chapter_cast}
+    for s in bible.get("spreads", []):
+        text = f"{s.get('setting','')} {s.get('illustration_brief','')}"
+        cast = s.setdefault("cast", [])
+        present = {c.get("entity_id") for c in cast}
+        for e, pats, vid in matchers:
+            if e["id"] in present:
+                continue
+            if any(p.search(text) for p in pats):
+                cast.append({"entity_id": e["id"], "variant_id": vid})
+                present.add(e["id"])
+                if e["id"] not in in_chapter:
+                    chapter_cast.append({"entity_id": e["id"], "variant_id": vid,
+                                         "name": e.get("name", ""), "from_registry": True})
+                    in_chapter.add(e["id"])
 
 # Every epub is laid out differently (NCX present or not, spine vs TOC mismatch,
 # odd front/back matter), so rather than trust the format we hand the model a
@@ -164,6 +218,9 @@ def segment(book_id, registry, workers: int = 4, report=None):
         bible = bibles.get(ci)
         if not bible:
             continue
+        # backstop: make sure recurring settings/props named in a page (the ship,
+        # a castle, ...) are in its cast so their canonical sheet is referenced
+        enrich_setting_props(bible, registry, ci + 1)
         # use the real chapter title from the source, NOT the model's echoed
         # section label (which leaked the frozen STORY_LABEL default)
         db.add_chapter(book_id, ci, title, page_idx, bible.get("cast", []))
