@@ -90,6 +90,88 @@ Resolve EVERY variant listed on the entity (echo each variant id). If the entity
 """
 
 
+REPAIR_PROMPT = """You are refining a children's-book character registry so each character can be \
+drawn correctly in EVERY scene. The whole-book discovery pass sometimes collapses a character \
+into only their dominant look and misses how they appear at their FIRST appearance -- for \
+example, ordinary real-world clothes in the opening before they later enter a different world or \
+change into other dress.
+
+Below is the BEGINNING of the book and the current character roster (each with its variant ids, \
+the chapters each applies to, and what is different about each). For every character who actually \
+APPEARS in this opening passage, check whether their variants already cover how they look HERE. \
+If their opening look is NOT covered by an existing variant, ADD a variant for it. If an existing \
+variant's "when" wrongly includes this opening (e.g. a later look tagged as starting at chapter 1), \
+correct its span.
+
+Only address looks actually visible in this opening; do not invent later looks. Reuse exact entity ids.
+
+Return JSON only:
+{{
+  "additions": [
+    {{"entity_id": "<existing id>", "id": "<new snake_case variant id>", "kind": "outfit|age|state|other", "label": "<short label>", "when": "<where it applies, e.g. 'Chapter 1'>", "delta": "<what is different about this look vs the character's other variants>"}}
+  ],
+  "fixes": [
+    {{"entity_id": "<id>", "variant_id": "<existing variant id>", "when": "<corrected span>"}}
+  ]
+}}
+If nothing needs changing, return empty lists.
+
+CURRENT ROSTER:
+{roster}
+
+BEGINNING OF THE BOOK:
+\"\"\"
+{opening}
+\"\"\"
+"""
+
+OPENING_WORDS = 3000
+
+
+def repair_openings(entities: list[dict], book_text: str) -> list[dict]:
+    """Safety net for the most common discovery miss: a character present in the
+    book's opening in one look (often ordinary/real-world clothes) before changing
+    later, where discover kept only the later look. Focused on the opening text so
+    it is reliable and cheap (one extra call). Mutates + returns `entities`."""
+    chars = [e for e in entities if e.get("type") == "character"]
+    if not chars:
+        return entities
+    roster = [{"id": e["id"], "name": e.get("name", ""),
+               "variants": [{"id": v.get("id"), "when": v.get("when", ""),
+                             "delta": v.get("delta", "")} for v in e.get("variants", [])]}
+              for e in chars]
+    opening = " ".join(book_text.split()[:OPENING_WORDS])
+    prompt = REPAIR_PROMPT.format(roster=json.dumps(roster, ensure_ascii=False),
+                                  opening=opening)
+    try:
+        data = gem.text_json(prompt, model=REGISTRY_MODEL, thinking_level=REGISTRY_THINK)
+    except Exception as ex:  # noqa: BLE001 -- repair is best-effort; never sink the build
+        print(f"[registry] opening repair skipped: {type(ex).__name__}: {ex}", flush=True)
+        return entities
+    by_id = {e["id"]: e for e in entities}
+    added = fixed = 0
+    for a in data.get("additions", []):
+        e = by_id.get(a.get("entity_id"))
+        vid = a.get("id")
+        if not e or not vid or any(v.get("id") == vid for v in e.get("variants", [])):
+            continue
+        e.setdefault("variants", []).insert(0, {
+            "id": vid, "kind": a.get("kind", "outfit"), "label": a.get("label", ""),
+            "when": a.get("when", ""), "delta": a.get("delta", "")})
+        added += 1
+    for f in data.get("fixes", []):
+        e = by_id.get(f.get("entity_id"))
+        if not e or not f.get("when"):
+            continue
+        for v in e.get("variants", []):
+            if v.get("id") == f.get("variant_id"):
+                v["when"] = f["when"]
+                fixed += 1
+    print(f"[registry] opening repair: +{added} first-appearance variants, "
+          f"{fixed} span fixes", flush=True)
+    return entities
+
+
 def discover(book_text: str) -> list[dict]:
     prompt = DISCOVER_PROMPT.format(book_ref=BOOK_REF, book=book_text)
     data = gem.text_json(prompt, model=REGISTRY_MODEL, thinking_level=REGISTRY_THINK)
@@ -136,7 +218,9 @@ def build(max_workers: int = 6) -> dict:
     print(f"[registry] discover pass over ~{len(book)//4} tokens ...", flush=True)
     entities = discover(book)
     entities.sort(key=lambda e: (-e.get("importance", 0), e.get("id", "")))
-    print(f"[registry] discovered {len(entities)} entities; expanding in parallel ...", flush=True)
+    print(f"[registry] discovered {len(entities)} entities; repairing openings ...", flush=True)
+    entities = repair_openings(entities, book)
+    print(f"[registry] expanding {len(entities)} entities in parallel ...", flush=True)
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         expanded = list(ex.map(expand_one, entities))
