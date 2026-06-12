@@ -1,0 +1,21 @@
+# secrets / credentials
+.env
+
+# generated output (registry, sheets, scenes, books, readers, cost db, logs)
+output/
+
+# input books are copyrighted; keep only the public-domain A Christmas Carol
+stories/*
+!stories/Dickens_Carol.pdf
+
+# one-off scratch run scripts (book/run-specific; not reusable tooling)
+/run_dawn_styles.sh
+/run_read_oil.sh
+/run_flash_compare.sh
+/finalize_downscale.sh
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store

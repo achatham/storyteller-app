@@ -1,0 +1,129 @@
+"""Token + cost accounting for every Gemini call, persisted to a cumulative
+SQLite DB so we can see per-run and all-time spend, split by text vs image.
+
+Each API response carries usage_metadata (prompt / candidates / total token
+counts); we record one row per call, price it from PRICING, and sum on demand.
+
+NOTE: PRICING is USD per 1,000,000 tokens and is an ESTIMATE -- edit these to
+match the current Gemini price sheet for exact figures.
+"""
+import os
+import sqlite3
+import threading
+import time
+from pathlib import Path
+
+from .config import ROOT
+
+DB = Path(os.environ.get("STORY_COST_DB", str(ROOT / "output" / "costs.db")))
+
+# USD per 1,000,000 tokens. From Google's official price sheet (ai.google.dev,
+# June 2026). Image output is $120/1M tokens; a 1K or 2K image = 1120 tokens =
+# ~$0.134 (4K = 2000 tokens = ~$0.24). Reports recompute from stored token
+# counts, so editing these rates retroactively re-prices all past usage.
+PRICING = {
+    "gemini-3.5-flash":            {"in": 1.50, "out": 9.00},    # text + critique
+    "gemini-3.1-pro-preview":      {"in": 2.00, "out": 12.00},
+    "gemini-3-pro-image-preview":  {"in": 2.00, "out": 120.00},  # pro image: ~$0.134/1K-2K img
+    "gemini-3.1-flash-image":      {"in": 0.50, "out": 60.00},   # flash image: ~$0.067/1K img
+    "gemini-3.1-flash-image-preview": {"in": 0.50, "out": 60.00},
+    "gemini-2.5-flash-image":      {"in": 0.30, "out": 30.00},   # older flash: ~$0.039/img
+}
+DEFAULT_PRICE = {"in": 0.0, "out": 0.0}
+
+# which models are the "image" side vs the "text" side, for the split report
+IMAGE_MODELS = {"gemini-3-pro-image-preview"}
+
+_lock = threading.Lock()
+
+
+def _conn() -> sqlite3.Connection:
+    DB.parent.mkdir(parents=True, exist_ok=True)
+    c = sqlite3.connect(str(DB), timeout=60)
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("""CREATE TABLE IF NOT EXISTS usage(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts REAL, run TEXT, model TEXT, kind TEXT,
+        input_tokens INTEGER, output_tokens INTEGER, total_tokens INTEGER,
+        images INTEGER, cost_usd REAL)""")
+    return c
+
+
+def cost_for(model: str, input_tokens: int, output_tokens: int) -> float:
+    p = PRICING.get(model, DEFAULT_PRICE)
+    return input_tokens / 1e6 * p["in"] + output_tokens / 1e6 * p["out"]
+
+
+def record(model: str, kind: str, input_tokens: int, output_tokens: int,
+           total_tokens: int | None = None, images: int = 0,
+           run: str | None = None) -> float:
+    """Record one API call. Returns its USD cost. Thread- and process-safe."""
+    cost = cost_for(model, input_tokens, output_tokens)
+    total = total_tokens if total_tokens is not None else input_tokens + output_tokens
+    # key each run by its unique output dir (falls back to label) so reports for
+    # different styles/chapters/models don't collide under a shared section label
+    if run is None:
+        run = os.environ.get("STORY_OUT") or os.environ.get("STORY_LABEL", "")
+    with _lock:
+        with _conn() as c:
+            c.execute(
+                "INSERT INTO usage(ts,run,model,kind,input_tokens,output_tokens,"
+                "total_tokens,images,cost_usd) VALUES (?,?,?,?,?,?,?,?,?)",
+                (time.time(), run, model, kind, input_tokens, output_tokens,
+                 total, images, cost))
+    return cost
+
+
+# ---------------- reporting ----------------
+
+def _rows(where: str = "", params: tuple = ()):
+    with _conn() as c:
+        return c.execute(
+            "SELECT model, kind, COUNT(*), SUM(input_tokens), SUM(output_tokens), "
+            "SUM(images), SUM(cost_usd) FROM usage " + where +
+            " GROUP BY model, kind ORDER BY model, kind", params).fetchall()
+
+
+def report(run: str | None = None) -> str:
+    """Human-readable text/image split + total. If run is given, scope to it;
+    otherwise report cumulative (all-time)."""
+    where, params, scope = "", (), "cumulative (all-time)"
+    if run is not None:
+        where, params, scope = "WHERE run = ?", (run,), f"run = {run!r}"
+    rows = _rows(where, params)
+    if not rows:
+        return f"No usage recorded yet ({DB})."
+
+    text_cost = img_cost = 0.0
+    text_in = text_out = img_in = img_out = img_n = calls = 0
+    lines = [f"=== Gemini cost report — {scope} ===", f"db: {DB}", ""]
+    lines.append(f"{'model':<30} {'kind':<9} {'calls':>5} {'in_tok':>10} {'out_tok':>10} {'imgs':>5} {'USD':>9}")
+    for model, kind, n, sin, sout, simg, _stored in rows:
+        sin, sout, simg = sin or 0, sout or 0, simg or 0
+        # recompute from current PRICING (retroactive) rather than stored cost
+        scost = cost_for(model, sin, sout)
+        calls += n
+        lines.append(f"{model:<30} {kind:<9} {n:>5} {sin:>10,} {sout:>10,} {simg:>5} {scost:>9.4f}")
+        if model in IMAGE_MODELS:
+            img_cost += scost; img_in += sin; img_out += sout; img_n += simg
+        else:
+            text_cost += scost; text_in += sin; text_out += sout
+    total = text_cost + img_cost
+    lines += [
+        "",
+        f"TEXT  : {text_in:>10,} in / {text_out:>10,} out tok   ${text_cost:.4f}",
+        f"IMAGE : {img_in:>10,} in / {img_out:>10,} out tok   {img_n} imgs   ${img_cost:.4f}",
+        f"{'-'*52}",
+        f"TOTAL : {calls} calls   ${total:.4f}",
+    ]
+    return "\n".join(lines)
+
+
+def main():
+    import sys
+    run = sys.argv[1] if len(sys.argv) > 1 else None
+    print(report(run))
+
+
+if __name__ == "__main__":
+    main()
