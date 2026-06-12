@@ -97,14 +97,18 @@ def _coerce_json(raw: str | None) -> dict:
         return json.loads(raw[s:e + 1])
 
 
-def text_json(prompt: str, schema: dict | None = None, model: str = TEXT_MODEL) -> dict:
+def text_json(prompt: str, schema: dict | None = None, model: str = TEXT_MODEL,
+              thinking_level: str | None = None) -> dict:
     """Call the text model and parse a JSON object out of the response.
-    Empty/garbage responses are retried (not crash-on-None)."""
-    cfg = types.GenerateContentConfig(
-        response_mime_type="application/json",
-        response_schema=schema,
-        temperature=0.6,
-    )
+    Empty/garbage responses are retried (not crash-on-None).
+
+    thinking_level (Gemini 3 models): minimal|low|medium|high. None = model
+    default (dynamic). Raise it for reasoning-heavy steps like the registry."""
+    kwargs = dict(response_mime_type="application/json", response_schema=schema,
+                  temperature=0.6)
+    if thinking_level:
+        kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_level)
+    cfg = types.GenerateContentConfig(**kwargs)
 
     def _go():
         resp = _client.models.generate_content(model=model, contents=prompt, config=cfg)

@@ -125,6 +125,10 @@ TEXT_MODEL = os.environ.get("STORY_TEXT_MODEL", "gemini-3.5-flash")
 # also tolerant of a lighter model; registry/discovery is identity-critical.
 ANALYZE_MODEL = os.environ.get("STORY_ANALYZE_MODEL", TEXT_MODEL)
 REGISTRY_MODEL = os.environ.get("STORY_REGISTRY_MODEL", TEXT_MODEL)
+# Building the entity registry (cataloguing every character + their distinct
+# looks across the whole book) is the reasoning-heaviest text step, so run it at
+# a raised thinking level (Gemini 3: minimal|low|medium|high; default medium).
+REGISTRY_THINK = os.environ.get("STORY_REGISTRY_THINK", "high")
 CRITIQUE_MODEL = os.environ.get("STORY_CRITIQUE_MODEL", TEXT_MODEL)
 CHAPTER_MODEL = os.environ.get("STORY_CHAPTER_MODEL", TEXT_MODEL)
 MAX_REFS = int(os.environ.get("STORY_MAX_REFS", "4"))

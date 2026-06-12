@@ -23,7 +23,7 @@ import json
 
 from . import gem
 from .extract import full_story_text
-from .config import REGISTRY, BOOK_REF, BOOK_TITLE, REGISTRY_MODEL
+from .config import REGISTRY, BOOK_REF, BOOK_TITLE, REGISTRY_MODEL, REGISTRY_THINK
 
 DISCOVER_PROMPT = """You are cataloguing every illustration-worthy entity in {book_ref}, \
 to keep a fully-illustrated children's read-aloud edition visually consistent.
@@ -52,9 +52,9 @@ Return JSON only: {{"entities": [ ... ]}}. Each entity:
 
 Rules:
 - DEDUPLICATE aggressively: one entity per real person/place/thing. Fold every alias in (e.g. a full name, a nickname, and a descriptive epithet that all refer to the same person) -- do not emit duplicates.
-- Include a "variants" entry whenever the entity's APPEARANCE meaningfully changes during the book. A character who ages years needs age variants; one who gets a notable injury or changes into a distinctly different outfit/uniform needs those too. A constant setting/prop may have an empty variants list.
-- IMPORTANT -- first appearance & different worlds: give a character a SEPARATE variant for how they look at their FIRST appearance, and for each clearly different WORLD/SETTING they appear in. Many stories open in the ordinary/real world (e.g. children in everyday modern clothes at home or school) before the characters enter a fantasy/secondary world where they later wear that world's clothing (armor, robes, period or travel dress). Capture the EVERYDAY/real-world look as its own variant -- do NOT let the fantasy-world outfit be used for the ordinary-world opening.
-- Always give every CHARACTER at least one variant for their default/most-common look. Set each variant's "when" to the ACTUAL span it applies (chapters/scenes); the opening/first-appearance look must cover the start and must NOT be mislabeled as a later look.
+- VARIANTS = the distinct LOOKS an entity has across the book. Reason through the story in order and segment each character's appearance into the separate looks they actually have: start a new variant wherever their clothing, gear/weapons, age, grooming, or physical condition changes enough that drawing them the SAME in both places would be wrong. Give each variant a "when" span (chapters/scenes) and make the spans cover the whole book in reading order WITHOUT overlapping or being misattributed -- a look that only applies later must not claim the opening, and vice-versa.
+- The first look is simply the earliest segment; capture it like any other. Common triggers for a new variant: moving between different worlds or settings (e.g. everyday real-world clothes before entering a fantasy/secondary world, then that world's dress), donning a uniform/armor/disguise, aging, or a lasting injury.
+- Do not collapse genuinely different looks into one variant, and do not split looks that are essentially the same. A character whose appearance never meaningfully changes can have a single variant; a constant setting/prop may have an empty variants list.
 - Aim for completeness on importance>=3 entities; you may include minor ones at importance 1-2 but do not pad.
 - Keep each text field short; richness is added in a later pass.
 
@@ -92,7 +92,7 @@ Resolve EVERY variant listed on the entity (echo each variant id). If the entity
 
 def discover(book_text: str) -> list[dict]:
     prompt = DISCOVER_PROMPT.format(book_ref=BOOK_REF, book=book_text)
-    data = gem.text_json(prompt, model=REGISTRY_MODEL)
+    data = gem.text_json(prompt, model=REGISTRY_MODEL, thinking_level=REGISTRY_THINK)
     return data.get("entities", [])
 
 
@@ -103,7 +103,7 @@ def expand_one(entity: dict) -> dict:
         book_ref=BOOK_REF, entity=json.dumps(stub, ensure_ascii=False))
     out = dict(entity)
     try:
-        rich = gem.text_json(prompt, model=REGISTRY_MODEL)
+        rich = gem.text_json(prompt, model=REGISTRY_MODEL, thinking_level=REGISTRY_THINK)
     except Exception as e:  # noqa: BLE001 -- never let one entity sink the whole summary
         print(f"[registry] expand FAILED for {entity.get('id')}: "
               f"{type(e).__name__}: {str(e)[:120]} -- using canonical_details fallback", flush=True)

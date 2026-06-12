@@ -57,6 +57,7 @@ Reads `GEMINI_API_KEY` from `.env` (same as the CLI pipeline).
 | `STORY_TEXT_MODEL` | `gemini-3.5-flash` | default for all text steps |
 | `STORY_ANALYZE_MODEL` | = text model | segmentation (page anchors + briefs) |
 | `STORY_REGISTRY_MODEL` | = text model | entity discovery/expansion (identity-critical) |
+| `STORY_REGISTRY_THINK` | `high` | thinking level for the registry step (minimal/low/medium/high) |
 | `STORY_CRITIQUE_MODEL` | = text model | image quality scoring (low-sensitivity) |
 | `STORY_CHAPTER_MODEL` | = text model | chapter skeleton classification (low-sensitivity) |
 
