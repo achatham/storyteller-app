@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storyteller — library</title>
+<style>
+  :root { --bg:#f4efe6; --ink:#2b2622; --muted:#9a8a70; --panel:#fffdf8; --line:#e0d4bd; --accent:#7a5c3e; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font-family:Georgia,'Times New Roman',serif; }
+  header { padding:28px 24px 8px; }
+  h1 { margin:0; font-size:2rem; }
+  .sub { color:var(--muted); font-family:system-ui,sans-serif; font-size:.9rem; }
+  main { max-width:1000px; margin:0 auto; padding:16px 24px 60px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:18px; margin-top:10px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px;
+          display:flex; flex-direction:column; gap:8px; box-shadow:0 4px 16px rgba(0,0,0,.06); }
+  .card h3 { margin:0; font-size:1.15rem; }
+  .card .auth { color:var(--muted); font-size:.85rem; font-style:italic; }
+  .pill { align-self:flex-start; font-family:system-ui,sans-serif; font-size:.7rem; letter-spacing:.5px;
+          text-transform:uppercase; padding:3px 9px; border-radius:20px; background:var(--bg); border:1px solid var(--line); }
+  .card .status { font-family:system-ui,sans-serif; font-size:.8rem; color:var(--muted); min-height:1.1em; }
+  .barwrap { height:5px; background:var(--bg); border-radius:3px; overflow:hidden; }
+  .bar { height:100%; background:var(--accent); width:0; transition:width .3s; }
+  .row { display:flex; gap:8px; margin-top:4px; }
+  button, .btn { font:inherit; font-family:system-ui,sans-serif; font-size:.85rem; padding:8px 14px;
+          border-radius:9px; border:1px solid var(--line); background:var(--bg); color:var(--ink);
+          cursor:pointer; text-decoration:none; text-align:center; }
+  .btn.go { background:var(--accent); color:#fff; border-color:var(--accent); flex:1; }
+  .btn.go[aria-disabled=true] { opacity:.4; pointer-events:none; }
+  .del { color:#a44; }
+  form { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px;
+         margin-top:10px; display:grid; gap:14px; font-family:system-ui,sans-serif;
+         grid-template-columns:1fr 1fr; }
+  form .full { grid-column:1/-1; }
+  label { display:flex; flex-direction:column; gap:5px; font-size:.72rem; letter-spacing:.5px;
+          text-transform:uppercase; color:var(--muted); }
+  input, select { font:inherit; font-size:1rem; padding:9px; border:1px solid var(--line);
+          border-radius:8px; background:var(--bg); color:var(--ink); }
+  form button[type=submit] { background:var(--accent); color:#fff; border-color:var(--accent); font-size:1rem; padding:11px; }
+  details > summary { cursor:pointer; font-family:system-ui,sans-serif; color:var(--accent); margin-top:8px; }
+  .hint { font-family:system-ui,sans-serif; font-size:.8rem; color:var(--muted); }
+  .empty { color:var(--muted); font-family:system-ui,sans-serif; padding:20px 0; }
+</style>
+</head><body>
+<header>
+  <h1>📖 Storyteller</h1>
+  <div class="sub">Illustrated read-aloud editions — upload a book, then read it to your kids.</div>
+</header>
+<main>
+  <div id="books" class="grid"></div>
+
+  <details id="uploader">
+    <summary>+ Add a book</summary>
+    <form id="form">
+      <label class="full">Book file (PDF or EPUB)
+        <input type="file" name="file" accept=".pdf,.epub" required></label>
+      <label>Title <input name="title" placeholder="(optional — kept generic if blank)"></label>
+      <label>Author <input name="author" placeholder="(optional)"></label>
+      <label>Art style <select name="style" id="style"></select></label>
+      <label>Illustration every… <select name="words_per_page">
+        <option value="100">~100 words (little kids — most pictures)</option>
+        <option value="200" selected>~200 words</option>
+        <option value="350">~350 words (older kids — fewer pictures)</option>
+        <option value="500">~500 words</option>
+      </select></label>
+      <label>Audience age <input name="age" value="5"></label>
+      <div class="full hint">Uploading runs the initial pass: it reads the whole book, builds the
+        character roster (with reference art), and splits it into read-aloud pages. Page pictures are
+        then drawn as you read.</div>
+      <button class="full" type="submit">Upload &amp; process</button>
+    </form>
+  </details>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const PROCESSING = ["queued","extracting","registry","roster","segmenting","processing","warming"];
+
+async function loadStyles(){
+  const styles = await (await fetch("/api/styles")).json();
+  $("#style").innerHTML = styles.map(s =>
+    `<option value="${s.key}">${s.label}</option>`).join("");
+}
+
+function card(b){
+  const processing = PROCESSING.includes(b.status);
+  const pct = b.num_pages ? Math.round((b.position+1)/b.num_pages*100) : 0;
+  const ready = b.status === "ready";
+  const failed = b.status === "failed";
+  return `<div class="card" data-id="${b.id}">
+    <span class="pill">${(b.style||"").replace(/_/g,' ')}</span>
+    <h3>${b.title}</h3>
+    ${b.author ? `<div class="auth">${b.author}</div>` : ""}
+    <div class="status">${
+      failed ? "⚠ " + (b.detail||"failed")
+      : processing ? "⏳ " + (b.detail||b.status)
+      : ready ? `${b.num_pages} pages · ${b.scenes_done} drawn`
+      : b.status}</div>
+    ${ready ? `<div class="barwrap"><div class="bar" style="width:${pct}%"></div></div>` : ""}
+    <div class="row">
+      <a class="btn go" href="/read/${b.id}" aria-disabled="${ready?'false':'true'}">
+        ${b.position>0 && ready ? "Continue" : "Read"}</a>
+      <button class="del" onclick="del(${b.id},event)">✕</button>
+    </div>
+  </div>`;
+}
+
+async function refresh(){
+  const books = await (await fetch("/api/books")).json();
+  const el = $("#books");
+  el.innerHTML = books.length ? books.map(card).join("")
+    : `<div class="empty">No books yet — add one below.</div>`;
+  if (books.some(b => PROCESSING.includes(b.status))) setTimeout(refresh, 2500);
+}
+
+async function del(id, e){
+  e.preventDefault(); e.stopPropagation();
+  if (!confirm("Remove this book and its art?")) return;
+  await fetch("/api/books/"+id, {method:"DELETE"});
+  refresh();
+}
+
+$("#form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const btn = e.target.querySelector("button[type=submit]");
+  btn.disabled = true; btn.textContent = "Uploading…";
+  const fd = new FormData(e.target);
+  const r = await fetch("/api/books", {method:"POST", body:fd});
+  btn.disabled = false; btn.textContent = "Upload & process";
+  if (!r.ok) { alert("Upload failed: " + await r.text()); return; }
+  e.target.reset();
+  $("#uploader").open = false;
+  refresh();
+});
+
+loadStyles();
+refresh();
+</script>
+</body></html>

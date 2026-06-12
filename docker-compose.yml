@@ -1,0 +1,14 @@
+services:
+  storyteller:
+    build: .
+    ports:
+      - "${STORY_PORT:-8000}:8000"
+    env_file:
+      - .env          # must define GEMINI_API_KEY=...
+    environment:
+      STORY_PREFETCH: "4"          # pages to draw ahead while reading
+      STORY_WARM_PAGES: "2"        # first pages drawn during import (instant open)
+      STORY_GEN_CONCURRENCY: "3"   # max simultaneous image generations
+    volumes:
+      - ./data:/data  # sqlite DB + scratch work dirs + logs persist here
+    restart: unless-stopped

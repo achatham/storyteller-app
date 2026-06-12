@@ -1,0 +1,14 @@
+.git
+.env
+output/
+data/
+stories/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+render_styles.sh
+downscale_images.py
+serve.py
+run_*.sh
+finalize_*.sh

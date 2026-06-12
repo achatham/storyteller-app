@@ -31,9 +31,6 @@ PRICING = {
 }
 DEFAULT_PRICE = {"in": 0.0, "out": 0.0}
 
-# which models are the "image" side vs the "text" side, for the split report
-IMAGE_MODELS = {"gemini-3-pro-image-preview"}
-
 _lock = threading.Lock()
 
 
@@ -104,7 +101,9 @@ def report(run: str | None = None) -> str:
         scost = cost_for(model, sin, sout)
         calls += n
         lines.append(f"{model:<30} {kind:<9} {n:>5} {sin:>10,} {sout:>10,} {simg:>5} {scost:>9.4f}")
-        if model in IMAGE_MODELS:
+        # split on what the call actually was (kind=image for every image model,
+        # pro or flash), not on a model allow-list that drifts as models change
+        if kind == "image":
             img_cost += scost; img_in += sin; img_out += sout; img_n += simg
         else:
             text_cost += scost; text_in += sin; text_out += sout

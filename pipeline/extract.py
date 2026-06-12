@@ -30,8 +30,18 @@ def _xhtml_to_text(raw: str) -> str:
     return raw.strip()
 
 
+def _norm(base: str, src: str) -> str:
+    """Resolve a TOC/spine href to a normalized archive path (no #fragment)."""
+    src = src.split("#", 1)[0]
+    return os.path.normpath(os.path.join(base, src)).replace(os.sep, "/")
+
+
+def _clean_title(raw: str) -> str:
+    return re.sub(r"\s+", " ", _html.unescape(re.sub(r"<[^>]+>", "", raw))).strip()
+
+
 def _epub_units(path: Path) -> list[tuple[str, str]]:
-    """Ordered (href, text) for every spine document in the epub."""
+    """Ordered (archive_path, text) for every spine document in the epub."""
     z = zipfile.ZipFile(str(path))
     container = z.read("META-INF/container.xml").decode("utf-8", "ignore")
     opf = re.search(r'full-path="([^"]+)"', container).group(1)
@@ -49,26 +59,73 @@ def _epub_units(path: Path) -> list[tuple[str, str]]:
         h = href.get(sid, "")
         if not h:
             continue
-        p = os.path.normpath(os.path.join(base, h)).replace(os.sep, "/")
+        p = _norm(base, h)
         try:
             raw = z.read(p).decode("utf-8", "ignore")
         except KeyError:
             continue
-        units.append((h, _xhtml_to_text(raw)))
+        units.append((p, _xhtml_to_text(raw)))
     return units
 
 
-def epub_chapters(path: Path = PDF) -> list[str]:
-    """The book's main story chapters, skipping cover/toc/copyright matter.
+def _epub_toc_titles(path: Path) -> dict[str, str]:
+    """Map archive_path -> human chapter title, from the epub's NCX (or nav)."""
+    z = zipfile.ZipFile(str(path))
+    names = z.namelist()
+    titles: dict[str, str] = {}
+    ncx = next((n for n in names if n.lower().endswith(".ncx")), None)
+    if ncx:
+        base = os.path.dirname(ncx)
+        doc = z.read(ncx).decode("utf-8", "ignore")
+        for t, s in re.findall(
+                r"<navPoint[^>]*>.*?<text>(.*?)</text>.*?<content[^>]*src=\"([^\"]+)\"",
+                doc, re.S):
+            titles.setdefault(_norm(base, s), _clean_title(t))
+        return titles
+    nav = next((n for n in names if "nav" in n.lower()
+                and n.lower().endswith((".xhtml", ".html"))), None)
+    if nav:
+        base = os.path.dirname(nav)
+        doc = z.read(nav).decode("utf-8", "ignore")
+        for s, t in re.findall(r"<a[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>", doc, re.S):
+            titles.setdefault(_norm(base, s), _clean_title(t))
+    return titles
 
-    Prefer spine hrefs that look like chapters; if none do, fall back to spine
-    documents long enough to be real chapters (front/back matter is short).
-    """
+
+# Titles (or filenames) that mark non-story front/back matter to skip.
+_FRONT_MATTER = re.compile(
+    r"\b(cover|praise|also by|title page|copyright|dedication|contents|"
+    r"introduction|acknowledg|about the author|about the publisher|foreword|"
+    r"preface|index|colophon|newsletter|teaser|excerpt|advertisement|adcard)\b",
+    re.I)
+
+
+def epub_chapters_titled(path: Path = PDF, min_words: int = 150) -> list[tuple[str, str]]:
+    """The book's real story chapters as (title, text), in reading order, with
+    cover/copyright/intro/etc. front+back matter skipped.
+
+    Titles come from the epub's table of contents (NCX/nav); front matter is
+    dropped by title keyword or by being too short to be a chapter."""
     units = _epub_units(path)
-    chaps = [t for h, t in units if re.search(r"chapter", h, re.I)]
-    if not chaps:
-        chaps = [t for h, t in units if len(t.split()) >= 800]
-    return chaps
+    toc = _epub_toc_titles(path)
+    out, n = [], 0
+    for p, text in units:
+        title = toc.get(p) or ""
+        if _FRONT_MATTER.search(title) or _FRONT_MATTER.search(p):
+            continue
+        if len(text.split()) < min_words:
+            continue
+        n += 1
+        if not title:
+            first = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+            title = (first[:60] or f"Chapter {n}")
+        out.append((title, text))
+    return out
+
+
+def epub_chapters(path: Path = PDF) -> list[str]:
+    """Texts of the book's real story chapters (front/back matter skipped)."""
+    return [t for _title, t in epub_chapters_titled(path)]
 
 
 def raw_pages(pdf_path: Path, first: int, last: int) -> list[str]:

@@ -4,6 +4,9 @@
 # generated output (registry, sheets, scenes, books, readers, cost db, logs)
 output/
 
+# docker volume: sqlite db (books + art), scratch work dirs, logs
+data/
+
 # input books are copyrighted; keep only the public-domain A Christmas Carol
 stories/*
 !stories/Dickens_Carol.pdf
