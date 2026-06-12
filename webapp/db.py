@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS books (
     status        TEXT,        -- queued|extracting|registry|roster|segmenting|ready|failed
     detail        TEXT,        -- human progress detail / error message
     num_pages     INTEGER DEFAULT 0,
+    seg_ver       INTEGER DEFAULT 0,   -- bumps on re-segmentation (cache-busts image URLs)
     created_at    REAL
 );
 CREATE TABLE IF NOT EXISTS book_files (
@@ -99,6 +100,10 @@ def conn() -> sqlite3.Connection:
 def init():
     with conn() as c:
         c.executescript(SCHEMA)
+        # migrate older DBs that predate columns added above
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(books)")}
+        if "seg_ver" not in cols:
+            c.execute("ALTER TABLE books ADD COLUMN seg_ver INTEGER DEFAULT 0")
 
 
 # ---------------- books ----------------
@@ -173,6 +178,8 @@ def clear_segmentation(book_id):
         c.execute("DELETE FROM pages WHERE book_id=?", (book_id,))
         c.execute("DELETE FROM chapters WHERE book_id=?", (book_id,))
         c.execute("DELETE FROM scenes WHERE book_id=?", (book_id,))
+        # bump the segmentation version so cached image URLs (?v=) refresh
+        c.execute("UPDATE books SET seg_ver = seg_ver + 1 WHERE id=?", (book_id,))
 
 
 def get_book_file(book_id) -> tuple[str, bytes] | None:

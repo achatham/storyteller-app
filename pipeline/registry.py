@@ -23,7 +23,7 @@ import json
 
 from . import gem
 from .extract import full_story_text
-from .config import REGISTRY, BOOK_REF, BOOK_TITLE
+from .config import REGISTRY, BOOK_REF, BOOK_TITLE, REGISTRY_MODEL
 
 DISCOVER_PROMPT = """You are cataloguing every illustration-worthy entity in {book_ref}, \
 to keep a fully-illustrated children's read-aloud edition visually consistent.
@@ -91,7 +91,7 @@ Resolve EVERY variant listed on the entity (echo each variant id). If the entity
 
 def discover(book_text: str) -> list[dict]:
     prompt = DISCOVER_PROMPT.format(book_ref=BOOK_REF, book=book_text)
-    data = gem.text_json(prompt)
+    data = gem.text_json(prompt, model=REGISTRY_MODEL)
     return data.get("entities", [])
 
 
@@ -102,7 +102,7 @@ def expand_one(entity: dict) -> dict:
         book_ref=BOOK_REF, entity=json.dumps(stub, ensure_ascii=False))
     out = dict(entity)
     try:
-        rich = gem.text_json(prompt)
+        rich = gem.text_json(prompt, model=REGISTRY_MODEL)
     except Exception as e:  # noqa: BLE001 -- never let one entity sink the whole summary
         print(f"[registry] expand FAILED for {entity.get('id')}: "
               f"{type(e).__name__}: {str(e)[:120]} -- using canonical_details fallback", flush=True)

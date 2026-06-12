@@ -3,18 +3,21 @@ with neutral physical descriptions (for character sheets), and a segmentation
 into read-aloud spreads each with an illustration brief.
 """
 import json
+import re
 
 from . import gem
 from .config import (OUT, LABEL, ART_STYLE, VIOLENCE_POLICY, REGISTRY,
-                     BOOK_REF, TITLE_OUT, AUDIENCE_AGE, WORDS_PER_PAGE)
+                     BOOK_REF, TITLE_OUT, AUDIENCE_AGE, WORDS_PER_PAGE,
+                     ANALYZE_MODEL)
 
 ANALYZE_PROMPT = """You are the art director and adapter for an illustrated read-aloud edition of \
 {book_ref} (section: {label}), for a {age}-year-old audience.
 
-You are given a passage of the book's raw text. NOTE: it was extracted from a PDF and is \
-MISSING MANY SPACES (e.g. "hiseyes" = "his eyes", "theone" = "the one"). When you \
-quote text, RESTORE correct spacing and punctuation, but do not otherwise change \
-the author's wording.
+You are given a passage of the book's raw text. NOTE: it may be missing some spaces \
+(e.g. "hiseyes" = "his eyes"). You do NOT need to fix that: you only mark where each \
+read-aloud page BEGINS, and the page's actual text is taken verbatim from the book by \
+code. When you give a page's start_anchor, copy those words EXACTLY as they appear in \
+the passage below (same spelling/spacing), so the code can find that spot.
 
 GLOBAL ART STYLE (apply to every illustration):
 {art_style}
@@ -52,7 +55,7 @@ Produce a JSON object (and nothing else) with this exact shape:
     {{
       "id": 1,
       "title": "<2-5 word scene title>",
-      "read_text": "<the COMPLETE, VERBATIM run of original text this page covers, spacing/punctuation restored. About {words_per_page} words. Do NOT summarize, paraphrase, or omit -- this is read aloud as the real book. Consecutive pages must join back into the full passage with no gaps and no overlaps.>",
+      "start_anchor": "<the FIRST 8-12 words at the start of this page, copied EXACTLY (verbatim, same spelling and spacing) from the passage below. This only marks where the page begins; its full text is sliced from the book automatically. The FIRST page's anchor MUST be the very first words of the passage. Anchors must be in reading order and each must be unique enough to locate.>",
       "cast": [
         {{"entity_id": "<id from this section's cast>", "variant_id": "<its variant id>"}}
       ],
@@ -68,7 +71,7 @@ Guidance:
   * If it matches a registry entity -> from_registry=true, reuse its id, choose the best variant_id, and leave appearance/sheet_prompt empty.
   * If it is a real character in this passage that is NOT in the registry (a locally-important minor character), from_registry=false, give it a new id, variant_id "default", and fill in appearance + sheet_prompt yourself.
 - Each spread's "cast" lists the ids+variants actually visible in that illustration (a subset of the section cast).
-- CADENCE: split the passage into about {target_pages} pages of ~{words_per_page} words each (one illustration per page), in reading order, tiling the ENTIRE passage start to finish with no gaps/overlaps. Choose page breaks at natural beats so each page is one strong, distinct, illustratable moment, but keep every page close to the target length.
+- CADENCE: split the passage into about {target_pages} pages of ~{words_per_page} words each (one illustration per page), in reading order, covering the ENTIRE passage start to finish with no gaps/overlaps. Give ONLY each page's start_anchor (not the page text). Choose page breaks at natural beats so each page is one strong, distinct, illustratable moment, but keep every page close to the target length.
 - For passages with no clearly visible characters (interludes, disembodied dialogue between unseen adults), use an evocative NON-LITERAL illustration (atmospheric setting, meaningful object) and an empty or setting-only cast.
 - This passage may start mid-story: just illustrate what happens here.
 
@@ -90,7 +93,56 @@ def render_registry(registry: dict) -> str:
     return "\n".join(lines)
 
 
-def build_bible(chapter_text: str, registry: dict) -> dict:
+def _find_anchor(text: str, anchor: str, start: int) -> int | None:
+    """Locate where `anchor` (a short verbatim snippet the model copied from the
+    text) begins, at/after `start`. Matches on word tokens with flexible
+    separators so odd whitespace/punctuation/case don't defeat it."""
+    toks = re.findall(r"\w+", anchor)[:8]
+    if not toks:
+        return None
+    pat = re.compile(r"\W+".join(re.escape(t) for t in toks), re.I)
+    m = pat.search(text, start)
+    return m.start() if m else None
+
+
+def apply_anchors(chapter_text: str, bible: dict) -> dict:
+    """Turn each spread's start_anchor into verbatim read_text by slicing the
+    real chapter text between consecutive anchors. The whole chapter is always
+    covered start-to-finish; a page whose anchor can't be found is merged into
+    the previous page (so no text is ever dropped)."""
+    spreads = bible.get("spreads") or []
+    if not spreads:   # model gave no pages -> keep the chapter as a single page
+        bible["spreads"] = [{"id": 1, "title": bible.get("chapter", ""),
+                             "read_text": chapter_text.strip(), "cast": [],
+                             "setting": "", "illustration_brief": "",
+                             "content_note": "safe"}]
+        return bible
+    located: list[tuple[int, dict]] = []
+    cursor = 0
+    for s in spreads:
+        if not located:                       # first page = start of the chapter
+            located.append((0, s))
+            continue
+        off = _find_anchor(chapter_text, s.get("start_anchor", ""), cursor)
+        if off is not None and off > cursor:
+            # the anchor matches the first WORD; pull the break back over an
+            # opening quote/bracket glued to it so dialogue keeps its quote mark
+            while off > cursor + 1 and chapter_text[off - 1] in "“‘\"'(«¿¡":
+                off -= 1
+            located.append((off, s))
+            cursor = off
+        # else: anchor not found / out of order -> drop this break, merge forward
+    for i, (off, s) in enumerate(located):
+        end = located[i + 1][0] if i + 1 < len(located) else len(chapter_text)
+        s["read_text"] = chapter_text[off:end].strip()
+        s.pop("start_anchor", None)
+    bible["spreads"] = [s for _, s in located]
+    for i, s in enumerate(bible["spreads"], 1):
+        s["id"] = i
+    return bible
+
+
+def build_bible(chapter_text: str, registry: dict, model: str = ANALYZE_MODEL) -> dict:
     words = len(chapter_text.split())
     target_pages = max(1, round(words / WORDS_PER_PAGE))
     prompt = ANALYZE_PROMPT.format(
@@ -105,7 +157,8 @@ def build_bible(chapter_text: str, registry: dict) -> dict:
         registry=render_registry(registry),
         chapter=chapter_text,
     )
-    return gem.text_json(prompt)
+    bible = gem.text_json(prompt, model=model)
+    return apply_anchors(chapter_text, bible)
 
 
 def main():

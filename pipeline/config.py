@@ -118,6 +118,15 @@ PAGE_IMAGE_MODEL = os.environ.get("STORY_PAGE_IMAGE_MODEL", "gemini-3.1-flash-im
 # general default (used when a caller doesn't specify) = the page model
 IMAGE_MODEL = os.environ.get("STORY_IMAGE_MODEL", PAGE_IMAGE_MODEL)
 TEXT_MODEL = os.environ.get("STORY_TEXT_MODEL", "gemini-3.5-flash")
+# Per-step text models (default to TEXT_MODEL). Low-sensitivity steps -- image
+# critique and the chapter-skeleton classification -- can be pointed at a cheaper
+# model (e.g. gemini-3.1-flash-lite) without much quality risk. Segmentation now
+# only emits page-start anchors (not verbatim text), so it is much cheaper and
+# also tolerant of a lighter model; registry/discovery is identity-critical.
+ANALYZE_MODEL = os.environ.get("STORY_ANALYZE_MODEL", TEXT_MODEL)
+REGISTRY_MODEL = os.environ.get("STORY_REGISTRY_MODEL", TEXT_MODEL)
+CRITIQUE_MODEL = os.environ.get("STORY_CRITIQUE_MODEL", TEXT_MODEL)
+CHAPTER_MODEL = os.environ.get("STORY_CHAPTER_MODEL", TEXT_MODEL)
 MAX_REFS = int(os.environ.get("STORY_MAX_REFS", "4"))
 # Gemini image_size is a discrete enum: "1K", "2K", "4K". Each step doubles
 # each dimension. "1K" (~1280px long edge) keeps files small for remote loading.

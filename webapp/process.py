@@ -69,8 +69,9 @@ def _epub_skeleton():
 def _llm_chapter_units(units, skel):
     """Ask the text model which spine docs are real chapters; map back to texts."""
     from pipeline import gem
+    from pipeline.config import CHAPTER_MODEL
     data = gem.text_json(CHAPTER_PLAN_PROMPT.format(
-        skeleton=json.dumps(skel, ensure_ascii=False)))
+        skeleton=json.dumps(skel, ensure_ascii=False)), model=CHAPTER_MODEL)
     out = []
     for c in data.get("chapters", []):
         i = c.get("i")

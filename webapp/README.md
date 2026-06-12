@@ -50,11 +50,23 @@ Reads `GEMINI_API_KEY` from `.env` (same as the CLI pipeline).
 | `GEMINI_API_KEY` | — | required |
 | `STORY_APP_DB` | `output/storyteller.db` | main SQLite DB (books + art) |
 | `STORY_WARM_PAGES` | `2` | first pages drawn during import (instant open) |
-| `STORY_PREFETCH` | `2` | pages drawn ahead while reading |
+| `STORY_PREFETCH` | `4` | pages drawn ahead while reading |
 | `STORY_GEN_CONCURRENCY` | `3` | max simultaneous image generations |
 | `STORY_SHEET_IMAGE_MODEL` | `gemini-3-pro-image-preview` | roster sheets |
 | `STORY_PAGE_IMAGE_MODEL` | `gemini-3.1-flash-image` | page scenes |
+| `STORY_TEXT_MODEL` | `gemini-3.5-flash` | default for all text steps |
+| `STORY_ANALYZE_MODEL` | = text model | segmentation (page anchors + briefs) |
+| `STORY_REGISTRY_MODEL` | = text model | entity discovery/expansion (identity-critical) |
+| `STORY_CRITIQUE_MODEL` | = text model | image quality scoring (low-sensitivity) |
+| `STORY_CHAPTER_MODEL` | = text model | chapter skeleton classification (low-sensitivity) |
 
 Per-book choices (art style, illustration cadence, audience age) are set in the
-upload form. Token/image costs are still recorded to `costs.db`
-(`python -m pipeline.costs`).
+upload form. Token/image costs are recorded to `costs.db` (`python -m pipeline.costs`).
+
+**Cost note.** Segmentation no longer makes the model retype the book: it returns
+only each page's *start anchor* (a short verbatim snippet) and the page text is
+sliced from the source in code (exact, no hallucination). Because that step is now
+low-stakes, the low-sensitivity text steps can run on a cheaper model — e.g. set
+`STORY_ANALYZE_MODEL`, `STORY_CRITIQUE_MODEL`, and `STORY_CHAPTER_MODEL` to
+`gemini-3.1-flash-lite` for ~80% off the text spend. Keep `STORY_REGISTRY_MODEL`
+on the stronger model (it pins character identity for the whole book).

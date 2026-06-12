@@ -197,6 +197,7 @@ def api_book(book_id: int):
         "id": b["id"], "title": b["title"] or b["filename"] or "Untitled",
         "author": b["author"], "style": b["style"], "status": b["status"],
         "detail": b["detail"], "num_pages": b["num_pages"],
+        "seg_ver": b["seg_ver"] if "seg_ver" in b.keys() else 0,
         "position": db.get_progress(book_id),
         "chapters": db.get_chapters(book_id),
         "scenes_done": db.scene_progress(book_id).get("done", 0),

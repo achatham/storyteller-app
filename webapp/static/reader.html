@@ -127,6 +127,7 @@ async function boot(){
     return;
   }
   DATA.title = meta.title;
+  DATA.segVer = meta.seg_ver || 0;
   DATA.chapters = meta.chapters || [];
   DATA.pages = await (await fetch(API + "/pages")).json();
   state.i = Math.min(meta.position || 0, DATA.pages.length - 1);
@@ -159,7 +160,7 @@ function render(){
   $("#spinmsg").textContent = "drawing this page…";
   img.onload = () => { if (req===curReq){ img.classList.remove("loading"); spin.classList.add("hidden"); } };
   img.onerror = () => { if (req===curReq){ $("#spinmsg").textContent = "couldn't draw this one — tap to retry"; } };
-  img.src = API + "/pages/" + p.idx + "/image";
+  img.src = API + "/pages/" + p.idx + "/image?v=" + DATA.segVer;
   img.alt = p.title;
 
   const ch = DATA.chapters.find(c => c.first_page <= state.i &&

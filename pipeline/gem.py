@@ -13,7 +13,8 @@ from google import genai
 from google.genai import types
 
 from . import costs
-from .config import IMAGE_SIZE, IMAGE_MODEL, TEXT_MODEL, SHEET_IMAGE_MODEL, PAGE_IMAGE_MODEL
+from .config import (IMAGE_SIZE, IMAGE_MODEL, TEXT_MODEL, SHEET_IMAGE_MODEL,
+                     PAGE_IMAGE_MODEL, CRITIQUE_MODEL)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -147,7 +148,8 @@ def generate_image(prompt: str, refs: list[Path] | None = None, out_path: Path |
     return None
 
 
-def critique_image(image_path: Path, brief: str, schema: dict | None = None) -> dict:
+def critique_image(image_path: Path, brief: str, schema: dict | None = None,
+                   model: str = CRITIQUE_MODEL) -> dict:
     """Vision-model critique of a generated image against its brief."""
     from PIL import Image
     contents = [brief, Image.open(image_path)]
@@ -158,8 +160,8 @@ def critique_image(image_path: Path, brief: str, schema: dict | None = None) -> 
     )
 
     def _go():
-        resp = _client.models.generate_content(model=TEXT_MODEL, contents=contents, config=cfg)
-        _record_usage(resp, TEXT_MODEL, "critique")
+        resp = _client.models.generate_content(model=model, contents=contents, config=cfg)
+        _record_usage(resp, model, "critique")
         return _coerce_json(resp.text)
 
     return _retry(_go, what="critique")
