@@ -23,7 +23,7 @@ DB = Path(os.environ.get("STORY_COST_DB", str(ROOT / "output" / "costs.db")))
 # counts, so editing these rates retroactively re-prices all past usage.
 PRICING = {
     "gemini-3.5-flash":            {"in": 1.50, "out": 9.00},    # text + critique
-    "gemini-3.1-flash-lite":       {"in": 0.50, "out": 3.00},    # ESTIMATE -- verify rate
+    "gemini-3.1-flash-lite":       {"in": 0.25, "out": 1.50},    # text (official)
     "gemini-3.1-pro-preview":      {"in": 2.00, "out": 12.00},
     "gemini-3-pro-image-preview":  {"in": 2.00, "out": 120.00},  # pro image: ~$0.134/1K-2K img
     "gemini-3.1-flash-image":      {"in": 0.50, "out": 60.00},   # flash image: ~$0.067/1K img

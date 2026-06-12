@@ -46,7 +46,19 @@ def _ensure_sheet(book_id, member, style_text) -> bytes | None:
               f"{appearance}\nSingle subject only, plain soft neutral background, "
               "even lighting, no text labels.")
     try:
-        data = _gen_to_bytes(prompt, None, SHEET_IMAGE_MODEL, aspect)
+        with tempfile.TemporaryDirectory() as td:
+            # pin identity: if another variant of THIS entity is already drawn,
+            # attach it so the same face/build carries across the character's looks
+            refs = None
+            sib = db.get_any_sheet(book_id, eid, exclude_variant_id=vid)
+            if sib:
+                sp = Path(td) / "sibling.webp"
+                sp.write_bytes(sib)
+                refs = [sp]
+                prompt += ("\n\nA reference image of THIS SAME character (a different "
+                           "outfit/moment) is attached. Keep the SAME facial identity, "
+                           "hair, and build; change only the clothing/age/form described above.")
+            data = _gen_to_bytes(prompt, refs, SHEET_IMAGE_MODEL, aspect)
     except Exception as ex:  # noqa: BLE001
         print(f"[scene] sheet {eid}/{vid} failed: {ex}", flush=True)
         return None

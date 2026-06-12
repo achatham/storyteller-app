@@ -81,22 +81,6 @@ def _llm_chapter_units(units, skel):
     return out
 
 
-class Progress:
-    """Thread-safe aggregator so concurrently-running stages (roster image gen +
-    segmentation) share one status line instead of clobbering each other."""
-
-    def __init__(self, book_id):
-        self._book_id = book_id
-        self._lock = threading.Lock()
-        self._parts: dict[str, str] = {}
-
-    def update(self, key, msg):
-        with self._lock:
-            self._parts[key] = msg
-            db.set_status(self._book_id, "processing",
-                          " · ".join(self._parts[k] for k in sorted(self._parts)))
-
-
 def chunk_text(text: str, size: int = 1800) -> list[str]:
     """Split a long text into ~`size`-word chunks at paragraph boundaries, so a
     chapterless PDF still segments into bounded analyze calls (the model's output
@@ -137,65 +121,6 @@ def chapter_units() -> list[tuple[str, str]]:
         return extract.epub_chapters_titled(PDF)
     body = extract.full_story_text()
     return [(f"Part {i + 1}", t) for i, t in enumerate(chunk_text(body))]
-
-
-def gen_roster(book_id, registry, workers: int = 4, report=None):
-    """A canonical reference sheet image for every registry entity/variant, drawn
-    in parallel (the Gemini client, the shared Budget, and per-row DB writes are
-    all thread-safe; each sheet writes a distinct file/row)."""
-    from pipeline import gem, sheets
-
-    def emit(done, n):
-        msg = f"roster {done}/{n}"
-        report("roster", msg) if report else db.set_status(book_id, "roster", msg)
-
-    # flatten to one task per (entity, variant)
-    tasks = []
-    for e in registry.get("entities", []):
-        variants = e.get("variants") or [{
-            "id": "default",
-            "appearance": e.get("base_appearance", ""),
-            "sheet_prompt": e.get("base_sheet_prompt", ""),
-        }]
-        entity_arg = {
-            "id": e["id"], "type": e.get("type", "character"),
-            "base_appearance": e.get("base_appearance", ""),
-            "base_sheet_prompt": e.get("base_sheet_prompt", ""),
-        }
-        for v in variants:
-            variant_arg = {
-                "id": v["id"],
-                "appearance": v.get("appearance") or e.get("base_appearance", ""),
-                "sheet_prompt": v.get("sheet_prompt") or e.get("base_sheet_prompt", ""),
-            }
-            tasks.append((e["id"], v["id"], entity_arg, variant_arg))
-
-    budget = gem.Budget(500)
-    done = 0
-    lock = threading.Lock()
-
-    def draw(task):
-        nonlocal done
-        eid, vid, entity_arg, variant_arg = task
-        if db.has_sheet(book_id, eid, vid):   # resume: don't redraw a saved sheet
-            with lock:
-                done += 1
-                emit(done, len(tasks))
-            return
-        try:
-            path = sheets.ensure_sheet(entity_arg, variant_arg, budget)
-        except Exception as ex:  # noqa: BLE001 -- one bad sheet shouldn't sink the roster
-            print(f"[roster] sheet {eid}/{vid} failed: {ex}", flush=True)
-            path = None
-        if path and path.exists():
-            db.save_sheet(book_id, eid, vid, path.read_bytes())
-            with lock:
-                done += 1
-                emit(done, len(tasks))
-
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        list(ex.map(draw, tasks))
-    return done
 
 
 def segment(book_id, registry, workers: int = 4, report=None):
@@ -271,8 +196,8 @@ def prewarm(book_id, k, workers: int = 2):
 
 def run(book_id: int):
     """Process a book end to end. Safe to re-run after an interrupted import:
-    the (expensive) registry + roster are reused from the DB; only the cheaper
-    text segmentation is redone from scratch."""
+    the (expensive) registry is reused from the DB; segmentation is redone from
+    scratch; roster sheets are drawn lazily as pages are rendered."""
     from pipeline import registry as registry_mod
 
     # 1. registry -- reuse if a previous run already saved one
@@ -284,23 +209,19 @@ def run(book_id: int):
         registry = registry_mod.build()
         db.save_registry(book_id, registry)
 
-    # 2 + 3. roster (pro image model) and segmentation (text model) both depend
-    # only on the registry, not on each other, so run them concurrently. gen_roster
-    # skips sheets already in the DB; segmentation is redone wholesale (global page
-    # numbering depends on every chapter, so a partial run can't be stitched).
-    db.set_status(book_id, "processing", "drawing roster + segmenting")
+    # 2. segmentation (global page numbering depends on every chapter, so it is
+    # redone wholesale -- text-only, cheap). Roster sheets are NOT drawn up front:
+    # they are generated lazily when a page that needs them is rendered (and the
+    # warm step below draws the first pages' sheets), so we never pay for a
+    # variant no read page uses.
+    db.set_status(book_id, "segmenting", "splitting into read-aloud pages")
     db.clear_segmentation(book_id)
-    progress = Progress(book_id)
-    roster_workers = int(os.environ.get("STORY_ROSTER_WORKERS", "4"))
-    segment_workers = int(os.environ.get("STORY_SEGMENT_WORKERS", "4"))
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        f_roster = ex.submit(gen_roster, book_id, registry, roster_workers, progress.update)
-        f_segment = ex.submit(segment, book_id, registry, segment_workers, progress.update)
-        n = f_segment.result()    # re-raises if segmentation crashed
-        f_roster.result()         # re-raises if the roster stage crashed
+    n = segment(book_id, registry,
+                workers=int(os.environ.get("STORY_SEGMENT_WORKERS", "4")))
     db.set_num_pages(book_id, n)
 
-    # 4. warm the first few page images so the book opens instantly
+    # 3. warm the first few page images (drawing just the roster sheets they need)
+    # so the book opens instantly.
     warm = min(int(os.environ.get("STORY_WARM_PAGES", "2")), n)
     if warm > 0:
         db.set_status(book_id, "warming", f"drawing first {warm} pages")

@@ -267,6 +267,20 @@ def get_sheet(book_id, entity_id, variant_id) -> bytes | None:
         return r["data"] if r else None
 
 
+def get_any_sheet(book_id, entity_id, exclude_variant_id=None) -> bytes | None:
+    """Any already-drawn sheet for this entity (optionally excluding one variant)
+    -- used as an identity reference when drawing another of its variants."""
+    with conn() as c:
+        if exclude_variant_id is not None:
+            r = c.execute("SELECT data FROM sheets WHERE book_id=? AND entity_id=? "
+                          "AND variant_id != ? LIMIT 1",
+                          (book_id, entity_id, exclude_variant_id)).fetchone()
+        else:
+            r = c.execute("SELECT data FROM sheets WHERE book_id=? AND entity_id=? "
+                          "LIMIT 1", (book_id, entity_id)).fetchone()
+        return r["data"] if r else None
+
+
 def has_sheet(book_id, entity_id, variant_id) -> bool:
     with conn() as c:
         r = c.execute("SELECT 1 FROM sheets WHERE book_id=? AND entity_id=? AND "

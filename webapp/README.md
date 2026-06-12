@@ -30,16 +30,19 @@ Reads `GEMINI_API_KEY` from `.env` (same as the CLI pipeline).
 
 - **Upload** (`POST /api/books`) stores the file in SQLite and spawns
   `python -m webapp.process <id>`, which reuses the env-driven pipeline to:
-  extract text → build the entity **registry** → draw a canonical **roster**
-  reference sheet per entity/variant (pro image model) → **segment** each chapter
-  into read-aloud pages (roster and segmentation run concurrently). Finally it
-  **warms the first `STORY_WARM_PAGES` page images** (default 2) so the book opens
-  instantly. Status is written back to the DB and shown live on the hub.
+  extract text → build the entity **registry** (the character/variant catalogue,
+  on the strong text model at `thinking_level=high`) → **segment** each chapter
+  into read-aloud pages. Finally it **warms the first `STORY_WARM_PAGES` page
+  images** (default 2) so the book opens instantly. Status is shown live on the hub.
+- **Roster reference sheets are drawn lazily** (pro image model), the first time a
+  page needs a given character/variant — so a variant no read page uses is never
+  drawn. When a character already has one sheet, a sibling variant is attached as a
+  reference when drawing another, keeping the same face/build across their looks.
 - **Reading** the page image endpoint generates each scene on demand (flash image
   model, using the roster sheets as references) and **prefetches the next
-  `STORY_PREFETCH` pages** (default 2) in the background, so turning the page is
-  instant once you're moving. Duplicate work is coalesced by a per-page lock;
-  `STORY_GEN_CONCURRENCY` (default 3) caps simultaneous generations.
+  `STORY_PREFETCH` pages** (default 4) in the background; the reader also pre-loads
+  those into the browser cache, so turning the page is instant. Duplicate work is
+  coalesced by a per-page lock; `STORY_GEN_CONCURRENCY` (default 3) caps it.
 - **Progress** is stored server-side per book (`PUT /api/books/{id}/progress`), so
   opening a book picks up where you left off on any device.
 
