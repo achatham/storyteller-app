@@ -102,6 +102,36 @@ STYLES = {
         "few warm hues, textured screen-print look, stylized simplified shapes, "
         "charming and nostalgic. NOT photorealistic, NOT 3D render."
     ),
+    "crayon_childlike": (
+        "Bright crayon and colored-pencil children's drawing: waxy textured strokes, "
+        "vivid primary colors, simple joyful shapes with a hand-made charm, as if drawn "
+        "by a talented child. Warm and playful. NOT photorealistic, NOT 3D render."
+    ),
+    "cut_paper_collage": (
+        "Layered cut-paper collage illustration: torn and cut textured paper shapes "
+        "built up in collage, bold flat colors, visible paper edges and grain, playful "
+        "and tactile. Picture-book craft feel. NOT photorealistic, NOT 3D render."
+    ),
+    "gouache_matte": (
+        "Matte gouache picture-book painting: flat opaque rich color, soft visible "
+        "brushwork, gentle shapes, cozy and contemporary. Velvety and warm. NOT "
+        "photorealistic, NOT 3D render."
+    ),
+    "anime_storybook": (
+        "Gentle hand-painted anime storybook style: soft cel shading, expressive warm "
+        "eyes, lush painterly backgrounds, wonder and warmth (Ghibli-like). Friendly and "
+        "cinematic. NOT photorealistic, NOT harsh modern 3D anime."
+    ),
+    "pencil_sketch": (
+        "Soft colored-pencil and graphite storybook sketch: delicate hatching, gentle "
+        "tinted washes, tender hand-drawn lines, an intimate sketchbook feel. Quiet and "
+        "warm. NOT photorealistic, NOT 3D render."
+    ),
+    "claymation": (
+        "Charming handmade clay / stop-motion look: soft sculpted figures with gentle "
+        "fingerprints and rounded forms, warm studio lighting, cozy miniature sets. "
+        "Tactile and whimsical (Aardman-like). NOT slick CGI, NOT photorealistic."
+    ),
 }
 STYLE = os.environ.get("STORY_STYLE", "watercolor")
 if STYLE not in STYLES:

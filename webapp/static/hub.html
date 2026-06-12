@@ -41,6 +41,18 @@
   details > summary { cursor:pointer; font-family:system-ui,sans-serif; color:var(--accent); margin-top:8px; }
   .hint { font-family:system-ui,sans-serif; font-size:.8rem; color:var(--muted); }
   .empty { color:var(--muted); font-family:system-ui,sans-serif; padding:20px 0; }
+  .gallabel { font-size:.72rem; letter-spacing:.5px; text-transform:uppercase; color:var(--muted); margin-bottom:8px; }
+  .gallery { display:grid; grid-template-columns:repeat(auto-fill,minmax(140px,1fr)); gap:10px; }
+  .styletile { padding:0; border:2px solid var(--line); border-radius:12px; overflow:hidden;
+          background:var(--bg); cursor:pointer; display:flex; flex-direction:column; }
+  .styletile.sel { border-color:var(--accent); box-shadow:0 0 0 2px var(--accent); }
+  .thumbwrap { aspect-ratio:3/2; background:repeating-linear-gradient(45deg,#efe7d8,#efe7d8 8px,#e9e0cf 8px,#e9e0cf 16px);
+          display:flex; align-items:center; justify-content:center; }
+  .thumbwrap::after { content:"drawing…"; color:var(--muted); font-family:system-ui,sans-serif; font-size:.72rem; }
+  .styletile img { width:100%; height:100%; object-fit:cover; display:block; position:relative; z-index:1;
+          opacity:0; transition:opacity .35s; }
+  .styletile.thumbfail img { display:none; }
+  .tlabel { font-family:system-ui,sans-serif; font-size:.78rem; padding:6px 4px; text-transform:capitalize; }
 </style>
 </head><body>
 <header>
@@ -57,7 +69,11 @@
         <input type="file" name="file" accept=".pdf,.epub" required></label>
       <label>Title <input name="title" placeholder="(optional — kept generic if blank)"></label>
       <label>Author <input name="author" placeholder="(optional)"></label>
-      <label>Art style <select name="style" id="style"></select></label>
+      <div class="full">
+        <div class="gallabel">Art style — tap a sample to choose</div>
+        <input type="hidden" name="style" id="styleInput" required>
+        <div id="gallery" class="gallery"></div>
+      </div>
       <label>Illustration every… <select name="words_per_page">
         <option value="100">~100 words (little kids — most pictures)</option>
         <option value="200" selected>~200 words</option>
@@ -78,8 +94,20 @@ const PROCESSING = ["queued","extracting","registry","roster","segmenting","proc
 
 async function loadStyles(){
   const styles = await (await fetch("/api/styles")).json();
-  $("#style").innerHTML = styles.map(s =>
-    `<option value="${s.key}">${s.label}</option>`).join("");
+  $("#gallery").innerHTML = styles.map((s, i) => `
+    <button type="button" class="styletile" data-key="${s.key}" onclick="pickStyle('${s.key}')">
+      <span class="thumbwrap"><img loading="lazy" src="/api/styles/${s.key}/sample" alt="${s.label}"
+        onload="this.style.opacity=1"
+        onerror="this.closest('.styletile').classList.add('thumbfail')"></span>
+      <span class="tlabel">${s.label}</span>
+    </button>`).join("");
+  if (styles[0]) pickStyle(styles[0].key);   // default selection
+}
+
+function pickStyle(key){
+  $("#styleInput").value = key;
+  document.querySelectorAll(".styletile").forEach(t =>
+    t.classList.toggle("sel", t.dataset.key === key));
 }
 
 function card(b){

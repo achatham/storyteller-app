@@ -79,6 +79,11 @@ CREATE TABLE IF NOT EXISTS scenes (
     updated_at REAL,
     PRIMARY KEY (book_id, idx)
 );
+CREATE TABLE IF NOT EXISTS style_samples (
+    style_key  TEXT PRIMARY KEY,
+    mime       TEXT,
+    data       BLOB
+);
 CREATE TABLE IF NOT EXISTS progress (
     book_id    INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
     position   INTEGER,
@@ -343,6 +348,26 @@ def scene_progress(book_id) -> dict:
         rows = c.execute("SELECT status, COUNT(*) n FROM scenes WHERE book_id=? "
                          "GROUP BY status", (book_id,)).fetchall()
         return {r["status"]: r["n"] for r in rows}
+
+
+# ---------------- style samples (gallery thumbnails) ----------------
+
+def get_style_sample(style_key) -> bytes | None:
+    with conn() as c:
+        r = c.execute("SELECT data FROM style_samples WHERE style_key=?",
+                      (style_key,)).fetchone()
+        return r["data"] if r else None
+
+
+def save_style_sample(style_key, data, mime="image/webp"):
+    with conn() as c:
+        c.execute("INSERT OR REPLACE INTO style_samples(style_key,mime,data) "
+                  "VALUES (?,?,?)", (style_key, mime, data))
+
+
+def styles_with_samples() -> set:
+    with conn() as c:
+        return {r["style_key"] for r in c.execute("SELECT style_key FROM style_samples")}
 
 
 # ---------------- progress ----------------

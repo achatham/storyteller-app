@@ -56,7 +56,7 @@
               width:min(360px,88vw); display:flex; flex-direction:column; gap:16px;
               box-shadow:0 12px 40px rgba(0,0,0,.3); font-family:system-ui,sans-serif; }
   .menucard .bk { font-weight:bold; font-size:1.05rem; font-family:Georgia,serif; }
-  .menucard a.home { color:var(--muted); text-decoration:none; font-size:.85rem; }
+  #closebook { width:100%; color:#9b3d2e; border-color:#e3c0b0; background:#fbf1ec; }
   .menucard label { display:flex; flex-direction:column; gap:5px; font-size:.72rem;
                     letter-spacing:1px; text-transform:uppercase; color:var(--muted); }
   .menucard select { font:inherit; font-size:1rem; padding:9px; border:1px solid var(--line);
@@ -102,8 +102,8 @@
         <button id="next">Next &#8250;</button>
       </div>
       <button id="fs">&#9974; Full screen</button>
-      <a class="home" href="/">&#8592; Library</a>
-      <button id="close">Close</button>
+      <button id="closebook">&#10005; Close book</button>
+      <button id="close">Close menu</button>
     </div>
   </div>
 </div>
@@ -224,6 +224,11 @@ function toggleFS(){ try {
 function syncFS(){ $("#fs").textContent = (inFS() ? "⛶ Exit full screen" : "⛶ Full screen"); }
 if (!fsSupported()) $("#fs").style.display = "none";
 $("#fs").onclick = e => { e.stopPropagation(); toggleFS(); };
+$("#closebook").onclick = e => {       // exit the book -> back to the library
+  e.stopPropagation();
+  try { if (inFS()) (document.exitFullscreen || document.webkitExitFullscreen).call(document); } catch (_) {}
+  window.location.href = "/";
+};
 document.addEventListener("fullscreenchange", syncFS);
 document.addEventListener("webkitfullscreenchange", syncFS);
 

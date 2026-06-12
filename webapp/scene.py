@@ -40,6 +40,33 @@ def _style_text(style_key: str) -> str:
     return STYLES.get(style_key) or next(iter(STYLES.values()))
 
 
+# A fixed, evocative scene used to render one preview thumbnail per art style so
+# they can be compared side by side in the upload gallery.
+SAMPLE_SCENE = (
+    "Illustrate this scene for a children's picture book: a young child and a small "
+    "friendly red fox sit together on a grassy hill beneath a big oak tree at golden "
+    "sunset; the child holds an open storybook and points up at a butterfly. Warm, "
+    "gentle, full of wonder. Horizontal storybook composition.")
+
+
+def generate_style_sample(style_key: str) -> bytes | None:
+    """Render (once, cached in the DB) a preview thumbnail for one art style."""
+    style = STYLES.get(style_key)
+    if not style:
+        return None
+    data = db.get_style_sample(style_key)
+    if data:
+        return data
+    with _entity_lock(0, "sample:" + style_key):   # coalesce concurrent requests
+        data = db.get_style_sample(style_key)
+        if data:
+            return data
+        prompt = f"{style}\n\n{SAMPLE_SCENE}"
+        data = _gen_to_bytes(prompt, None, PAGE_IMAGE_MODEL, "3:2")
+        db.save_style_sample(style_key, data)
+        return data
+
+
 def _gen_to_bytes(prompt, refs, model, aspect) -> bytes:
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "img.webp"

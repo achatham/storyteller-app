@@ -155,7 +155,26 @@ def reader(book_id: int):
 
 @app.get("/api/styles")
 def api_styles():
-    return [{"key": k, "label": k.replace("_", " ")} for k in STYLES]
+    have = db.styles_with_samples()
+    return [{"key": k, "label": k.replace("_", " "), "sample_ready": k in have}
+            for k in STYLES]
+
+
+@app.get("/api/styles/{key}/sample")
+async def api_style_sample(key: str):
+    if key not in STYLES:
+        raise HTTPException(404, "unknown style")
+    data = await asyncio.to_thread(db.get_style_sample, key)
+    if not data:
+        try:
+            async with _sem:
+                data = await asyncio.to_thread(scene.generate_style_sample, key)
+        except Exception as ex:  # noqa: BLE001
+            raise HTTPException(503, f"sample generation failed: {str(ex)[:160]}")
+    if not data:
+        raise HTTPException(404, "no sample")
+    return Response(content=data, media_type="image/webp",
+                    headers={"Cache-Control": "public, max-age=31536000"})
 
 
 @app.get("/api/books")
