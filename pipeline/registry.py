@@ -52,8 +52,9 @@ Return JSON only: {{"entities": [ ... ]}}. Each entity:
 
 Rules:
 - DEDUPLICATE aggressively: one entity per real person/place/thing. Fold every alias in (e.g. a full name, a nickname, and a descriptive epithet that all refer to the same person) -- do not emit duplicates.
-- Include a "variants" entry ONLY when the entity's APPEARANCE meaningfully changes during the book. A character who ages years needs age variants; one who gets a notable injury or changes into a distinctly different outfit/uniform needs those variants too. A constant setting/prop may have an empty variants list.
-- Always give every CHARACTER at least one variant capturing their default/most-common look, so sections can map to a concrete variant.
+- Include a "variants" entry whenever the entity's APPEARANCE meaningfully changes during the book. A character who ages years needs age variants; one who gets a notable injury or changes into a distinctly different outfit/uniform needs those too. A constant setting/prop may have an empty variants list.
+- IMPORTANT -- first appearance & different worlds: give a character a SEPARATE variant for how they look at their FIRST appearance, and for each clearly different WORLD/SETTING they appear in. Many stories open in the ordinary/real world (e.g. children in everyday modern clothes at home or school) before the characters enter a fantasy/secondary world where they later wear that world's clothing (armor, robes, period or travel dress). Capture the EVERYDAY/real-world look as its own variant -- do NOT let the fantasy-world outfit be used for the ordinary-world opening.
+- Always give every CHARACTER at least one variant for their default/most-common look. Set each variant's "when" to the ACTUAL span it applies (chapters/scenes); the opening/first-appearance look must cover the start and must NOT be mislabeled as a later look.
 - Aim for completeness on importance>=3 entities; you may include minor ones at importance 1-2 but do not pad.
 - Keep each text field short; richness is added in a later pass.
 
