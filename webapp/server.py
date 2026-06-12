@@ -230,14 +230,17 @@ def api_delete(book_id: int):
 
 
 @app.post("/api/books/{book_id}/reprocess")
-async def api_reprocess(book_id: int):
-    """Re-run processing for an existing book (reuses the saved registry + roster
-    sheets; re-segments and re-warms). Useful after a pipeline change."""
+async def api_reprocess(book_id: int, fresh: bool = False):
+    """Re-run processing for an existing book. Default reuses the saved registry
+    (re-segments + re-warms) -- fast, for testing segmentation/scene changes.
+    ?fresh=1 also rebuilds the registry from scratch (discover -> repair -> expand)."""
     if not db.get_book(book_id):
         raise HTTPException(404, "no such book")
-    db.set_status(book_id, "queued", "reprocessing…")
+    if fresh:
+        await asyncio.to_thread(db.save_registry, book_id, {"entities": []})
+    db.set_status(book_id, "queued", "reprocessing…" + (" (fresh)" if fresh else ""))
     await asyncio.to_thread(start_processing, book_id)
-    return {"ok": True}
+    return {"ok": True, "fresh": fresh}
 
 
 @app.get("/api/books/{book_id}/pages")

@@ -161,6 +161,9 @@ REGISTRY_MODEL = os.environ.get("STORY_REGISTRY_MODEL", TEXT_MODEL)
 REGISTRY_THINK = os.environ.get("STORY_REGISTRY_THINK", "high")
 CRITIQUE_MODEL = os.environ.get("STORY_CRITIQUE_MODEL", TEXT_MODEL)
 CHAPTER_MODEL = os.environ.get("STORY_CHAPTER_MODEL", TEXT_MODEL)
+# Tagging which recurring settings/props appear on each page is a narrow,
+# low-stakes classification, so it defaults to the cheap model.
+PROP_MODEL = os.environ.get("STORY_PROP_MODEL", "gemini-3.1-flash-lite")
 MAX_REFS = int(os.environ.get("STORY_MAX_REFS", "4"))
 # Gemini image_size is a discrete enum: "1K", "2K", "4K". Each step doubles
 # each dimension. "1K" (~1280px long edge) keeps files small for remote loading.

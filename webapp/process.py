@@ -44,39 +44,102 @@ def _variant_for_chapter(entity: dict, chapter_num: int) -> str:
     return variants[0]["id"]
 
 
+PROP_MAP_PROMPT = """You are tagging which recurring SETTINGS and PROPS appear in each illustration \
+of one chapter of a children's picture book, so they can be drawn consistently.
+
+You are given the book's recurring settings/props (each with an id, name, aliases, and its \
+variants -- a variant has an id, the chapters it applies to, and what is different about it), \
+and this chapter's pages (each with an id, its setting, and a description of its illustration).
+
+For EACH page, decide which of the listed settings/props actually APPEAR IN or DEFINE that \
+page's scene -- e.g. a ship the characters are aboard, a castle they are inside, a notable \
+object in view. Judge by MEANING, not exact words: "the vessel", "the boat", "on deck" all \
+indicate the ship. For each one that appears, choose the best-fitting variant id using the \
+page's description and the variant chapter spans (this is chapter {chapter_num}).
+
+Return JSON only:
+{{"pages": [{{"id": <page id>, "props": [{{"entity_id": "<id>", "variant_id": "<variant id>"}}]}}]}}
+Only include a page if it has props; omit anything that does not actually appear.
+
+SETTINGS/PROPS:
+{props}
+
+PAGES:
+{pages}
+"""
+
+
+def _llm_map_props(props, spreads, chapter_num):
+    """Ask the (cheap) model which settings/props appear on each page. Returns
+    {page_id: [(entity_id, variant_id), ...]}."""
+    from pipeline import gem
+    from pipeline.config import PROP_MODEL
+    prop_lines = [{"id": e["id"], "name": e.get("name", ""), "aliases": e.get("aliases", []),
+                   "variants": [{"id": v["id"], "when": v.get("when", ""),
+                                 "delta": v.get("delta", "")} for v in e.get("variants", [])]}
+                  for e in props]
+    page_lines = [{"id": s.get("id"), "setting": s.get("setting", ""),
+                   "brief": s.get("illustration_brief", "")} for s in spreads]
+    data = gem.text_json(PROP_MAP_PROMPT.format(
+        chapter_num=chapter_num, props=json.dumps(prop_lines, ensure_ascii=False),
+        pages=json.dumps(page_lines, ensure_ascii=False)), model=PROP_MODEL)
+    out = {}
+    for pg in data.get("pages", []):
+        out[pg.get("id")] = [(p.get("entity_id"), p.get("variant_id"))
+                             for p in pg.get("props", []) if p.get("entity_id")]
+    return out
+
+
 def enrich_setting_props(bible: dict, registry: dict, chapter_num: int):
-    """Backstop for the segmenter under-listing recurring SETTINGS/PROPS (e.g. the
-    ship the characters are aboard): if a page's setting/brief names a registry
-    setting or prop, ensure it is in that page's cast (and the chapter cast) so its
-    canonical reference sheet gets drawn + attached -- keeping it consistent."""
+    """Make sure recurring SETTINGS/PROPS the segmenter under-lists (e.g. the ship
+    the characters are aboard) are in each page's cast, so their canonical sheet is
+    drawn + attached and they stay consistent.
+
+    Primary: a focused model pass that maps props -> pages by meaning (robust to
+    paraphrase/punctuation). Floor: a literal name/alias regex, so a prop plainly
+    named in the text is never dropped even if the model misses it."""
     props = [e for e in registry.get("entities", [])
              if e.get("type") in ("setting", "prop")]
     if not props:
         return
-    matchers = []
-    for e in props:
-        names = [e.get("name", "")] + (e.get("aliases") or [])
-        pats = [re.compile(r"\b" + re.escape(n) + r"\b", re.I)
-                for n in names if n and len(n) >= 3]
-        if pats:
-            matchers.append((e, pats, _variant_for_chapter(e, chapter_num)))
-
+    prop_by_id = {e["id"]: e for e in props}
+    spread_by_id = {s.get("id"): s for s in bible.get("spreads", [])}
     chapter_cast = bible.setdefault("cast", [])
     in_chapter = {m.get("entity_id") for m in chapter_cast}
-    for s in bible.get("spreads", []):
-        text = f"{s.get('setting','')} {s.get('illustration_brief','')}"
-        cast = s.setdefault("cast", [])
-        present = {c.get("entity_id") for c in cast}
-        for e, pats, vid in matchers:
-            if e["id"] in present:
-                continue
+
+    def add(spread, eid, vid):
+        e = prop_by_id.get(eid)
+        if not e or spread is None:
+            return
+        if vid not in {v["id"] for v in e.get("variants", [])}:
+            vid = _variant_for_chapter(e, chapter_num)   # validate / fall back
+        cast = spread.setdefault("cast", [])
+        if not any(c.get("entity_id") == eid for c in cast):
+            cast.append({"entity_id": eid, "variant_id": vid})
+        if eid not in in_chapter:
+            chapter_cast.append({"entity_id": eid, "variant_id": vid,
+                                 "name": e.get("name", ""), "from_registry": True})
+            in_chapter.add(eid)
+
+    # primary: model pass (best-effort)
+    try:
+        mapped = _llm_map_props(props, bible.get("spreads", []), chapter_num)
+        for pid, items in mapped.items():
+            for eid, vid in items:
+                add(spread_by_id.get(pid), eid, vid)
+    except Exception as ex:  # noqa: BLE001
+        print(f"[props] model pass failed: {type(ex).__name__}: {ex}", flush=True)
+
+    # floor: literal name/alias match (strip leading articles to be less brittle)
+    for e in props:
+        names = [e.get("name", "")] + (e.get("aliases") or [])
+        pats = [re.compile(r"\b" + re.escape(re.sub(r"(?i)^(the|a|an)\s+", "", n)) + r"\b", re.I)
+                for n in names if n and len(re.sub(r"(?i)^(the|a|an)\s+", "", n)) >= 4]
+        vid = _variant_for_chapter(e, chapter_num)
+        for s in bible.get("spreads", []):
+            text = f"{s.get('setting','')} {s.get('illustration_brief','')}"
             if any(p.search(text) for p in pats):
-                cast.append({"entity_id": e["id"], "variant_id": vid})
-                present.add(e["id"])
-                if e["id"] not in in_chapter:
-                    chapter_cast.append({"entity_id": e["id"], "variant_id": vid,
-                                         "name": e.get("name", ""), "from_registry": True})
-                    in_chapter.add(e["id"])
+                add(s, e["id"], vid)
 
 # Every epub is laid out differently (NCX present or not, spine vs TOC mismatch,
 # odd front/back matter), so rather than trust the format we hand the model a
