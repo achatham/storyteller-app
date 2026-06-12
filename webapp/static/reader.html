@@ -150,6 +150,25 @@ function save(){
   }, 600);
 }
 
+// Pre-load upcoming page images into the browser cache so hitting "next" is
+// instant: the backend already generates ahead; this makes the client download
+// + decode ahead too, using the SAME URL the <img> will request (so it's a cache
+// hit). new Image() requests are low-priority and don't block the visible image.
+const FE_PREFETCH = 3;
+const _prefetched = new Set();
+function prefetchAhead(){
+  for (let k = 1; k <= FE_PREFETCH; k++){
+    const j = state.i + k;
+    if (j >= DATA.pages.length) break;
+    const url = API + "/pages/" + DATA.pages[j].idx + "/image?v=" + DATA.segVer;
+    if (_prefetched.has(url)) continue;
+    _prefetched.add(url);
+    const im = new Image();
+    im.decoding = "async";
+    im.src = url;            // browser fetches + caches; backend generates if needed
+  }
+}
+
 let curReq = 0;
 function render(){
   const p = DATA.pages[state.i];
@@ -176,6 +195,7 @@ function render(){
   document.querySelector("main").scrollTop = 0;
   const r = document.querySelector(".read"); if (r) r.scrollTop = 0;
   save();
+  prefetchAhead();   // warm the browser cache for upcoming pages
 }
 
 function go(n){ const ni = Math.max(0, Math.min(DATA.pages.length-1, state.i+n));
