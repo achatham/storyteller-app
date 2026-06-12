@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS pages (
     setting     TEXT,
     brief       TEXT,
     cast_json   TEXT,
+    image_anchor TEXT,
     PRIMARY KEY (book_id, idx)
 );
 CREATE TABLE IF NOT EXISTS sheets (
@@ -109,6 +110,9 @@ def init():
         cols = {r["name"] for r in c.execute("PRAGMA table_info(books)")}
         if "seg_ver" not in cols:
             c.execute("ALTER TABLE books ADD COLUMN seg_ver INTEGER DEFAULT 0")
+        pcols = {r["name"] for r in c.execute("PRAGMA table_info(pages)")}
+        if "image_anchor" not in pcols:
+            c.execute("ALTER TABLE pages ADD COLUMN image_anchor TEXT")
 
 
 # ---------------- books ----------------
@@ -233,18 +237,20 @@ def get_chapter_cast(book_id, chapter_idx) -> list[dict]:
         return json.loads(r["cast_json"]) if r and r["cast_json"] else []
 
 
-def add_page(book_id, idx, chapter_idx, title, read_text, setting, brief, cast):
+def add_page(book_id, idx, chapter_idx, title, read_text, setting, brief, cast,
+             image_anchor=None):
     with conn() as c:
         c.execute("INSERT OR REPLACE INTO pages(book_id,idx,chapter_idx,title,"
-                  "read_text,setting,brief,cast_json) VALUES (?,?,?,?,?,?,?,?)",
+                  "read_text,setting,brief,cast_json,image_anchor) "
+                  "VALUES (?,?,?,?,?,?,?,?,?)",
                   (book_id, idx, chapter_idx, title, read_text, setting, brief,
-                   json.dumps(cast, ensure_ascii=False)))
+                   json.dumps(cast, ensure_ascii=False), image_anchor))
 
 
 def get_pages(book_id) -> list[dict]:
     with conn() as c:
         rows = c.execute(
-            "SELECT idx,chapter_idx,title,read_text FROM pages "
+            "SELECT idx,chapter_idx,title,read_text,image_anchor FROM pages "
             "WHERE book_id=? ORDER BY idx", (book_id,)).fetchall()
         return [dict(r) for r in rows]
 

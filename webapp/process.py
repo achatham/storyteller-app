@@ -290,7 +290,8 @@ def segment(book_id, registry, workers: int = 4, report=None):
         for s in sorted(bible.get("spreads", []), key=lambda x: x.get("id", 0)):
             db.add_page(book_id, page_idx, ci, s.get("title", ""),
                         s.get("read_text", ""), s.get("setting", ""),
-                        s.get("illustration_brief", ""), s.get("cast", []))
+                        s.get("illustration_brief", ""), s.get("cast", []),
+                        image_anchor=s.get("image_anchor"))
             page_idx += 1
     return page_idx
 

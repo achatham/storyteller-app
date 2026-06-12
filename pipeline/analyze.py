@@ -61,6 +61,7 @@ Produce a JSON object (and nothing else) with this exact shape:
       ],
       "setting": "<where/when, concrete>",
       "illustration_brief": "<a vivid, specific description of the single illustration: composition, who is doing what, expressions, camera angle, mood, key background details. Refer to characters by name. Apply the content policy. Do NOT include the global art style here.>",
+      "image_anchor": "<a short verbatim phrase (5-10 words) copied EXACTLY from this page's text, marking WHERE to place the illustration in the flowing text: right AFTER the moment the picture depicts, so the picture never appears before the words reveal that moment (avoid spoilers). Usually at the end of the sentence describing the depicted action. Must be a phrase that actually occurs in this page's text.>",
       "content_note": "<exactly one of: safe OR softened>"
     }}
   ]

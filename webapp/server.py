@@ -18,6 +18,7 @@ a per-(book,page) lock.
 """
 import asyncio
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -151,6 +152,12 @@ def reader(book_id: int):
     return html.replace("__BOOK_ID__", str(book_id))
 
 
+@app.get("/book/{book_id}", response_class=HTMLResponse)
+def book_reader(book_id: int):
+    html = (STATIC / "book.html").read_text()
+    return html.replace("__BOOK_ID__", str(book_id))
+
+
 # ---------------- API ----------------
 
 @app.get("/api/styles")
@@ -250,6 +257,52 @@ def api_pages(book_id: int):
         raise HTTPException(404, "no such book")
     return [{"idx": p["idx"], "chapter": p["chapter_idx"], "title": p["title"],
              "text": p["read_text"]} for p in db.get_pages(book_id)]
+
+
+def _image_offset(text: str, anchor: str | None) -> int:
+    """Where in `text` to place the illustration: just after the sentence holding
+    `anchor` (a verbatim phrase the model chose so the picture follows -- not
+    precedes -- the moment it depicts). Falls back to end-of-text if no anchor."""
+    if not anchor:
+        return len(text)
+    toks = re.findall(r"\w+", anchor)[:8]
+    if not toks:
+        return len(text)
+    m = re.compile(r"\W+".join(re.escape(t) for t in toks), re.I).search(text)
+    if not m:
+        return len(text)
+    end = m.end()
+    nxt = re.search(r"[.!?][\"'”’)]?\s", text[end:])  # extend to sentence end
+    return end + nxt.end() if nxt else end
+
+
+@app.get("/api/books/{book_id}/chapter/{idx}")
+def api_chapter_flow(book_id: int, idx: int):
+    """A chapter as an ordered stream of nodes (text runs + image placeholders at
+    their in-text anchors) for the flowed/paginated reader."""
+    book = db.get_book(book_id)
+    if not book:
+        raise HTTPException(404, "no such book")
+    chapters = db.get_chapters(book_id)
+    ch = next((c for c in chapters if c["idx"] == idx), None)
+    if not ch:
+        raise HTTPException(404, "no such chapter")
+    seg = book["seg_ver"] if "seg_ver" in book.keys() else 0
+    nodes = []
+    for p in db.get_pages(book_id):
+        if p["chapter_idx"] != idx:
+            continue
+        t = p["read_text"] or ""
+        pos = _image_offset(t, p.get("image_anchor"))
+        before, after = t[:pos].strip(), t[pos:].strip()
+        if before:
+            nodes.append({"type": "text", "text": before})
+        nodes.append({"type": "image", "idx": p["idx"], "alt": p.get("title", ""),
+                      "src": f"/api/books/{book_id}/pages/{p['idx']}/image?v={seg}"})
+        if after:
+            nodes.append({"type": "text", "text": after})
+    return {"book_id": book_id, "idx": idx, "title": ch["title"],
+            "num_chapters": len(chapters), "nodes": nodes}
 
 
 @app.get("/api/books/{book_id}/pages/{idx}/status")
