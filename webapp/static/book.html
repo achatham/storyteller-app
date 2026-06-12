@@ -17,7 +17,14 @@
      translate it to "turn pages". column-fill:auto + fixed height = real pages. */
   #flow { position:absolute; top:0; bottom:0; left:var(--mh); right:var(--mh);
           padding:var(--pad) 0 50px; column-gap:var(--gap); column-fill:auto;
-          transition:transform .28s ease; will-change:transform; }
+          transition:transform .40s cubic-bezier(.33,0,.2,1); will-change:transform; }
+  /* a soft shadow that sweeps across as a page turns, for depth */
+  #turn { position:fixed; top:0; bottom:0; width:140px; z-index:25; pointer-events:none; opacity:0;
+          background:linear-gradient(90deg, transparent, rgba(40,30,20,.20), transparent); }
+  #turn.fwd  { animation:sweepfwd .42s ease; }
+  #turn.back { animation:sweepback .42s ease; }
+  @keyframes sweepfwd  { 0%{opacity:0; transform:translateX(100vw);} 25%{opacity:1;} 100%{opacity:0; transform:translateX(-140px);} }
+  @keyframes sweepback { 0%{opacity:0; transform:translateX(-140px);} 25%{opacity:1;} 100%{opacity:0; transform:translateX(100vw);} }
   @media (orientation:landscape){ #flow{ column-count:2; } }
   @media (orientation:portrait){  #flow{ column-count:1; } }
   #flow .chtitle { font-size:1.5rem; margin:0 0 .7em; }
@@ -50,6 +57,10 @@
   .card select, .card button, .card a.btn { font:inherit; font-size:1rem; padding:10px; border-radius:9px;
           border:1px solid var(--line); background:var(--bg); color:var(--ink); cursor:pointer; text-decoration:none; text-align:center; }
   #closebook { color:#9b3d2e; border-color:#e3c0b0; background:#fbf1ec; }
+  .card label.toggle { flex-direction:row; align-items:center; gap:10px; text-transform:none;
+          letter-spacing:0; font-size:.95rem; color:var(--ink); cursor:pointer; }
+  .card label.toggle input { width:auto; margin:0; }
+  body.noanim #flow { transition:none; }
   #splash { position:fixed; inset:0; z-index:60; background:var(--bg); display:flex; align-items:center;
           justify-content:center; font-family:system-ui,sans-serif; color:var(--muted); }
   #splash[hidden]{ display:none; }
@@ -57,11 +68,13 @@
 </head><body>
 <div id="viewport"><div id="flow"></div></div>
 <div class="edge left">&#8249;</div><div class="edge right">&#8250;</div>
+<div id="turn"></div>
 <div id="bar"></div><div id="pageno"></div>
 <button id="menuBtn">&#9776;</button>
 <div id="menu" hidden><div class="card">
   <div class="bk" id="bk"></div>
   <label>Chapter <select id="chap"></select></label>
+  <label class="toggle"><input type="checkbox" id="animchk"> Page-turn animation</label>
   <a class="btn" id="classic">Switch to single-page view</a>
   <button id="fs">&#9974; Full screen</button>
   <button id="closebook">&#10005; Close book</button>
@@ -74,6 +87,10 @@ const API = "/api/books/" + BOOK_ID;
 const $ = s => document.querySelector(s);
 const LKEY = "book:" + BOOK_ID;
 let META = null, CH = -1, page = 0, pages = 1, prefetched = new Set();
+const ANIM_KEY = "book:anim";
+let animOn = true;
+try { animOn = localStorage.getItem(ANIM_KEY) !== "0"; } catch(e){}
+function applyAnim(){ document.body.classList.toggle("noanim", !animOn); if($("#animchk")) $("#animchk").checked = animOn; }
 
 async function boot(){
   try { META = await (await fetch(API)).json(); } catch(e){ $("#splash").textContent="Could not load."; return; }
@@ -83,6 +100,7 @@ async function boot(){
   let start = { ch:0, page:0 };
   try { const s = JSON.parse(localStorage.getItem(LKEY)); if (s) start = s; } catch(e){}
   $("#splash").hidden = true;
+  applyAnim();
   await loadChapter(start.ch || 0, start.page || 0);
 }
 
@@ -140,12 +158,18 @@ function loadVisibleImages(){
   });
 }
 
+function sweep(dir){
+  if (!animOn) return;
+  const t = $("#turn"); t.classList.remove("fwd","back");
+  void t.offsetWidth;           // restart the animation
+  t.classList.add(dir);
+}
 async function next(){
-  if (page < pages-1) goPage(page+1);
+  if (page < pages-1){ sweep("fwd"); goPage(page+1); }
   else if (CH < META.num_chapters-1) await loadChapter(CH+1, 0);
 }
 async function prev(){
-  if (page > 0) goPage(page-1);
+  if (page > 0){ sweep("back"); goPage(page-1); }
   else if (CH > 0) await loadChapter(CH-1, -1);
 }
 function save(){ try{ localStorage.setItem(LKEY, JSON.stringify({ch:CH, page})); }catch(e){} }
@@ -172,6 +196,7 @@ $("#menuBtn").onclick = e=>{ e.stopPropagation(); $("#menu").hidden=false; };
 $("#menu").onclick = e=>{ if(e.target===$("#menu")) $("#menu").hidden=true; e.stopPropagation(); };
 $("#close").onclick = e=>{ e.stopPropagation(); $("#menu").hidden=true; };
 $("#chap").onchange = e=>{ $("#menu").hidden=true; loadChapter(+e.target.value, 0); };
+$("#animchk").onchange = e=>{ animOn=e.target.checked; try{localStorage.setItem(ANIM_KEY, animOn?"1":"0");}catch(_){} applyAnim(); };
 $("#classic").href = "/read/" + BOOK_ID;
 const fsEl = document.documentElement;
 const inFS = ()=>document.fullscreenElement||document.webkitFullscreenElement;
