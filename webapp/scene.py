@@ -18,6 +18,7 @@ from pipeline.run import (resolve_cast, scene_members, build_scene_prompt,
 from . import db
 
 SCENE_TRIES = 2  # keep page latency low; prefetch hides the rest
+REVISE_AVG = 3.5  # if a failed candidate averages this high, edit it (img2img) vs restart
 SHEET_TRIES = 2  # reference sheets are drawn once + cached, so a reroll is cheap insurance
 SHEET_PASS = 4   # min(clean_sheet, match) needed to accept a sheet
 
@@ -323,22 +324,38 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                               "exterior-only identifying features (a figurehead or prow ornament, the full "
                               "outer hull or silhouette), and NEVER show a mirrored, doubled or twin copy of "
                               "any feature at both ends/edges of the picture.")
-        best, fix = None, ""
+        best, fix, draft = None, "", None
         for attempt in range(1, SCENE_TRIES + 1):
-            prompt = build_scene_prompt(spread, members, ref_members, style_text, fix=fix) + place_note
             cand = Path(td) / f"cand{attempt}.webp"
-            gem.generate_image(prompt, refs=ref_paths, out_path=cand, aspect="3:2",
-                               model=PAGE_IMAGE_MODEL)
+            if draft is not None:
+                # REVISE: the last attempt was broadly right with one flagged defect.
+                # Edit that image (keep composition/characters/style, change only the
+                # defect) instead of regenerating -- preserves what worked and lets us
+                # actually land a specific fix (e.g. "their hands must be bound").
+                edit_prompt = (f"{style_text}\n\nImage 1 is a DRAFT illustration that is almost right. "
+                               f"Redraw it keeping its composition, characters, poses, setting and art "
+                               f"style the SAME, and change ONLY this: {fix}\n\n"
+                               f"The people must still match:\n{char_desc}{place_note}")
+                refs = ([draft] + ref_paths)[:MAX_REFS]
+                gem.generate_image(edit_prompt, refs=refs, out_path=cand, aspect="3:2",
+                                   model=PAGE_IMAGE_MODEL)
+            else:
+                prompt = build_scene_prompt(spread, members, ref_members, style_text, fix=fix) + place_note
+                gem.generate_image(prompt, refs=ref_paths, out_path=cand, aspect="3:2",
+                                   model=PAGE_IMAGE_MODEL)
             crit = gem.critique_image(cand, SCENE_CRITIQUE.format(
                 brief=page["brief"], chars=char_desc or "(none)", style=style_text))
-            score = min(crit.get("consistency", 0), crit.get("accuracy", 0),
-                        crit.get("kid_appropriate", 0), crit.get("style_ok", 0))
+            scores = [crit.get(k, 0) for k in ("consistency", "accuracy", "kid_appropriate", "style_ok")]
+            score = min(scores)
             data = cand.read_bytes()
             if best is None or score > best[1]:
                 best = (data, score)
             if score >= PASS_THRESHOLD:
                 break
             fix = crit.get("fix_hint", "")
+            # "very close" (broadly good, one weak spot) -> revise this image next;
+            # otherwise discard it and regenerate the scene from scratch.
+            draft = cand if (sum(scores) / len(scores)) >= REVISE_AVG else None
 
     data, score = best
     db.scene_store(book_id, idx, data, score)

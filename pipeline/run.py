@@ -44,11 +44,14 @@ THE INTENDED ART STYLE IS:
 Judge the attached image. Return JSON only:
 {{
   "consistency": <1-5, do characters match their descriptions and look like coherent recurring characters?>,
-  "accuracy": <1-5, does the image depict the described scene/action/setting?>,
+  "accuracy": <1-5, does the image depict the described scene, setting AND every specific action or \
+physical state in the brief? Be strict: if the brief states a concrete state or action -- e.g. \
+characters BOUND / roped / hands tied, kneeling, holding a named object, a stated number of people \
+-- and it is missing or wrong in the image, score at most 2 even if the picture is otherwise nice.>,
   "kid_appropriate": <1-5, warm, non-scary, no graphic violence/blood, young-child friendly?>,
   "style_ok": <1-5, matches the intended art style above?>,
   "issues": ["<short concrete problems>"],
-  "fix_hint": "<one actionable sentence for the next attempt>"
+  "fix_hint": "<one actionable sentence naming the single most important missing/wrong element to add or fix>"
 }}"""
 
 
