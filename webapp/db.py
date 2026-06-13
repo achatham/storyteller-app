@@ -334,6 +334,19 @@ def list_sheets(book_id) -> list:
             (book_id,))]
 
 
+def iter_scene_blobs(book_id) -> list:
+    """(idx, data) for every stored scene image of this book."""
+    with conn() as c:
+        return [(r["idx"], r["data"]) for r in c.execute(
+            "SELECT idx, data FROM scenes WHERE book_id=? AND length(data)>0", (book_id,))]
+
+
+def update_scene_blob(book_id, idx, data, mime="image/webp"):
+    with conn() as c:
+        c.execute("UPDATE scenes SET data=?, mime=? WHERE book_id=? AND idx=?",
+                  (data, mime, book_id, idx))
+
+
 def has_sheet(book_id, entity_id, variant_id) -> bool:
     with conn() as c:
         r = c.execute("SELECT 1 FROM sheets WHERE book_id=? AND entity_id=? AND "

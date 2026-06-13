@@ -66,6 +66,7 @@
     <a class="btn" id="bookview">Book view</a>
     <a class="btn" id="roster">View roster</a>
     <a class="btn" id="debug">Generation debug</a>
+    <button class="btn" id="recompress">Recompress art</button>
     <button class="btn" id="redraw">Redraw art</button>
     <a class="btn back" href="/">Library</a>
   </div>
@@ -91,6 +92,13 @@ const usd = n => "$" + (n||0).toFixed(n>=1?2:3);
     const m = $("#redrawmsg"); m.style.display = "block";
     m.textContent = `Cleared ${r.sheets} sheets and ${r.scenes} pictures — they'll redraw with the latest style as you read.`;
     $("#redraw").textContent = "Redraw art"; $("#redraw").disabled = false;
+  };
+  $("#recompress").onclick = async () => {
+    $("#recompress").disabled = true; $("#recompress").textContent = "Recompressing…";
+    const r = await (await fetch("/api/books/"+ID+"/recompress", {method:"POST"})).json();
+    const m = $("#redrawmsg"); m.style.display = "block";
+    m.textContent = `Recompressed ${r.changed} images: ${r.before_kb} KB → ${r.after_kb} KB (saved ${r.saved_kb} KB).`;
+    $("#recompress").textContent = "Recompress art"; $("#recompress").disabled = false;
   };
   $("#info").innerHTML = [
     ["Art style", (b.style||"").replace(/_/g," ")],

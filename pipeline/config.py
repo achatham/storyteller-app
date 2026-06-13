@@ -182,6 +182,12 @@ MAX_REFS = int(os.environ.get("STORY_MAX_REFS", "4"))
 # each dimension. "1K" (~1280px long edge) keeps files small for remote loading.
 IMAGE_SIZE = os.environ.get("STORY_IMAGE_SIZE", "1K")
 
+# WebP encode quality (lossy) for stored art, and the max display width a scene is
+# downscaled to before storage. Generation is ~1264px wide; ~1152 stays crisp on a
+# tablet while shaving file size. 0 = keep the generated size.
+WEBP_QUALITY = int(os.environ.get("STORY_WEBP_QUALITY", "72"))
+SCENE_MAXW = int(os.environ.get("STORY_SCENE_MAXW", "1152"))
+
 # ---- illustration cadence ----
 # Roughly one illustration (one read-aloud "page") per this many words of text.
 # Lower = more pictures, more often (good for little kids: ~100); higher = fewer

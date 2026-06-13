@@ -14,7 +14,7 @@ from google.genai import types
 
 from . import costs
 from .config import (IMAGE_SIZE, IMAGE_MODEL, TEXT_MODEL, SHEET_IMAGE_MODEL,
-                     PAGE_IMAGE_MODEL, CRITIQUE_MODEL)
+                     PAGE_IMAGE_MODEL, CRITIQUE_MODEL, WEBP_QUALITY)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -145,7 +145,7 @@ def generate_image(prompt: str, refs: list[Path] | None = None, out_path: Path |
             pil = Image.open(io.BytesIO(part.inline_data.data))
             out_path.parent.mkdir(parents=True, exist_ok=True)
             if out_path.suffix.lower() == ".webp":
-                pil.convert("RGB").save(str(out_path), "WEBP", quality=80, method=6)
+                pil.convert("RGB").save(str(out_path), "WEBP", quality=WEBP_QUALITY, method=6)
             else:
                 pil.save(str(out_path))
             return out_path

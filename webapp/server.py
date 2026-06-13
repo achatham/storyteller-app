@@ -294,6 +294,14 @@ async def api_reprocess(book_id: int, fresh: bool = False):
     return {"ok": True, "fresh": fresh}
 
 
+@app.post("/api/books/{book_id}/recompress")
+async def api_recompress(book_id: int):
+    """Re-encode existing art to the current compression settings (no regeneration)."""
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    return {"ok": True, **await asyncio.to_thread(scene.recompress_book, book_id)}
+
+
 @app.post("/api/books/{book_id}/redraw")
 def api_redraw(book_id: int):
     """Clear the book's roster sheets + scene images so they redraw with the

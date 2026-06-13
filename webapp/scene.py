@@ -6,14 +6,59 @@ as a parameter (config.ART_STYLE is frozen at import and would pin every book to
 one style). Reference sheets come from the DB (roster), with any still-missing
 sheet generated and cached on first use. Result image bytes are stored in the DB.
 """
+import io
 import json
 import os
 import tempfile
 import threading
 from pathlib import Path
 
+from PIL import Image
+
 from pipeline import gem, costs
-from pipeline.config import (STYLES, SHEET_IMAGE_MODEL, PAGE_IMAGE_MODEL, MAX_REFS, ANALYZE_MODEL)
+from pipeline.config import (STYLES, SHEET_IMAGE_MODEL, PAGE_IMAGE_MODEL, MAX_REFS, ANALYZE_MODEL,
+                             WEBP_QUALITY, SCENE_MAXW)
+
+# Debug-history candidates are review-only -> compress them harder than display art.
+DEBUG_MAXW = int(os.environ.get("STORY_DEBUG_MAXW", "960"))
+DEBUG_QUALITY = int(os.environ.get("STORY_DEBUG_QUALITY", "52"))
+
+
+def _compress(data: bytes, max_w: int, quality: int) -> bytes:
+    """Re-encode webp bytes for storage: downscale to max_w (0 = keep) and apply a
+    lossy quality. Returns the original if anything goes wrong or it wouldn't shrink."""
+    try:
+        im = Image.open(io.BytesIO(data)).convert("RGB")
+        if max_w and im.width > max_w:
+            im = im.resize((max_w, round(max_w * im.height / im.width)), Image.LANCZOS)
+        out = io.BytesIO()
+        im.save(out, "WEBP", quality=quality, method=6)
+        b = out.getvalue()
+        return b if len(b) < len(data) else data
+    except Exception:  # noqa: BLE001
+        return data
+
+
+def recompress_book(book_id) -> dict:
+    """Re-encode already-stored art to the current display settings, in place --
+    scenes downscaled to SCENE_MAXW, sheets re-encoded at quality only (they feed
+    generation, so keep their resolution). No regeneration / API cost."""
+    before = after = changed = 0
+    for idx, data in db.iter_scene_blobs(book_id):
+        nb = _compress(data, SCENE_MAXW, WEBP_QUALITY)
+        before += len(data); after += len(nb)
+        if len(nb) < len(data):
+            db.update_scene_blob(book_id, idx, nb); changed += 1
+    for eid, vid in db.list_sheets(book_id):
+        data = db.get_sheet(book_id, eid, vid)
+        if not data:
+            continue
+        nb = _compress(data, 0, WEBP_QUALITY)
+        before += len(data); after += len(nb)
+        if len(nb) < len(data):
+            db.save_sheet(book_id, eid, vid, nb); changed += 1
+    return {"changed": changed, "before_kb": before // 1024, "after_kb": after // 1024,
+            "saved_kb": (before - after) // 1024}
 from pipeline.run import (resolve_cast, scene_members, build_scene_prompt,
                           SCENE_CRITIQUE, PASS_THRESHOLD)
 from . import db
@@ -398,7 +443,8 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                 "issues": crit.get("issues", []), "fix_hint": crit.get("fix_hint", ""),
             })
             # debug history: keep EVERY candidate (even rejected) with its prompt + critique
-            db.scene_attempt_add(book_id, idx, gen_id, attempt, mode, used_prompt, data,
+            db.scene_attempt_add(book_id, idx, gen_id, attempt, mode, used_prompt,
+                                 _compress(data, DEBUG_MAXW, DEBUG_QUALITY),
                                  json.dumps(crit), score, round(avg, 2))
             if best is None or score > best[1]:
                 best = (data, score, attempt)
@@ -410,6 +456,7 @@ def _render_scene(book_id: int, idx: int) -> bytes:
             draft = cand if avg >= REVISE_AVG else None
 
     data, score, chosen = best
+    data = _compress(data, SCENE_MAXW, WEBP_QUALITY)   # downscale for display storage
     trace["chosen"] = chosen
     db.scene_store(book_id, idx, data, score, trace=json.dumps(trace))
     db.scene_gen_add(book_id, idx, gen_id, page["brief"], json.dumps(states), chosen, score)
