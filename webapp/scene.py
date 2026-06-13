@@ -363,6 +363,7 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                               "outer hull or silhouette), and NEVER show a mirrored, doubled or twin copy of "
                               "any feature at both ends/edges of the picture.")
         best, fix, draft = None, "", None
+        gen_id = db.next_gen_id(book_id, idx)   # debug history: this generation run
         trace = {"states": states, "max_tries": SCENE_TRIES, "attempts": []}
         for attempt in range(1, SCENE_TRIES + 1):
             mode = "revise" if draft is not None else "fresh"
@@ -372,16 +373,16 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                 # Edit that image (keep composition/characters/style, change only the
                 # defect) instead of regenerating -- preserves what worked and lets us
                 # actually land a specific fix (e.g. "their hands must be bound").
-                edit_prompt = (f"{style_text}\n\nImage 1 is a DRAFT illustration that is almost right. "
+                used_prompt = (f"{style_text}\n\nImage 1 is a DRAFT illustration that is almost right. "
                                f"Redraw it keeping its composition, characters, poses, setting and art "
                                f"style the SAME, and change ONLY this: {fix}\n\n"
                                f"The people must still match:\n{char_desc}{place_note}")
                 refs = ([draft] + ref_paths)[:MAX_REFS]
-                gem.generate_image(edit_prompt, refs=refs, out_path=cand, aspect="3:2",
+                gem.generate_image(used_prompt, refs=refs, out_path=cand, aspect="3:2",
                                    model=PAGE_IMAGE_MODEL)
             else:
-                prompt = build_scene_prompt(spread, members, ref_members, style_text, fix=fix) + place_note
-                gem.generate_image(prompt, refs=ref_paths, out_path=cand, aspect="3:2",
+                used_prompt = build_scene_prompt(spread, members, ref_members, style_text, fix=fix) + place_note
+                gem.generate_image(used_prompt, refs=ref_paths, out_path=cand, aspect="3:2",
                                    model=PAGE_IMAGE_MODEL)
             crit = gem.critique_image(cand, SCENE_CRITIQUE.format(
                 brief=page["brief"], chars=char_desc or "(none)", style=style_text,
@@ -396,6 +397,9 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                 "min": score, "avg": round(avg, 2),
                 "issues": crit.get("issues", []), "fix_hint": crit.get("fix_hint", ""),
             })
+            # debug history: keep EVERY candidate (even rejected) with its prompt + critique
+            db.scene_attempt_add(book_id, idx, gen_id, attempt, mode, used_prompt, data,
+                                 json.dumps(crit), score, round(avg, 2))
             if best is None or score > best[1]:
                 best = (data, score, attempt)
             if score >= PASS_THRESHOLD:
@@ -408,4 +412,5 @@ def _render_scene(book_id: int, idx: int) -> bytes:
     data, score, chosen = best
     trace["chosen"] = chosen
     db.scene_store(book_id, idx, data, score, trace=json.dumps(trace))
+    db.scene_gen_add(book_id, idx, gen_id, page["brief"], json.dumps(states), chosen, score)
     return data

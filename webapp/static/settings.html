@@ -65,6 +65,7 @@
     <a class="btn go" id="read">Read</a>
     <a class="btn" id="bookview">Book view</a>
     <a class="btn" id="roster">View roster</a>
+    <a class="btn" id="debug">Generation debug</a>
     <button class="btn" id="redraw">Redraw art</button>
     <a class="btn back" href="/">Library</a>
   </div>
@@ -82,6 +83,7 @@ const usd = n => "$" + (n||0).toFixed(n>=1?2:3);
   $("#read").href = "/read/"+ID;
   $("#bookview").href = "/book/"+ID;
   $("#roster").href = "/roster/"+ID;
+  $("#debug").href = "/debug/"+ID;
   $("#redraw").onclick = async () => {
     if (!confirm("Redraw all art for this book? Existing character sheets and page pictures are cleared and will be regenerated as you read (this costs image generations).")) return;
     $("#redraw").disabled = true; $("#redraw").textContent = "Clearing…";

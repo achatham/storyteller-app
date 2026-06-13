@@ -80,6 +80,34 @@ CREATE TABLE IF NOT EXISTS scenes (
     updated_at REAL,
     PRIMARY KEY (book_id, idx)
 );
+-- debug history: every generation run of a scene, and every attempt within it
+-- (including rejected candidates), with the prompt and the critic's verdict.
+CREATE TABLE IF NOT EXISTS scene_gens (
+    book_id    INTEGER REFERENCES books(id) ON DELETE CASCADE,
+    idx        INTEGER,
+    gen_id     INTEGER,         -- 1,2,3... each (re)generation of this page
+    brief      TEXT,
+    states     TEXT,            -- JSON {character: state}
+    chosen     INTEGER,         -- attempt number that was kept
+    final_score REAL,
+    created_at REAL,
+    PRIMARY KEY (book_id, idx, gen_id)
+);
+CREATE TABLE IF NOT EXISTS scene_attempts (
+    book_id    INTEGER REFERENCES books(id) ON DELETE CASCADE,
+    idx        INTEGER,
+    gen_id     INTEGER,
+    attempt    INTEGER,
+    mode       TEXT,            -- fresh|revise
+    prompt     TEXT,            -- full image-generation prompt
+    mime       TEXT,
+    data       BLOB,            -- candidate image bytes (kept even if rejected)
+    critique   TEXT,            -- full critic JSON (sub-scores, issues, fix_hint)
+    min_score  REAL,
+    avg_score  REAL,
+    created_at REAL,
+    PRIMARY KEY (book_id, idx, gen_id, attempt)
+);
 CREATE TABLE IF NOT EXISTS style_samples (
     style_key  TEXT PRIMARY KEY,
     mime       TEXT,
@@ -370,6 +398,82 @@ def scene_trace(book_id, idx):
         return json.loads(r["trace"])
     except (ValueError, TypeError):
         return None
+
+
+# ---- debug generation history (scene_gens / scene_attempts) ----
+
+def next_gen_id(book_id, idx) -> int:
+    with conn() as c:
+        r = c.execute("SELECT COALESCE(MAX(gen_id),0)+1 AS g FROM scene_gens "
+                      "WHERE book_id=? AND idx=?", (book_id, idx)).fetchone()
+    return r["g"]
+
+
+def scene_attempt_add(book_id, idx, gen_id, attempt, mode, prompt, data,
+                      critique, min_score, avg_score, mime="image/webp"):
+    with conn() as c:
+        c.execute("INSERT OR REPLACE INTO scene_attempts(book_id,idx,gen_id,attempt,mode,"
+                  "prompt,mime,data,critique,min_score,avg_score,created_at) "
+                  "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                  (book_id, idx, gen_id, attempt, mode, prompt, mime, data,
+                   critique, min_score, avg_score, time.time()))
+
+
+def scene_gen_add(book_id, idx, gen_id, brief, states, chosen, final_score):
+    with conn() as c:
+        c.execute("INSERT OR REPLACE INTO scene_gens(book_id,idx,gen_id,brief,states,"
+                  "chosen,final_score,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                  (book_id, idx, gen_id, brief, states, chosen, final_score, time.time()))
+
+
+def debug_pages(book_id) -> list[dict]:
+    """Pages that have generation history: idx, title, #gens, #attempts, best score."""
+    with conn() as c:
+        rows = c.execute(
+            "SELECT g.idx AS idx, COUNT(DISTINCT g.gen_id) AS gens, "
+            "COUNT(a.attempt) AS attempts, MAX(g.final_score) AS score "
+            "FROM scene_gens g LEFT JOIN scene_attempts a "
+            "ON a.book_id=g.book_id AND a.idx=g.idx AND a.gen_id=g.gen_id "
+            "WHERE g.book_id=? GROUP BY g.idx ORDER BY g.idx", (book_id,)).fetchall()
+        pages = {p["idx"]: p["title"] for p in
+                 c.execute("SELECT idx,title FROM pages WHERE book_id=?", (book_id,))}
+    return [{"idx": r["idx"], "title": pages.get(r["idx"], ""), "gens": r["gens"],
+             "attempts": r["attempts"], "score": r["score"]} for r in rows]
+
+
+def scene_history(book_id, idx) -> list[dict]:
+    """Full history for one page: a list of generations (newest first), each with
+    its attempts (prompt + critique + metadata, no image blobs)."""
+    with conn() as c:
+        gens = c.execute("SELECT * FROM scene_gens WHERE book_id=? AND idx=? "
+                         "ORDER BY gen_id DESC", (book_id, idx)).fetchall()
+        atts = c.execute("SELECT book_id,idx,gen_id,attempt,mode,prompt,critique,"
+                         "min_score,avg_score,created_at FROM scene_attempts "
+                         "WHERE book_id=? AND idx=? ORDER BY gen_id DESC, attempt",
+                         (book_id, idx)).fetchall()
+    by_gen = {}
+    for a in atts:
+        by_gen.setdefault(a["gen_id"], []).append({
+            "attempt": a["attempt"], "mode": a["mode"], "prompt": a["prompt"],
+            "critique": json.loads(a["critique"]) if a["critique"] else None,
+            "min": a["min_score"], "avg": a["avg_score"], "created_at": a["created_at"],
+        })
+    out = []
+    for g in gens:
+        out.append({
+            "gen_id": g["gen_id"], "brief": g["brief"],
+            "states": json.loads(g["states"]) if g["states"] else {},
+            "chosen": g["chosen"], "final_score": g["final_score"],
+            "created_at": g["created_at"], "attempts": by_gen.get(g["gen_id"], []),
+        })
+    return out
+
+
+def scene_attempt_image(book_id, idx, gen_id, attempt):
+    with conn() as c:
+        r = c.execute("SELECT mime,data FROM scene_attempts WHERE book_id=? AND idx=? "
+                      "AND gen_id=? AND attempt=?", (book_id, idx, gen_id, attempt)).fetchone()
+    return (r["mime"], r["data"]) if r else (None, None)
 
 
 def clear_art(book_id) -> dict:

@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storyteller — generation debug</title>
+<style>
+  :root { --bg:#f4efe6; --ink:#2b2622; --muted:#9a8a70; --panel:#fffdf8; --line:#e0d4bd; --accent:#7a5c3e;
+          --good:#3f7d4f; --mid:#b9892f; --bad:#b14b3a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:system-ui,sans-serif; }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:14px; }
+  header h1 { font-family:Georgia,serif; font-size:1.25rem; margin:0; }
+  a { color:var(--accent); text-decoration:none; }
+  .wrap { display:grid; grid-template-columns:260px 1fr; min-height:calc(100vh - 52px); }
+  .list { border-right:1px solid var(--line); overflow:auto; max-height:calc(100vh - 52px); }
+  .pg { padding:9px 16px; border-bottom:1px solid var(--line); cursor:pointer; font-size:.86rem; }
+  .pg:hover { background:#fbf6ec; }
+  .pg.sel { background:#f1e7d3; }
+  .pg .t { color:var(--muted); }
+  .pg .meta { font-size:.74rem; color:var(--muted); margin-top:2px; }
+  main { padding:18px 22px 60px; overflow:auto; max-height:calc(100vh - 52px); }
+  .empty { color:var(--muted); padding:40px; font-style:italic; }
+  .gen { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px 18px; margin-bottom:22px; }
+  .gen > h2 { font-size:1rem; margin:0 0 4px; }
+  .brief { color:#5b5347; font-style:italic; margin:2px 0 10px; font-family:Georgia,serif; }
+  .states { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px; }
+  .chip { font-size:.74rem; background:#f1e7d3; border:1px solid var(--line); border-radius:20px; padding:2px 9px; }
+  .chip b { color:var(--accent); }
+  .atts { display:flex; gap:16px; flex-wrap:wrap; }
+  .att { width:300px; border:1px solid var(--line); border-radius:11px; overflow:hidden; background:#fff; }
+  .att.kept { border-color:var(--good); box-shadow:0 0 0 2px rgba(63,125,79,.25); }
+  .att img { width:100%; display:block; background:#eee; }
+  .att .body { padding:10px 12px; }
+  .badges { display:flex; gap:6px; align-items:center; margin-bottom:7px; }
+  .badge { font-size:.7rem; text-transform:uppercase; letter-spacing:.4px; padding:2px 8px; border-radius:20px; border:1px solid var(--line); }
+  .badge.fresh { background:#eef3f7; } .badge.revise { background:#f7eee9; }
+  .badge.kept { background:var(--good); color:#fff; border-color:var(--good); }
+  .scores { display:flex; gap:5px; margin-bottom:7px; flex-wrap:wrap; }
+  .s { font-size:.72rem; padding:2px 7px; border-radius:6px; border:1px solid var(--line); }
+  .s.good { background:#e8f2ea; color:var(--good); } .s.mid { background:#f7efdd; color:var(--mid); }
+  .s.bad { background:#f6e6e2; color:var(--bad); }
+  ul.iss { margin:6px 0; padding-left:18px; font-size:.8rem; color:#5b5347; }
+  .fix { font-size:.8rem; background:#fbf3e6; border-left:3px solid var(--accent); padding:5px 9px; margin-top:7px; }
+  details { margin-top:8px; }
+  summary { cursor:pointer; font-size:.78rem; color:var(--accent); }
+  pre { white-space:pre-wrap; word-break:break-word; font-size:.72rem; background:#faf6ee; border:1px solid var(--line);
+        border-radius:8px; padding:9px; margin:6px 0 0; max-height:280px; overflow:auto; }
+</style>
+</head><body>
+<header>
+  <h1 id="title">Generation debug</h1>
+  <a id="back" href="#">&#8592; Settings</a>
+  <a id="reader" href="#">Open reader</a>
+</header>
+<div class="wrap">
+  <div class="list" id="list"></div>
+  <main id="detail"><div class="empty">Pick a page on the left to see its generation history.</div></main>
+</div>
+<script>
+const ID = __BOOK_ID__, INIT = __PAGE__;
+const $ = s => document.querySelector(s);
+const esc = s => (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+$("#back").href = "/settings/" + ID;
+$("#reader").href = "/book/" + ID;
+const sCls = v => v >= 4 ? "good" : v >= 3 ? "mid" : "bad";
+const when = t => t ? new Date(t*1000).toLocaleString() : "";
+
+async function loadList() {
+  const r = await (await fetch(`/api/books/${ID}/debug/pages`)).json();
+  const b = await (await fetch(`/api/books/${ID}`)).json();
+  $("#title").textContent = (b.title || "Book") + " — generation debug";
+  const L = $("#list");
+  if (!r.pages.length) { L.innerHTML = `<div class="empty">No history yet. View some pages in the reader, then come back.</div>`; return; }
+  L.innerHTML = r.pages.map(p => `
+    <div class="pg" data-idx="${p.idx}">
+      <div>p${p.idx} <span class="t">${esc(p.title)}</span></div>
+      <div class="meta">${p.gens} gen${p.gens>1?"s":""} · ${p.attempts} attempts · best ${p.score ?? "—"}</div>
+    </div>`).join("");
+  L.querySelectorAll(".pg").forEach(el => el.onclick = () => loadPage(+el.dataset.idx));
+  if (INIT >= 0) loadPage(INIT);
+}
+
+function critBlock(c) {
+  if (!c) return "";
+  const keys = ["consistency","accuracy","kid_appropriate","style_ok"];
+  const scores = keys.filter(k => k in c).map(k =>
+    `<span class="s ${sCls(c[k])}">${k.replace("_"," ")} ${c[k]}</span>`).join("");
+  const iss = (c.issues||[]).length ? `<ul class="iss">${c.issues.map(i=>`<li>${esc(i)}</li>`).join("")}</ul>` : "";
+  const fix = c.fix_hint ? `<div class="fix"><b>fix →</b> ${esc(c.fix_hint)}</div>` : "";
+  return `<div class="scores">${scores}</div>${iss}${fix}`;
+}
+
+async function loadPage(idx) {
+  document.querySelectorAll(".pg").forEach(e => e.classList.toggle("sel", +e.dataset.idx === idx));
+  history.replaceState(null, "", `/debug/${ID}?page=${idx}`);
+  const r = await (await fetch(`/api/books/${ID}/pages/${idx}/history`)).json();
+  const D = $("#detail");
+  if (!r.history.length) { D.innerHTML = `<div class="empty">No generation history for page ${idx}.</div>`; return; }
+  D.innerHTML = r.history.map(g => {
+    const states = Object.entries(g.states||{}).map(([k,v]) =>
+      `<span class="chip"><b>${esc(k)}</b>: ${esc(v)}</span>`).join("");
+    const atts = g.attempts.map(a => {
+      const kept = a.attempt === g.chosen;
+      const img = `/api/books/${ID}/pages/${idx}/gen/${g.gen_id}/attempt/${a.attempt}/image`;
+      return `<div class="att ${kept?"kept":""}">
+        <img loading="lazy" src="${img}" alt="attempt ${a.attempt}">
+        <div class="body">
+          <div class="badges">
+            <span class="badge ${a.mode}">${a.mode}</span>
+            <span class="badge">#${a.attempt}</span>
+            ${kept?`<span class="badge kept">kept</span>`:""}
+            <span style="font-size:.72rem;color:var(--muted)">min ${a.min} · avg ${a.avg}</span>
+          </div>
+          ${critBlock(a.critique)}
+          <details><summary>Prompt sent to image model</summary><pre>${esc(a.prompt)}</pre></details>
+        </div></div>`;
+    }).join("");
+    return `<div class="gen">
+      <h2>Generation #${g.gen_id} · kept attempt ${g.chosen} · final ${g.final_score ?? "—"}</h2>
+      <div class="brief">${esc(g.brief)}</div>
+      <div class="meta" style="font-size:.74rem;color:var(--muted);margin-bottom:8px">${when(g.created_at)}</div>
+      ${states?`<div class="states">${states}</div>`:""}
+      <div class="atts">${atts}</div>
+    </div>`;
+  }).join("");
+}
+loadList();
+</script>
+</body></html>

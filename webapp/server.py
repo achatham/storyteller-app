@@ -183,6 +183,12 @@ def book_roster(book_id: int):
     return html.replace("__BOOK_ID__", str(book_id))
 
 
+@app.get("/debug/{book_id}", response_class=HTMLResponse)
+def book_debug(book_id: int, page: int = -1):
+    html = (STATIC / "debug.html").read_text()
+    return html.replace("__BOOK_ID__", str(book_id)).replace("__PAGE__", str(page))
+
+
 # ---------------- API ----------------
 
 def _image_response(data: bytes, request: Request) -> Response:
@@ -403,6 +409,32 @@ def api_chapter_flow(book_id: int, idx: int):
 @app.get("/api/books/{book_id}/pages/{idx}/status")
 def api_scene_status(book_id: int, idx: int):
     return {"status": db.scene_status(book_id, idx) or "none"}
+
+
+@app.get("/api/books/{book_id}/debug/pages")
+def api_debug_pages(book_id: int):
+    """Pages that have generation history (for the debug UI page list)."""
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    return {"book_id": book_id, "pages": db.debug_pages(book_id)}
+
+
+@app.get("/api/books/{book_id}/pages/{idx}/history")
+def api_scene_history(book_id: int, idx: int):
+    """Full generation history for one page: every run, every attempt (prompt +
+    critique + scores), newest first. Image blobs are fetched separately."""
+    page = db.get_page(book_id, idx)
+    return {"book_id": book_id, "idx": idx, "title": page["title"] if page else None,
+            "history": db.scene_history(book_id, idx)}
+
+
+@app.get("/api/books/{book_id}/pages/{idx}/gen/{gen_id}/attempt/{attempt}/image")
+def api_attempt_image(book_id: int, idx: int, gen_id: int, attempt: int, request: Request):
+    """One candidate image from history -- including rejected attempts."""
+    mime, data = db.scene_attempt_image(book_id, idx, gen_id, attempt)
+    if not data:
+        raise HTTPException(404, "no such attempt image")
+    return _image_response(data, request)
 
 
 @app.get("/api/books/{book_id}/pages/{idx}/trace")
