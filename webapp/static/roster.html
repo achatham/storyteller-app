@@ -60,7 +60,7 @@ $("#back").href = "/settings/" + ID;
       <div class="vgrid">
         ${e.variants.map(v => v.drawn ? `
           <div class="vcard">
-            <div class="frame"><img loading="lazy" src="/api/books/${ID}/sheet/${enc(e.entity_id)}/${enc(v.variant_id)}" alt="${esc(v.label)}"></div>
+            <div class="frame"><img loading="lazy" src="/api/books/${ID}/sheet/${enc(e.entity_id)}/${enc(v.variant_id)}?v=${b.seg_ver}" alt="${esc(v.label)}"></div>
             <div class="vlabel">${esc(v.label)}</div>${v.when?`<div class="vwhen">${esc(v.when)}</div>`:""}
           </div>` : `
           <div class="vcard">
