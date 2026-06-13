@@ -7,6 +7,7 @@ one style). Reference sheets come from the DB (roster), with any still-missing
 sheet generated and cached on first use. Result image bytes are stored in the DB.
 """
 import json
+import os
 import tempfile
 import threading
 from pathlib import Path
@@ -17,7 +18,7 @@ from pipeline.run import (resolve_cast, scene_members, build_scene_prompt,
                           SCENE_CRITIQUE, PASS_THRESHOLD)
 from . import db
 
-SCENE_TRIES = 2  # keep page latency low; prefetch hides the rest
+SCENE_TRIES = int(os.environ.get("STORY_SCENE_TRIES", "2"))  # max image attempts/scene (1 fresh + revises)
 REVISE_AVG = 3.5  # if a failed candidate averages this high, edit it (img2img) vs restart
 SHEET_TRIES = 2  # reference sheets are drawn once + cached, so a reroll is cheap insurance
 SHEET_PASS = 4   # min(clean_sheet, match) needed to accept a sheet
@@ -362,7 +363,9 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                               "outer hull or silhouette), and NEVER show a mirrored, doubled or twin copy of "
                               "any feature at both ends/edges of the picture.")
         best, fix, draft = None, "", None
+        trace = {"states": states, "max_tries": SCENE_TRIES, "attempts": []}
         for attempt in range(1, SCENE_TRIES + 1):
+            mode = "revise" if draft is not None else "fresh"
             cand = Path(td) / f"cand{attempt}.webp"
             if draft is not None:
                 # REVISE: the last attempt was broadly right with one flagged defect.
@@ -383,18 +386,26 @@ def _render_scene(book_id: int, idx: int) -> bytes:
             crit = gem.critique_image(cand, SCENE_CRITIQUE.format(
                 brief=page["brief"], chars=char_desc or "(none)", style=style_text,
                 source=(page["read_text"] or "")[:1200] or "(not available)"))
-            scores = [crit.get(k, 0) for k in ("consistency", "accuracy", "kid_appropriate", "style_ok")]
+            keys = ("consistency", "accuracy", "kid_appropriate", "style_ok")
+            scores = [crit.get(k, 0) for k in keys]
             score = min(scores)
+            avg = sum(scores) / len(scores)
             data = cand.read_bytes()
+            trace["attempts"].append({
+                "n": attempt, "mode": mode, "scores": dict(zip(keys, scores)),
+                "min": score, "avg": round(avg, 2),
+                "issues": crit.get("issues", []), "fix_hint": crit.get("fix_hint", ""),
+            })
             if best is None or score > best[1]:
-                best = (data, score)
+                best = (data, score, attempt)
             if score >= PASS_THRESHOLD:
                 break
             fix = crit.get("fix_hint", "")
             # "very close" (broadly good, one weak spot) -> revise this image next;
             # otherwise discard it and regenerate the scene from scratch.
-            draft = cand if (sum(scores) / len(scores)) >= REVISE_AVG else None
+            draft = cand if avg >= REVISE_AVG else None
 
-    data, score = best
-    db.scene_store(book_id, idx, data, score)
+    data, score, chosen = best
+    trace["chosen"] = chosen
+    db.scene_store(book_id, idx, data, score, trace=json.dumps(trace))
     return data

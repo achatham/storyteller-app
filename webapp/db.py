@@ -113,6 +113,9 @@ def init():
         pcols = {r["name"] for r in c.execute("PRAGMA table_info(pages)")}
         if "image_anchor" not in pcols:
             c.execute("ALTER TABLE pages ADD COLUMN image_anchor TEXT")
+        scols = {r["name"] for r in c.execute("PRAGMA table_info(scenes)")}
+        if "trace" not in scols:   # per-attempt critique/revise log (JSON)
+            c.execute("ALTER TABLE scenes ADD COLUMN trace TEXT")
 
 
 # ---------------- books ----------------
@@ -324,6 +327,11 @@ def scene_status(book_id, idx) -> str | None:
     return r["status"] if r else None
 
 
+def scene_score(book_id, idx):
+    r = scene_row(book_id, idx)
+    return r["score"] if r else None
+
+
 def scene_data(book_id, idx) -> bytes | None:
     """The finished image bytes, or None if not generated yet."""
     with conn() as c:
@@ -341,13 +349,27 @@ def scene_set_status(book_id, idx, status, detail=None):
                   (book_id, idx, status, detail, time.time()))
 
 
-def scene_store(book_id, idx, data, score, mime="image/webp"):
+def scene_store(book_id, idx, data, score, mime="image/webp", trace=None):
     with conn() as c:
-        c.execute("INSERT INTO scenes(book_id,idx,status,mime,data,score,updated_at) "
-                  "VALUES (?,?,'done',?,?,?,?) ON CONFLICT(book_id,idx) DO UPDATE SET "
+        c.execute("INSERT INTO scenes(book_id,idx,status,mime,data,score,trace,updated_at) "
+                  "VALUES (?,?,'done',?,?,?,?,?) ON CONFLICT(book_id,idx) DO UPDATE SET "
                   "status='done', mime=excluded.mime, data=excluded.data, "
-                  "score=excluded.score, detail=NULL, updated_at=excluded.updated_at",
-                  (book_id, idx, mime, data, score, time.time()))
+                  "score=excluded.score, trace=excluded.trace, detail=NULL, "
+                  "updated_at=excluded.updated_at",
+                  (book_id, idx, mime, data, score, trace, time.time()))
+
+
+def scene_trace(book_id, idx):
+    """The per-attempt critique/revise log (JSON dict) for a drawn scene, or None."""
+    with conn() as c:
+        r = c.execute("SELECT trace FROM scenes WHERE book_id=? AND idx=?",
+                      (book_id, idx)).fetchone()
+    if not r or not r["trace"]:
+        return None
+    try:
+        return json.loads(r["trace"])
+    except (ValueError, TypeError):
+        return None
 
 
 def clear_art(book_id) -> dict:

@@ -70,6 +70,7 @@ Reads `GEMINI_API_KEY` from `.env` (same as the CLI pipeline).
 | `STORY_WARM_PAGES` | `2` | first pages drawn during import (instant open) |
 | `STORY_PREFETCH` | `4` | pages drawn ahead while reading |
 | `STORY_GEN_CONCURRENCY` | `3` | max simultaneous image generations |
+| `STORY_SCENE_TRIES` | `2` | max image attempts per scene (1 fresh + critic-driven revises); raise for quality at more image cost |
 | `STORY_SHEET_IMAGE_MODEL` | `gemini-3-pro-image-preview` | roster sheets |
 | `STORY_PAGE_IMAGE_MODEL` | `gemini-3.1-flash-image` | page scenes |
 | `STORY_TEXT_MODEL` | `gemini-3.5-flash` | default for all text steps |

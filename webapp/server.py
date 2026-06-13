@@ -405,6 +405,17 @@ def api_scene_status(book_id: int, idx: int):
     return {"status": db.scene_status(book_id, idx) or "none"}
 
 
+@app.get("/api/books/{book_id}/pages/{idx}/trace")
+def api_scene_trace(book_id: int, idx: int):
+    """The generation log for a drawn scene: each attempt's mode (fresh/revise),
+    the four critic sub-scores, issues, fix-hint, the per-character states, and
+    which attempt was kept. Null until the scene has been drawn at least once."""
+    page = db.get_page(book_id, idx)
+    return {"book_id": book_id, "idx": idx, "title": page["title"] if page else None,
+            "brief": page["brief"] if page else None,
+            "score": db.scene_score(book_id, idx), "trace": db.scene_trace(book_id, idx)}
+
+
 @app.get("/api/books/{book_id}/pages/{idx}/image")
 async def api_scene_image(book_id: int, idx: int, request: Request):
     book = db.get_book(book_id)
