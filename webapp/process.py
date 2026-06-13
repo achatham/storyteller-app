@@ -57,8 +57,15 @@ object in view. Judge by MEANING, not exact words: "the vessel", "the boat", "on
 indicate the ship. For each one that appears, choose the best-fitting variant id using the \
 page's description and the variant chapter spans (this is chapter {chapter_num}).
 
+Also give each an "aspect":
+- "exterior" if the scene shows the object FROM OUTSIDE -- you can see the whole thing (a ship \
+sailing on the sea, a castle on a hill).
+- "aboard" if the scene is INSIDE or ON the object -- its interior or deck, seen by someone who \
+is within/aboard it (characters standing on the ship's deck, inside its cabin, inside the castle). \
+In an "aboard" scene you would NOT see the whole exterior.
+
 Return JSON only:
-{{"pages": [{{"id": <page id>, "props": [{{"entity_id": "<id>", "variant_id": "<variant id>"}}]}}]}}
+{{"pages": [{{"id": <page id>, "props": [{{"entity_id": "<id>", "variant_id": "<variant id>", "aspect": "exterior|aboard"}}]}}]}}
 Only include a page if it has props; omit anything that does not actually appear.
 
 SETTINGS/PROPS:
@@ -70,8 +77,9 @@ PAGES:
 
 
 def _llm_map_props(props, spreads, chapter_num):
-    """Ask the (cheap) model which settings/props appear on each page. Returns
-    {page_id: [(entity_id, variant_id), ...]}."""
+    """Ask the (cheap) model which settings/props appear on each page, and whether
+    each is seen from outside (exterior) or inside/on it (aboard). Returns
+    {page_id: [(entity_id, variant_id, aspect), ...]}."""
     from pipeline import gem
     from pipeline.config import PROP_MODEL
     prop_lines = [{"id": e["id"], "name": e.get("name", ""), "aliases": e.get("aliases", []),
@@ -85,7 +93,7 @@ def _llm_map_props(props, spreads, chapter_num):
         pages=json.dumps(page_lines, ensure_ascii=False)), model=PROP_MODEL)
     out = {}
     for pg in data.get("pages", []):
-        out[pg.get("id")] = [(p.get("entity_id"), p.get("variant_id"))
+        out[pg.get("id")] = [(p.get("entity_id"), p.get("variant_id"), p.get("aspect"))
                              for p in pg.get("props", []) if p.get("entity_id")]
     return out
 
@@ -107,30 +115,39 @@ def enrich_setting_props(bible: dict, registry: dict, chapter_num: int):
     chapter_cast = bible.setdefault("cast", [])
     in_chapter = {m.get("entity_id") for m in chapter_cast}
 
-    def add(spread, eid, vid):
+    def add(spread, eid, vid, aspect, force_aspect=True):
         e = prop_by_id.get(eid)
         if not e or spread is None:
             return
         if vid not in {v["id"] for v in e.get("variants", [])}:
             vid = _variant_for_chapter(e, chapter_num)   # validate / fall back
+        aspect = "aboard" if aspect == "aboard" else "exterior"
         cast = spread.setdefault("cast", [])
-        if not any(c.get("entity_id") == eid for c in cast):
-            cast.append({"entity_id": eid, "variant_id": vid})
+        # aspect = is the scene OUTSIDE the object (exterior) or INSIDE/ON it
+        # (aboard) -- drives which reference sheet the renderer attaches. Update
+        # the existing cast entry too (the segmenter may have added it untagged).
+        existing = next((c for c in cast if c.get("entity_id") == eid), None)
+        if existing is None:
+            cast.append({"entity_id": eid, "variant_id": vid, "aspect": aspect})
+        elif force_aspect or not existing.get("aspect"):
+            existing["aspect"] = aspect
+            existing.setdefault("variant_id", vid)
         if eid not in in_chapter:
             chapter_cast.append({"entity_id": eid, "variant_id": vid,
                                  "name": e.get("name", ""), "from_registry": True})
             in_chapter.add(eid)
 
-    # primary: model pass (best-effort)
+    # primary: model pass (best-effort) -- authoritative on aspect
     try:
         mapped = _llm_map_props(props, bible.get("spreads", []), chapter_num)
         for pid, items in mapped.items():
-            for eid, vid in items:
-                add(spread_by_id.get(pid), eid, vid)
+            for eid, vid, aspect in items:
+                add(spread_by_id.get(pid), eid, vid, aspect)
     except Exception as ex:  # noqa: BLE001
         print(f"[props] model pass failed: {type(ex).__name__}: {ex}", flush=True)
 
-    # floor: literal name/alias match (strip leading articles to be less brittle)
+    # floor: literal name/alias match (strip leading articles to be less brittle).
+    # Only fills a prop/aspect the model pass missed -- never overwrites its aspect.
     for e in props:
         names = [e.get("name", "")] + (e.get("aliases") or [])
         pats = [re.compile(r"\b" + re.escape(re.sub(r"(?i)^(the|a|an)\s+", "", n)) + r"\b", re.I)
@@ -139,7 +156,7 @@ def enrich_setting_props(bible: dict, registry: dict, chapter_num: int):
         for s in bible.get("spreads", []):
             text = f"{s.get('setting','')} {s.get('illustration_brief','')}"
             if any(p.search(text) for p in pats):
-                add(s, e["id"], vid)
+                add(s, e["id"], vid, "exterior", force_aspect=False)
 
 # Every epub is laid out differently (NCX present or not, spine vs TOC mismatch,
 # odd front/back matter), so rather than trust the format we hand the model a

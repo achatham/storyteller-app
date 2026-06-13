@@ -279,16 +279,19 @@ def get_sheet(book_id, entity_id, variant_id) -> bytes | None:
 
 
 def get_any_sheet(book_id, entity_id, exclude_variant_id=None) -> bytes | None:
-    """Any already-drawn sheet for this entity (optionally excluding one variant)
-    -- used as an identity reference when drawing another of its variants."""
+    """Any already-drawn *real* variant sheet for this entity (optionally excluding
+    one variant) -- used as an identity reference when drawing another of its
+    variants. Synthetic aspect refs (variant ids starting with '__', e.g. the
+    interior/aboard view) are excluded so they don't cross-contaminate."""
     with conn() as c:
         if exclude_variant_id is not None:
             r = c.execute("SELECT data FROM sheets WHERE book_id=? AND entity_id=? "
-                          "AND variant_id != ? LIMIT 1",
+                          "AND variant_id != ? AND substr(variant_id,1,2) != '__' LIMIT 1",
                           (book_id, entity_id, exclude_variant_id)).fetchone()
         else:
             r = c.execute("SELECT data FROM sheets WHERE book_id=? AND entity_id=? "
-                          "LIMIT 1", (book_id, entity_id)).fetchone()
+                          "AND substr(variant_id,1,2) != '__' LIMIT 1",
+                          (book_id, entity_id)).fetchone()
         return r["data"] if r else None
 
 

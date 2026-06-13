@@ -75,9 +75,30 @@ def _gen_to_bytes(prompt, refs, model, aspect) -> bytes:
         return out.read_bytes()
 
 
-def _ensure_sheet(book_id, member, style_text) -> bytes | None:
+def _style_anchor_path(book, td) -> "Path | None":
+    """A temp file holding the book's style sample image, used as a STYLE
+    reference when drawing roster sheets. Text alone under-determines the style
+    (two "oil" sheets can diverge); anchoring every sheet to one concrete sample
+    keeps them in a single look, which then carries into the scenes that reference
+    them. Generates the sample if it does not exist yet."""
+    key = book.get("style")
+    data = db.get_style_sample(key)
+    if not data:
+        try:
+            data = generate_style_sample(key)
+        except Exception:  # noqa: BLE001
+            return None
+    if not data:
+        return None
+    p = Path(td) / "styleref.webp"
+    p.write_bytes(data)
+    return p
+
+
+def _ensure_sheet(book_id, member, style_text, style_ref=None) -> bytes | None:
     """A reference sheet for one cast member: from the roster if present, else
-    drawn now (in this book's style) and cached. Returns image bytes."""
+    drawn now (in this book's style) and cached. `style_ref` is a style-anchor
+    image so all sheets share one concrete look. Returns image bytes."""
     eid, vid = member["entity_id"], member["variant_id"]
     data = db.get_sheet(book_id, eid, vid)
     if data:
@@ -86,32 +107,77 @@ def _ensure_sheet(book_id, member, style_text) -> bytes | None:
     sheet_prompt = member.get("sheet_prompt", "")
     if not (appearance or sheet_prompt):
         return None
-    aspect = "2:3" if member.get("type") == "character" else "3:2"
-    prompt = (f"{style_text}\n\n{sheet_prompt}\n\nCanonical look (match exactly): "
-              f"{appearance}\nSingle subject only, plain soft neutral background, "
-              "even lighting, no text labels.")
+    img_aspect = "2:3" if member.get("type") == "character" else "3:2"
+    base = (f"{style_text}\n\n{sheet_prompt}\n\nCanonical look (match exactly): "
+            f"{appearance}\nSingle subject only, plain soft neutral background, "
+            "even lighting, no text labels.")
     with _entity_lock(book_id, eid):
         data = db.get_sheet(book_id, eid, vid)   # another thread may have just drawn it
         if data:
             return data
         try:
             with tempfile.TemporaryDirectory() as td:
-                # pin identity: if another variant of THIS entity is already drawn,
-                # attach it so the same face/build carries across the character's looks
-                refs = None
+                refs, notes = [], []
+                # 1) a STYLE reference so this sheet matches the book's one look
+                if style_ref and style_ref.exists():
+                    refs.append(style_ref)
+                    notes.append(f"Image {len(refs)} is a STYLE REFERENCE: match its artistic "
+                                 "style, medium, brush/line work and colour palette EXACTLY -- "
+                                 "but do NOT copy its subject or scene.")
+                # 2) identity: another variant of THIS entity, to keep the same face/build
                 sib = db.get_any_sheet(book_id, eid, exclude_variant_id=vid)
                 if sib:
                     sp = Path(td) / "sibling.webp"
                     sp.write_bytes(sib)
-                    refs = [sp]
-                    prompt += ("\n\nA reference image of THIS SAME character (a different "
-                               "outfit/moment) is attached. Keep the SAME facial identity, "
-                               "hair, and build; change only the clothing/age/form described above.")
-                data = _gen_to_bytes(prompt, refs, SHEET_IMAGE_MODEL, aspect)
+                    refs.append(sp)
+                    notes.append(f"Image {len(refs)} shows THIS SAME character in a different "
+                                 "outfit/moment: keep the SAME facial identity, hair and build; "
+                                 "change only the clothing/age/form described above.")
+                prompt = base + ("\n\n" + " ".join(notes) if notes else "")
+                data = _gen_to_bytes(prompt, refs or None, SHEET_IMAGE_MODEL, img_aspect)
         except Exception as ex:  # noqa: BLE001
             print(f"[scene] sheet {eid}/{vid} failed: {ex}", flush=True)
             return None
         db.save_sheet(book_id, eid, vid, data)
+        return data
+
+
+ABOARD_VID = "__aboard"
+
+
+def _ensure_aboard_sheet(book_id, member, style_text, style_ref=None) -> bytes | None:
+    """An interior / on-board reference for a setting or prop (e.g. a ship's deck,
+    a room inside a building), so scenes set INSIDE/ON it don't get the whole
+    exterior pasted in. One per entity, keyed under a synthetic '__aboard' variant.
+    Deliberately NOT seeded from the exterior sheet -- that would put the whole
+    object back. Falls back to the normal sheet if it can't be made."""
+    eid = member["entity_id"]
+    data = db.get_sheet(book_id, eid, ABOARD_VID)
+    if data:
+        return data
+    name = member.get("name", eid)
+    appearance = member.get("appearance", "")
+    prompt = (f"{style_text}\n\nA neutral REFERENCE of the INTERIOR / ON-BOARD view of {name} -- "
+              f"what you would see when INSIDE or ABOARD it (for a ship: its open wooden deck with "
+              f"the base of the mast, rigging and side rails; for a building: a room within), in the "
+              f"same materials, colours and style as: {appearance}\n"
+              f"Show ONLY the interior/on-board structure -- do NOT show the whole exterior of "
+              f"{name}. No people, even lighting, single clean reference.")
+    with _entity_lock(book_id, eid + ":aboard"):
+        data = db.get_sheet(book_id, eid, ABOARD_VID)
+        if data:
+            return data
+        try:
+            refs = None
+            if style_ref and style_ref.exists():
+                refs = [style_ref]
+                prompt += ("\n\nThe attached image is a STYLE REFERENCE: match its art style, "
+                           "medium and colour palette exactly, but do NOT copy its subject.")
+            data = _gen_to_bytes(prompt, refs, SHEET_IMAGE_MODEL, "3:2")
+        except Exception as ex:  # noqa: BLE001
+            print(f"[scene] aboard sheet {eid} failed: {ex}", flush=True)
+            return _ensure_sheet(book_id, member, style_text, style_ref)   # fallback
+        db.save_sheet(book_id, eid, ABOARD_VID, data)
         return data
 
 
@@ -133,16 +199,30 @@ def _render_scene(book_id: int, idx: int) -> bytes:
     style_text = _style_text(book["style"])
 
     cast_index = resolve_cast({"cast": chapter_cast}, registry)
-    spread = {"illustration_brief": page["brief"], "setting": page["setting"],
-              "cast": json.loads(page["cast_json"]) if page.get("cast_json") else []}
+    page_cast = json.loads(page["cast_json"]) if page.get("cast_json") else []
+    spread = {"illustration_brief": page["brief"], "setting": page["setting"], "cast": page_cast}
     members = scene_members(spread, cast_index)
+    # aspect per entity (set on settings/props by the prop pass): exterior vs aboard
+    aspect = {c.get("entity_id"): c.get("aspect") for c in page_cast if c.get("aspect")}
 
     with tempfile.TemporaryDirectory() as td:
+        style_ref = _style_anchor_path(book, td)   # one concrete look for every sheet
         ref_members, ref_paths = [], []
-        for m in members:
+        # an aboard setting/prop (the deck/room the scene is in) is prioritized into
+        # the reference set -- the location matters as much as the cast for coherence
+        ordered = sorted(members, key=lambda m: 0 if (
+            m.get("type") in ("setting", "prop")
+            and aspect.get(m["entity_id"]) == "aboard") else 1)
+        for m in ordered:
             if len(ref_members) >= MAX_REFS:
                 break
-            data = _ensure_sheet(book_id, m, style_text)
+            # for a setting/prop the characters are INSIDE/ON, use its interior
+            # reference (a deck/room view) instead of the whole-exterior sheet,
+            # so the whole object isn't pasted into an on-board scene
+            if m.get("type") in ("setting", "prop") and aspect.get(m["entity_id"]) == "aboard":
+                data = _ensure_aboard_sheet(book_id, m, style_text, style_ref=style_ref)
+            else:
+                data = _ensure_sheet(book_id, m, style_text, style_ref=style_ref)
             if data:
                 p = Path(td) / f"{m['entity_id']}__{m['variant_id']}.webp"
                 p.write_bytes(data)
