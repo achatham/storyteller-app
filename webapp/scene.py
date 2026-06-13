@@ -18,6 +18,47 @@ from pipeline.run import (resolve_cast, scene_members, build_scene_prompt,
 from . import db
 
 SCENE_TRIES = 2  # keep page latency low; prefetch hides the rest
+SHEET_TRIES = 2  # reference sheets are drawn once + cached, so a reroll is cheap insurance
+SHEET_PASS = 4   # min(clean_sheet, match) needed to accept a sheet
+
+SHEET_CRITIQUE = """You are reviewing a CANONICAL REFERENCE SHEET for a children's book.
+It should depict, on a plain neutral background, this single subject:
+{desc}
+
+Return JSON only:
+{{
+  "clean_sheet": <1-5: is there EXACTLY ONE subject, drawn ONCE? Score 1 if it is duplicated,
+                  mirrored or doubled (e.g. two heads/faces, a twin copy, the same feature at
+                  both ends), or there are extra subjects, text labels or a busy background>,
+  "match": <1-5: does it match the description above?>,
+  "issues": ["..."],
+  "fix_hint": "<one sentence telling the artist how to fix the biggest problem>"
+}}"""
+
+
+def _draw_sheet(prompt, refs, aspect, desc) -> bytes:
+    """Draw a reference sheet with a single-subject critic + retry, keeping the
+    best of SHEET_TRIES attempts. Catches the model's habit of mirroring/doubling
+    a subject (e.g. a figurehead at both ends -> 'two heads')."""
+    with tempfile.TemporaryDirectory() as td:
+        best, fix = None, ""
+        for attempt in range(1, SHEET_TRIES + 1):
+            p = prompt + (f"\n\nIMPORTANT FIX FROM LAST ATTEMPT: {fix}" if fix else "")
+            cand = Path(td) / f"cand{attempt}.webp"
+            gem.generate_image(p, refs=refs, out_path=cand, aspect=aspect, model=SHEET_IMAGE_MODEL)
+            data = cand.read_bytes()
+            try:
+                crit = gem.critique_image(cand, SHEET_CRITIQUE.format(desc=desc or "(the subject)"))
+                score = min(crit.get("clean_sheet", 0), crit.get("match", 0))
+            except Exception as ex:  # noqa: BLE001 -- never fail a sheet on a critic error
+                print(f"[scene] sheet critique failed: {ex}", flush=True)
+                return data
+            if best is None or score > best[1]:
+                best = (data, score)
+            if score >= SHEET_PASS:
+                break
+            fix = crit.get("fix_hint", "")
+        return best[0]
 
 # Serialize sheet generation per (book, entity): the first variant drawn becomes
 # the identity anchor, and concurrent scenes that need the same character's sheets
@@ -135,7 +176,7 @@ def _ensure_sheet(book_id, member, style_text, style_ref=None) -> bytes | None:
                                  "outfit/moment: keep the SAME facial identity, hair and build; "
                                  "change only the clothing/age/form described above.")
                 prompt = base + ("\n\n" + " ".join(notes) if notes else "")
-                data = _gen_to_bytes(prompt, refs or None, SHEET_IMAGE_MODEL, img_aspect)
+                data = _draw_sheet(prompt, refs or None, img_aspect, appearance)
         except Exception as ex:  # noqa: BLE001
             print(f"[scene] sheet {eid}/{vid} failed: {ex}", flush=True)
             return None
@@ -153,12 +194,16 @@ def _view_prompt(name, appearance, view):
                 f"{name}, its overall outer shape, or any exterior-only identifying feature (a "
                 f"figurehead, the whole hull or outer silhouette) -- not even through a window.")
     else:  # surface
-        what = (f"the open outer SURFACE / top of {name}, seen by someone standing ON it (for a ship: "
-                f"its deck with the base of the mast, rigging and rails; for a building: its rooftop), "
-                f"with the structure that rises from it. Do NOT show a separate whole copy of {name} "
-                f"floating in the distance.")
-    return (f"A neutral REFERENCE of {what}\nMatch the materials, colours and style consistent with: "
-            f"{appearance}\nNo people, even lighting, single clean reference.")
+        what = (f"the open outer SURFACE / top of {name}, seen by someone standing ON it and looking "
+                f"along it (for a ship: its deck with the base of the mast, rigging, rails, hatches and "
+                f"cabin door; for a building: its rooftop), with only the structures that rise directly "
+                f"from that surface. Do NOT show a separate whole copy of {name} in the distance, and do "
+                f"NOT show its exterior-only identifying features (a figurehead or prow ornament, the "
+                f"full outer hull or silhouette). Draw each feature EXACTLY ONCE -- never a mirrored, "
+                f"doubled or twin copy at both ends.")
+    return (f"A neutral REFERENCE of {what}\nUse this only for the palette, wood tones and materials "
+            f"(do NOT add exterior features from it): {appearance}\n"
+            f"No people, even lighting, single clean reference.")
 
 
 def _ensure_view_sheet(book_id, member, style_text, view, style_ref=None) -> bytes | None:
@@ -183,7 +228,8 @@ def _ensure_view_sheet(book_id, member, style_text, view, style_ref=None) -> byt
                 refs = [style_ref]
                 prompt += ("\n\nThe attached image is a STYLE REFERENCE: match its art style, "
                            "medium and colour palette exactly, but do NOT copy its subject.")
-            data = _gen_to_bytes(prompt, refs, SHEET_IMAGE_MODEL, "3:2")
+            desc = f"{_view_prompt(member.get('name', eid), '', view)}"
+            data = _draw_sheet(prompt, refs, "3:2", desc)
         except Exception as ex:  # noqa: BLE001
             print(f"[scene] {view} sheet {eid} failed: {ex}", flush=True)
             return _ensure_sheet(book_id, member, style_text, style_ref)   # fallback
