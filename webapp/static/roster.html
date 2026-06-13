@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storyteller — roster</title>
+<link rel="manifest" href="/static/manifest.webmanifest">
+<meta name="theme-color" content="#7a5c3e">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});</script>
+<style>
+  :root { --bg:#f4efe6; --ink:#2b2622; --muted:#9a8a70; --panel:#fffdf8; --line:#e0d4bd; --accent:#7a5c3e; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:Georgia,'Times New Roman',serif; }
+  header { padding:22px 24px 6px; }
+  a.back { font-family:system-ui,sans-serif; font-size:.85rem; color:var(--accent); text-decoration:none; }
+  h1 { margin:.2em 0 0; font-size:1.6rem; }
+  .sub { color:var(--muted); font-family:system-ui,sans-serif; font-size:.85rem; }
+  main { max-width:1000px; margin:0 auto; padding:8px 24px 60px; }
+  .entity { margin-top:22px; }
+  .ehead { display:flex; align-items:baseline; gap:10px; border-bottom:1px solid var(--line); padding-bottom:6px; }
+  .ehead h2 { margin:0; font-size:1.2rem; }
+  .ehead .type { font-family:system-ui,sans-serif; font-size:.7rem; text-transform:uppercase; letter-spacing:.5px;
+                 color:var(--muted); border:1px solid var(--line); border-radius:20px; padding:2px 8px; }
+  .vgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:14px; margin-top:12px; }
+  .vcard { display:flex; flex-direction:column; gap:6px; }
+  .frame { aspect-ratio:3/4; border:1px solid var(--line); border-radius:10px; overflow:hidden;
+           background:var(--panel); display:flex; align-items:center; justify-content:center; }
+  .frame img { width:100%; height:100%; object-fit:cover; display:block; }
+  .placeholder { flex-direction:column; gap:6px; color:var(--muted); font-family:system-ui,sans-serif;
+                 text-align:center; padding:10px;
+                 background:repeating-linear-gradient(45deg,#f3ecdd,#f3ecdd 9px,#ece3d1 9px,#ece3d1 18px); }
+  .placeholder .ph-name { font-weight:600; font-size:.85rem; color:var(--ink); }
+  .placeholder .ph-tag { font-size:.68rem; }
+  .vlabel { font-family:system-ui,sans-serif; font-size:.8rem; text-transform:capitalize; }
+  .vwhen { font-family:system-ui,sans-serif; font-size:.7rem; color:var(--muted); }
+  .legend { font-family:system-ui,sans-serif; font-size:.8rem; color:var(--muted); margin-top:6px; }
+</style>
+</head><body>
+<header>
+  <a class="back" id="back" href="#">&#8592; Book settings</a>
+  <h1 id="title">Roster</h1>
+  <div class="sub" id="sub"></div>
+</header>
+<main id="main"></main>
+<script>
+const ID = __BOOK_ID__;
+const $ = s => document.querySelector(s);
+$("#back").href = "/settings/" + ID;
+
+(async () => {
+  const b = await (await fetch("/api/books/"+ID)).json();
+  $("#title").textContent = b.title + " — roster";
+  const roster = await (await fetch("/api/books/"+ID+"/roster")).json();
+  const drawn = roster.reduce((n,e)=>n+e.variants.filter(v=>v.drawn).length,0);
+  const total = roster.reduce((n,e)=>n+e.variants.length,0);
+  $("#sub").textContent = `${roster.length} entities · ${drawn}/${total} reference sheets drawn (the rest draw as you read those scenes)`;
+  $("#main").innerHTML = roster.map(e => `
+    <div class="entity">
+      <div class="ehead"><h2>${esc(e.name)}</h2><span class="type">${e.type}</span></div>
+      <div class="vgrid">
+        ${e.variants.map(v => v.drawn ? `
+          <div class="vcard">
+            <div class="frame"><img loading="lazy" src="/api/books/${ID}/sheet/${enc(e.entity_id)}/${enc(v.variant_id)}" alt="${esc(v.label)}"></div>
+            <div class="vlabel">${esc(v.label)}</div>${v.when?`<div class="vwhen">${esc(v.when)}</div>`:""}
+          </div>` : `
+          <div class="vcard">
+            <div class="frame placeholder">
+              <span class="ph-name">${esc(e.name)}</span>
+              <span class="ph-tag">${esc(v.label)}</span>
+              <span class="ph-tag">— not drawn yet —</span>
+            </div>
+            <div class="vlabel">${esc(v.label)}</div>${v.when?`<div class="vwhen">${esc(v.when)}</div>`:""}
+          </div>`).join("")}
+      </div>
+    </div>`).join("");
+})();
+function esc(s){ return (s||"").replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function enc(s){ return encodeURIComponent(s); }
+</script>
+</body></html>

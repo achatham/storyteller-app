@@ -295,6 +295,14 @@ def get_any_sheet(book_id, entity_id, exclude_variant_id=None) -> bytes | None:
         return r["data"] if r else None
 
 
+def list_sheets(book_id) -> list:
+    """(entity_id, variant_id) for every already-drawn sheet of this book."""
+    with conn() as c:
+        return [(r["entity_id"], r["variant_id"]) for r in c.execute(
+            "SELECT entity_id, variant_id FROM sheets WHERE book_id=? AND length(data)>0",
+            (book_id,))]
+
+
 def has_sheet(book_id, entity_id, variant_id) -> bool:
     with conn() as c:
         r = c.execute("SELECT 1 FROM sheets WHERE book_id=? AND entity_id=? AND "

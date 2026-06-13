@@ -64,6 +64,7 @@
   <div class="actions">
     <a class="btn go" id="read">Read</a>
     <a class="btn" id="bookview">Book view</a>
+    <a class="btn" id="roster">View roster</a>
     <a class="btn back" href="/">Library</a>
   </div>
 </main>
@@ -78,6 +79,7 @@ const usd = n => "$" + (n||0).toFixed(n>=1?2:3);
   $("#auth").textContent = b.author || "";
   $("#read").href = "/read/"+ID;
   $("#bookview").href = "/book/"+ID;
+  $("#roster").href = "/roster/"+ID;
   $("#info").innerHTML = [
     ["Art style", (b.style||"").replace(/_/g," ")],
     ["Illustration cadence", "~"+b.words_per_page+" words / picture"],

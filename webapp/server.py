@@ -176,6 +176,12 @@ def book_settings(book_id: int):
     return html.replace("__BOOK_ID__", str(book_id))
 
 
+@app.get("/roster/{book_id}", response_class=HTMLResponse)
+def book_roster(book_id: int):
+    html = (STATIC / "roster.html").read_text()
+    return html.replace("__BOOK_ID__", str(book_id))
+
+
 # ---------------- API ----------------
 
 @app.get("/api/styles")
@@ -267,6 +273,46 @@ async def api_reprocess(book_id: int, fresh: bool = False):
     db.set_status(book_id, "queued", "reprocessing…" + (" (fresh)" if fresh else ""))
     await asyncio.to_thread(start_processing, book_id)
     return {"ok": True, "fresh": fresh}
+
+
+@app.get("/api/books/{book_id}/roster")
+def api_roster(book_id: int):
+    """The book's character/setting/prop roster: each entity's variants with a
+    flag for whether its reference sheet has been drawn yet (no generation)."""
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    reg = db.get_registry(book_id)
+    drawn = {}
+    for eid, vid in db.list_sheets(book_id):
+        drawn.setdefault(eid, set()).add(vid)
+    out = []
+    for e in reg.get("entities", []):
+        eid = e["id"]
+        variants, seen = [], set()
+        for v in e.get("variants", []):
+            vid = v["id"]
+            seen.add(vid)
+            variants.append({"variant_id": vid, "label": v.get("label") or vid.replace("_", " "),
+                             "when": v.get("when", ""), "drawn": vid in drawn.get(eid, set())})
+        for vid in sorted(drawn.get(eid, set())):   # drawn-but-not-in-registry (default, __aboard)
+            if vid in seen:
+                continue
+            label = "aboard / interior" if vid == "__aboard" else vid.replace("_", " ").strip()
+            variants.append({"variant_id": vid, "label": label or "default", "when": "", "drawn": True})
+        out.append({"entity_id": eid, "name": e.get("name", eid), "type": e.get("type", "character"),
+                    "importance": e.get("importance", 0), "variants": variants})
+    out.sort(key=lambda x: (-x["importance"], x["name"]))
+    return out
+
+
+@app.get("/api/books/{book_id}/sheet/{entity_id}/{variant_id}")
+def api_sheet(book_id: int, entity_id: str, variant_id: str):
+    """Serve an already-drawn roster sheet. 404 if not drawn -- never generates."""
+    data = db.get_sheet(book_id, entity_id, variant_id)
+    if not data:
+        raise HTTPException(404, "not drawn yet")
+    return Response(content=data, media_type="image/webp",
+                    headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/api/books/{book_id}/cost")
