@@ -261,8 +261,11 @@ def _render_scene(book_id: int, idx: int) -> bytes:
     # aspect per entity (set on settings/props by the prop pass): exterior | surface | interior
     aspect = {c.get("entity_id"): c.get("aspect") for c in page_cast if c.get("aspect")}
 
-    def _view(m):   # the non-exterior view for a setting/prop, or None
-        if m.get("type") in ("setting", "prop"):
+    def _view(m):   # the non-exterior view for a SETTING you can stand on / go inside, or None
+        # Only settings (a ship, a room, a building) have a surface or interior. A
+        # prop -- a painting, a book, a knife -- is always shown whole; "the interior
+        # of a picture" is incoherent and fuses the prop with the room around it.
+        if m.get("type") == "setting":
             a = aspect.get(m["entity_id"])
             if a in ("surface", "interior"):
                 return a

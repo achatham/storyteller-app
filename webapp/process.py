@@ -65,6 +65,9 @@ balcony. You see the surface and whatever structure rises from it, but not the w
 - "interior": the characters are ENCLOSED INSIDE it -- a ship's cabin/hold/bunk, a room inside a \
 building, a cave. You see only interior surfaces; you would NOT see the object's exterior at all, \
 not even through a window.
+Only a PLACE you can stand on or go inside (a ship, a building, a room, a cave -- a "setting") can \
+be "surface" or "interior". An ordinary object you merely look at -- a painting, a book, a sword, \
+a chair -- is ALWAYS "exterior" (you show the whole object); it has no surface or interior to be in.
 
 Return JSON only:
 {{"pages": [{{"id": <page id>, "props": [{{"entity_id": "<id>", "variant_id": "<variant id>", "aspect": "exterior|surface|interior"}}]}}]}}
@@ -126,6 +129,8 @@ def enrich_setting_props(bible: dict, registry: dict, chapter_num: int):
         if aspect == "aboard":          # legacy two-value tag
             aspect = "surface"
         aspect = aspect if aspect in ("surface", "interior") else "exterior"
+        if e.get("type") != "setting":  # only a place you can stand on / go inside has a
+            aspect = "exterior"         # surface or interior; a prop is always shown whole
         cast = spread.setdefault("cast", [])
         # aspect = is the scene OUTSIDE the object (exterior) or INSIDE/ON it
         # (aboard) -- drives which reference sheet the renderer attaches. Update
