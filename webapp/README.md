@@ -17,6 +17,24 @@ docker compose up --build
 scratch dirs, and processing logs, so uploaded books and generated art survive
 restarts.
 
+## HTTPS on phones/tablets (PWA install + keep-awake)
+
+Installing to the home screen and the screen wake-lock require a **secure
+context** — HTTPS or `localhost`. Over the LAN by IP (plain HTTP) browsers
+disable both. `docker-compose.tailscale.yml` adds a **Tailscale sidecar** that
+serves a trusted private HTTPS hostname (no public exposure, no per-device cert):
+
+```sh
+# 1. Tailscale admin console -> DNS: enable MagicDNS + "HTTPS Certificates".
+# 2. Add an auth key to .env:   TS_AUTHKEY=tskey-auth-...
+docker compose -f docker-compose.tailscale.yml up --build -d
+# 3. On the device (Tailscale app installed): open
+#    https://storyteller.<your-tailnet>.ts.net  ->  Install
+```
+
+`localhost` access still works on the host machine. The Tailscale identity
+persists in `./data/ts`.
+
 ## Run without Docker
 
 ```sh
