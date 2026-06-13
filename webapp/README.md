@@ -21,19 +21,16 @@ restarts.
 
 Installing to the home screen and the screen wake-lock require a **secure
 context** — HTTPS or `localhost`. Over the LAN by IP (plain HTTP) browsers
-disable both. `docker-compose.tailscale.yml` adds a **Tailscale sidecar** that
-serves a trusted private HTTPS hostname (no public exposure, no per-device cert):
+disable both. If the host machine is on Tailscale, expose the app over a trusted
+**private** HTTPS name with one command (no public exposure, no per-device cert):
 
 ```sh
-# 1. Tailscale admin console -> DNS: enable MagicDNS + "HTTPS Certificates".
-# 2. Add an auth key to .env:   TS_AUTHKEY=tskey-auth-...
-docker compose -f docker-compose.tailscale.yml up --build -d
-# 3. On the device (Tailscale app installed): open
-#    https://storyteller.<your-tailnet>.ts.net  ->  Install
+# one-time in the Tailscale admin console: enable Serve, MagicDNS, and HTTPS Certificates
+sudo tailscale serve --bg --https=443 http://127.0.0.1:8200   # 8200 = the published host port
+# then, on any device on your tailnet, open  https://<host>.<tailnet>.ts.net  ->  Install
 ```
 
-`localhost` access still works on the host machine. The Tailscale identity
-persists in `./data/ts`.
+Keep it on **Serve**, not Funnel — Funnel would expose it to the public internet.
 
 ## Run without Docker
 
