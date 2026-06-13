@@ -22,7 +22,3 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
-
-# Tailscale serve certs (leftover from earlier experiment)
-*.ts.net.crt
-*.ts.net.key

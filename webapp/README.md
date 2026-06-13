@@ -21,16 +21,16 @@ restarts.
 
 Installing to the home screen and the screen wake-lock require a **secure
 context** — HTTPS or `localhost`. Over the LAN by IP (plain HTTP) browsers
-disable both. If the host machine is on Tailscale, expose the app over a trusted
-**private** HTTPS name with one command (no public exposure, no per-device cert):
+disable both. Put the app behind a reverse proxy that terminates TLS (e.g.
+Caddy) and reach it by its HTTPS hostname; the published host port (`STORY_PORT`,
+default `8200` here) is the proxy's upstream.
 
-```sh
-# one-time in the Tailscale admin console: enable Serve, MagicDNS, and HTTPS Certificates
-sudo tailscale serve --bg --https=443 http://127.0.0.1:8200   # 8200 = the published host port
-# then, on any device on your tailnet, open  https://<host>.<tailnet>.ts.net  ->  Install
-```
-
-Keep it on **Serve**, not Funnel — Funnel would expose it to the public internet.
+If the proxy also gates the app behind an auth provider (SSO / oauth2-proxy),
+the install option can silently disappear: the browser fetches the web manifest
+**without credentials**, so the gate 302s it to the login page and no valid
+manifest loads. The manifest links already set `crossorigin="use-credentials"`
+to send the session cookie; if a gate still blocks it, skip auth for the
+non-sensitive PWA assets (`/static/*`, `/sw.js`, the manifest).
 
 ## Run without Docker
 
