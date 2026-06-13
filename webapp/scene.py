@@ -271,15 +271,22 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                 return a
         return None
 
-    # for INTERIOR scenes, rewrite the object's description so the prompt never
-    # narrates its whole exterior (else the model puts it outside a window)
-    interior_names = []
+    # for INTERIOR/SURFACE scenes, rewrite the object's description so the prompt
+    # never narrates its whole exterior -- else the model paints the figurehead
+    # (and tends to mirror it to both edges -> a "double-headed ship" on deck)
+    interior_names, surface_names = [], []
     for m in members:
-        if _view(m) == "interior":
-            interior_names.append(m.get("name", m["entity_id"]))
-            m["appearance"] = (f"the interior of {m.get('name', m['entity_id'])} -- show ONLY what is "
-                               "visible inside; do NOT depict its exterior or exterior-only features, "
-                               "even through a window")
+        name = m.get("name", m["entity_id"])
+        v = _view(m)
+        if v == "interior":
+            interior_names.append(name)
+            m["appearance"] = (f"the interior of {name} -- show ONLY what is visible inside; do NOT "
+                               "depict its exterior or exterior-only features, even through a window")
+        elif v == "surface":
+            surface_names.append(name)
+            m["appearance"] = (f"the open deck / top surface of {name} -- show the deck underfoot and the "
+                               f"masts, rigging and rails rising from it; do NOT include {name}'s "
+                               "figurehead, prow ornament or whole outer hull")
 
     with tempfile.TemporaryDirectory() as td:
         style_ref = _style_anchor_path(book, td)   # one concrete look for every sheet
@@ -302,16 +309,23 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                 ref_paths.append(p)
 
         char_desc = "\n".join(f"- {m['name']}: {m['appearance']}" for m in members)
-        interior_note = ""
+        place_note = ""
         if interior_names:
             names = ", ".join(interior_names)
-            interior_note = (f"\n\nThe scene takes place INSIDE {names}: show only its interior. Do NOT "
+            place_note = (f"\n\nThe scene takes place INSIDE {names}: show only its interior. Do NOT "
                              f"depict the whole exterior of {names} or its exterior-only features "
                              "(figureheads, the full outer hull/silhouette) anywhere -- not even through "
                              "a window or doorway.")
+        if surface_names:
+            names = ", ".join(surface_names)
+            place_note += (f"\n\nThe scene takes place ON the open deck/surface of {names}: show the deck "
+                              f"and the masts, rigging and rails rising from it. Do NOT show {names}'s "
+                              "exterior-only identifying features (a figurehead or prow ornament, the full "
+                              "outer hull or silhouette), and NEVER show a mirrored, doubled or twin copy of "
+                              "any feature at both ends/edges of the picture.")
         best, fix = None, ""
         for attempt in range(1, SCENE_TRIES + 1):
-            prompt = build_scene_prompt(spread, members, ref_members, style_text, fix=fix) + interior_note
+            prompt = build_scene_prompt(spread, members, ref_members, style_text, fix=fix) + place_note
             cand = Path(td) / f"cand{attempt}.webp"
             gem.generate_image(prompt, refs=ref_paths, out_path=cand, aspect="3:2",
                                model=PAGE_IMAGE_MODEL)
