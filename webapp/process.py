@@ -57,15 +57,17 @@ object in view. Judge by MEANING, not exact words: "the vessel", "the boat", "on
 indicate the ship. For each one that appears, choose the best-fitting variant id using the \
 page's description and the variant chapter spans (this is chapter {chapter_num}).
 
-Also give each an "aspect":
-- "exterior" if the scene shows the object FROM OUTSIDE -- you can see the whole thing (a ship \
-sailing on the sea, a castle on a hill).
-- "aboard" if the scene is INSIDE or ON the object -- its interior or deck, seen by someone who \
-is within/aboard it (characters standing on the ship's deck, inside its cabin, inside the castle). \
-In an "aboard" scene you would NOT see the whole exterior.
+Also give each an "aspect" -- the camera's spatial relationship to the object:
+- "exterior": the scene shows the object FROM OUTSIDE; the whole thing is in view (a ship sailing \
+on the sea, a castle on a hill).
+- "surface": the characters are ON its outer surface/top -- a ship's open deck, a rooftop, a \
+balcony. You see the surface and whatever structure rises from it, but not the whole object.
+- "interior": the characters are ENCLOSED INSIDE it -- a ship's cabin/hold/bunk, a room inside a \
+building, a cave. You see only interior surfaces; you would NOT see the object's exterior at all, \
+not even through a window.
 
 Return JSON only:
-{{"pages": [{{"id": <page id>, "props": [{{"entity_id": "<id>", "variant_id": "<variant id>", "aspect": "exterior|aboard"}}]}}]}}
+{{"pages": [{{"id": <page id>, "props": [{{"entity_id": "<id>", "variant_id": "<variant id>", "aspect": "exterior|surface|interior"}}]}}]}}
 Only include a page if it has props; omit anything that does not actually appear.
 
 SETTINGS/PROPS:
@@ -121,7 +123,9 @@ def enrich_setting_props(bible: dict, registry: dict, chapter_num: int):
             return
         if vid not in {v["id"] for v in e.get("variants", [])}:
             vid = _variant_for_chapter(e, chapter_num)   # validate / fall back
-        aspect = "aboard" if aspect == "aboard" else "exterior"
+        if aspect == "aboard":          # legacy two-value tag
+            aspect = "surface"
+        aspect = aspect if aspect in ("surface", "interior") else "exterior"
         cast = spread.setdefault("cast", [])
         # aspect = is the scene OUTSIDE the object (exterior) or INSIDE/ON it
         # (aboard) -- drives which reference sheet the renderer attaches. Update

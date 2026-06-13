@@ -143,29 +143,38 @@ def _ensure_sheet(book_id, member, style_text, style_ref=None) -> bytes | None:
         return data
 
 
-ABOARD_VID = "__aboard"
+def _view_prompt(name, appearance, view):
+    """A general (book-agnostic) reference prompt for a non-exterior view of an
+    object -- described by the camera's relationship to it, not by named parts."""
+    if view == "interior":
+        what = (f"the INTERIOR of {name}, seen from INSIDE it -- ONLY its interior surfaces, "
+                f"materials and architecture (e.g. for a ship: wood-panelled cabin walls, beams, a "
+                f"porthole, lanterns; for a building: a room within). Do NOT show the exterior of "
+                f"{name}, its overall outer shape, or any exterior-only identifying feature (a "
+                f"figurehead, the whole hull or outer silhouette) -- not even through a window.")
+    else:  # surface
+        what = (f"the open outer SURFACE / top of {name}, seen by someone standing ON it (for a ship: "
+                f"its deck with the base of the mast, rigging and rails; for a building: its rooftop), "
+                f"with the structure that rises from it. Do NOT show a separate whole copy of {name} "
+                f"floating in the distance.")
+    return (f"A neutral REFERENCE of {what}\nMatch the materials, colours and style consistent with: "
+            f"{appearance}\nNo people, even lighting, single clean reference.")
 
 
-def _ensure_aboard_sheet(book_id, member, style_text, style_ref=None) -> bytes | None:
-    """An interior / on-board reference for a setting or prop (e.g. a ship's deck,
-    a room inside a building), so scenes set INSIDE/ON it don't get the whole
-    exterior pasted in. One per entity, keyed under a synthetic '__aboard' variant.
-    Deliberately NOT seeded from the exterior sheet -- that would put the whole
-    object back. Falls back to the normal sheet if it can't be made."""
+def _ensure_view_sheet(book_id, member, style_text, view, style_ref=None) -> bytes | None:
+    """A non-exterior reference (view = 'surface' or 'interior') for a setting/prop
+    so scenes ON or INSIDE it don't get the whole exterior pasted in. One per
+    (entity, view), keyed under a synthetic '__surface'/'__interior' variant; NOT
+    seeded from the exterior sheet. Falls back to the normal sheet on failure."""
     eid = member["entity_id"]
-    data = db.get_sheet(book_id, eid, ABOARD_VID)
+    vid = "__" + view
+    data = db.get_sheet(book_id, eid, vid)
     if data:
         return data
-    name = member.get("name", eid)
-    appearance = member.get("appearance", "")
-    prompt = (f"{style_text}\n\nA neutral REFERENCE of the INTERIOR / ON-BOARD view of {name} -- "
-              f"what you would see when INSIDE or ABOARD it (for a ship: its open wooden deck with "
-              f"the base of the mast, rigging and side rails; for a building: a room within), in the "
-              f"same materials, colours and style as: {appearance}\n"
-              f"Show ONLY the interior/on-board structure -- do NOT show the whole exterior of "
-              f"{name}. No people, even lighting, single clean reference.")
-    with _entity_lock(book_id, eid + ":aboard"):
-        data = db.get_sheet(book_id, eid, ABOARD_VID)
+    prompt = f"{style_text}\n\n" + _view_prompt(member.get("name", eid),
+                                                member.get("appearance", ""), view)
+    with _entity_lock(book_id, eid + ":" + view):
+        data = db.get_sheet(book_id, eid, vid)
         if data:
             return data
         try:
@@ -176,9 +185,9 @@ def _ensure_aboard_sheet(book_id, member, style_text, style_ref=None) -> bytes |
                            "medium and colour palette exactly, but do NOT copy its subject.")
             data = _gen_to_bytes(prompt, refs, SHEET_IMAGE_MODEL, "3:2")
         except Exception as ex:  # noqa: BLE001
-            print(f"[scene] aboard sheet {eid} failed: {ex}", flush=True)
+            print(f"[scene] {view} sheet {eid} failed: {ex}", flush=True)
             return _ensure_sheet(book_id, member, style_text, style_ref)   # fallback
-        db.save_sheet(book_id, eid, ABOARD_VID, data)
+        db.save_sheet(book_id, eid, vid, data)
         return data
 
 
@@ -203,25 +212,38 @@ def _render_scene(book_id: int, idx: int) -> bytes:
     page_cast = json.loads(page["cast_json"]) if page.get("cast_json") else []
     spread = {"illustration_brief": page["brief"], "setting": page["setting"], "cast": page_cast}
     members = scene_members(spread, cast_index)
-    # aspect per entity (set on settings/props by the prop pass): exterior vs aboard
+    # aspect per entity (set on settings/props by the prop pass): exterior | surface | interior
     aspect = {c.get("entity_id"): c.get("aspect") for c in page_cast if c.get("aspect")}
+
+    def _view(m):   # the non-exterior view for a setting/prop, or None
+        if m.get("type") in ("setting", "prop"):
+            a = aspect.get(m["entity_id"])
+            if a in ("surface", "interior"):
+                return a
+        return None
+
+    # for INTERIOR scenes, rewrite the object's description so the prompt never
+    # narrates its whole exterior (else the model puts it outside a window)
+    interior_names = []
+    for m in members:
+        if _view(m) == "interior":
+            interior_names.append(m.get("name", m["entity_id"]))
+            m["appearance"] = (f"the interior of {m.get('name', m['entity_id'])} -- show ONLY what is "
+                               "visible inside; do NOT depict its exterior or exterior-only features, "
+                               "even through a window")
 
     with tempfile.TemporaryDirectory() as td:
         style_ref = _style_anchor_path(book, td)   # one concrete look for every sheet
         ref_members, ref_paths = [], []
-        # an aboard setting/prop (the deck/room the scene is in) is prioritized into
-        # the reference set -- the location matters as much as the cast for coherence
-        ordered = sorted(members, key=lambda m: 0 if (
-            m.get("type") in ("setting", "prop")
-            and aspect.get(m["entity_id"]) == "aboard") else 1)
+        # the location (a surface/interior setting/prop the scene is in) is prioritized
+        # into the reference set -- it matters as much as the cast for coherence
+        ordered = sorted(members, key=lambda m: 0 if _view(m) else 1)
         for m in ordered:
             if len(ref_members) >= MAX_REFS:
                 break
-            # for a setting/prop the characters are INSIDE/ON, use its interior
-            # reference (a deck/room view) instead of the whole-exterior sheet,
-            # so the whole object isn't pasted into an on-board scene
-            if m.get("type") in ("setting", "prop") and aspect.get(m["entity_id"]) == "aboard":
-                data = _ensure_aboard_sheet(book_id, m, style_text, style_ref=style_ref)
+            view = _view(m)
+            if view:   # use the surface/interior reference, not the whole-exterior sheet
+                data = _ensure_view_sheet(book_id, m, style_text, view, style_ref=style_ref)
             else:
                 data = _ensure_sheet(book_id, m, style_text, style_ref=style_ref)
             if data:
@@ -231,9 +253,16 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                 ref_paths.append(p)
 
         char_desc = "\n".join(f"- {m['name']}: {m['appearance']}" for m in members)
+        interior_note = ""
+        if interior_names:
+            names = ", ".join(interior_names)
+            interior_note = (f"\n\nThe scene takes place INSIDE {names}: show only its interior. Do NOT "
+                             f"depict the whole exterior of {names} or its exterior-only features "
+                             "(figureheads, the full outer hull/silhouette) anywhere -- not even through "
+                             "a window or doorway.")
         best, fix = None, ""
         for attempt in range(1, SCENE_TRIES + 1):
-            prompt = build_scene_prompt(spread, members, ref_members, style_text, fix=fix)
+            prompt = build_scene_prompt(spread, members, ref_members, style_text, fix=fix) + interior_note
             cand = Path(td) / f"cand{attempt}.webp"
             gem.generate_image(prompt, refs=ref_paths, out_path=cand, aspect="3:2",
                                model=PAGE_IMAGE_MODEL)
