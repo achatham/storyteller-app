@@ -17,14 +17,18 @@ Concurrent generations are capped by a semaphore; duplicate work is coalesced by
 a per-(book,page) lock.
 """
 import asyncio
+import mimetypes
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 
+mimetypes.add_type("application/manifest+json", ".webmanifest")
+
 from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from pipeline.config import STYLES
 from . import db, scene
@@ -37,6 +41,13 @@ PREFETCH = int(os.environ.get("STORY_PREFETCH", "2"))
 GEN_CONCURRENCY = int(os.environ.get("STORY_GEN_CONCURRENCY", "3"))
 
 app = FastAPI(title="Storyteller")
+app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
+
+
+@app.get("/sw.js")
+def service_worker():
+    # served from root so its scope covers the whole app (/read, /book, ...)
+    return Response((STATIC / "sw.js").read_text(), media_type="application/javascript")
 
 _sem = asyncio.Semaphore(GEN_CONCURRENCY)
 _locks: dict[tuple[int, int], asyncio.Lock] = {}
