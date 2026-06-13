@@ -12,7 +12,7 @@ import threading
 from pathlib import Path
 
 from pipeline import gem, costs
-from pipeline.config import (STYLES, SHEET_IMAGE_MODEL, PAGE_IMAGE_MODEL, MAX_REFS)
+from pipeline.config import (STYLES, SHEET_IMAGE_MODEL, PAGE_IMAGE_MODEL, MAX_REFS, ANALYZE_MODEL)
 from pipeline.run import (resolve_cast, scene_members, build_scene_prompt,
                           SCENE_CRITIQUE, PASS_THRESHOLD)
 from . import db
@@ -246,6 +246,34 @@ def generate_scene(book_id: int, idx: int) -> bytes:
         return _render_scene(book_id, idx)
 
 
+def _character_states(brief: str, source: str, members: list) -> dict:
+    """A cheap text pass: each present character's PHYSICAL state/action at THIS one
+    moment (bound, crying, holding X, kneeling). Lets the image model attach a state
+    to the right person instead of applying one state to everyone -- which is how a
+    "Caspian freed but the others still bound" moment gets each person right. Only
+    runs when >=2 characters are present (the only case the distinction matters)."""
+    names = [m["name"] for m in members if m.get("type") == "character" and m.get("name")]
+    if len(names) < 2:
+        return {}
+    prompt = (
+        "For ONE children's-book illustration, give each named character's PHYSICAL state or "
+        "action at THIS single moment -- only what is visibly depictable (bound/roped, hands tied, "
+        "kneeling, crying, holding or carrying X, wounded, pointing). If a character has nothing "
+        "notable, use an empty string. Do not invent anything not supported by the text.\n\n"
+        f"THE MOMENT (illustration brief):\n{brief}\n\n"
+        f"SOURCE PASSAGE:\n{(source or '')[:1000]}\n\n"
+        f"CHARACTERS PRESENT: {', '.join(names)}\n\n"
+        'Return JSON only: {"states": {"<name>": "<short phrase or empty>"}}'
+    )
+    try:
+        out = gem.text_json(prompt, model=ANALYZE_MODEL)
+        st = out.get("states", {}) if isinstance(out, dict) else {}
+        return {k: v.strip() for k, v in st.items() if isinstance(v, str) and v.strip()}
+    except Exception as ex:  # noqa: BLE001 -- never fail a scene on the state pass
+        print(f"[scene] character-state pass failed: {ex}", flush=True)
+        return {}
+
+
 def _render_scene(book_id: int, idx: int) -> bytes:
     book = db.get_book(book_id)
     page = db.get_page(book_id, idx)
@@ -290,6 +318,12 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                                f"masts, rigging and rails rising from it; do NOT include {name}'s "
                                "figurehead, prow ornament or whole outer hull")
 
+    # per-character state for THIS moment, so e.g. one person is bound and another
+    # freed in the same picture (attached to the member -> build_scene_prompt renders it)
+    states = _character_states(page["brief"], page["read_text"] or "", members)
+    for m in members:
+        m["state"] = states.get(m.get("name", ""), "")
+
     with tempfile.TemporaryDirectory() as td:
         style_ref = _style_anchor_path(book, td)   # one concrete look for every sheet
         ref_members, ref_paths = [], []
@@ -310,7 +344,9 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                 ref_members.append(m)
                 ref_paths.append(p)
 
-        char_desc = "\n".join(f"- {m['name']}: {m['appearance']}" for m in members)
+        char_desc = "\n".join(
+            f"- {m['name']}" + (f" (RIGHT NOW: {m['state']})" if m.get("state") else "")
+            + f": {m['appearance']}" for m in members)
         place_note = ""
         if interior_names:
             names = ", ".join(interior_names)

@@ -115,7 +115,10 @@ def scene_members(spread: dict, cast_index: dict) -> list[dict]:
 
 def build_scene_prompt(spread: dict, members: list[dict], ref_members: list[dict],
                        art_style: str, fix: str = "") -> str:
-    char_desc = "\n".join(f"- {m['name']}: {m['appearance']}" for m in members)
+    char_desc = "\n".join(
+        f"- {m['name']}" + (f" (RIGHT NOW: {m['state']})" if m.get("state") else "")
+        + f": {m['appearance']}" for m in members)
+    has_state = any(m.get("state") for m in members)
     prompt = (
         f"{art_style}\n\n"
         f"Illustrate this scene for a children's picture book:\n{spread['illustration_brief']}\n\n"
@@ -130,6 +133,10 @@ def build_scene_prompt(spread: dict, members: list[dict], ref_members: list[dict
             f"whether anyone is bound, hurt, or carrying something):\n\"{src[:800]}\"\n\n"
         )
     prompt += f"Characters present and their canonical looks:\n{char_desc}\n\n"
+    if has_state:
+        prompt += ("Each character's 'RIGHT NOW' note is that specific person's state at this moment "
+                   "and must be shown ONLY on them -- do not apply one person's state (e.g. being "
+                   "bound) to the others, and do not apply it to everyone.\n\n")
     if ref_members:
         labels = ", ".join(f"image {i+1} = {m['name']}" for i, m in enumerate(ref_members))
         prompt += (f"Reference images are attached ({labels}). Keep each one's face, hair, "
