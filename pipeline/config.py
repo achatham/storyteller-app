@@ -132,6 +132,19 @@ STYLES = {
         "fingerprints and rounded forms, warm studio lighting, cozy miniature sets. "
         "Tactile and whimsical (Aardman-like). NOT slick CGI, NOT photorealistic."
     ),
+    "modern_comic": (
+        "Modern comic / graphic-novel illustration: clean confident ink linework with "
+        "bold outlines, dynamic expressive characters, flat cel-shaded vibrant colors "
+        "with crisp highlights and subtle halftone shading. Energetic, polished, "
+        "all-ages comic-book feel. NOT photorealistic, NOT 3D render."
+    ),
+    "shaded_fantasy": (
+        "Detailed soft-shaded fantasy-adventure illustration: smooth pencil-like "
+        "graphite shading and fine linework giving rounded, believable form, "
+        "semi-realistic friendly characters and creatures (dragons, knights, magical "
+        "beasts), now rendered in rich warm FULL COLOR. The exciting, immersive feel of "
+        "a middle-grade fantasy chapter book. NOT flat cartoon, NOT photorealistic, NOT 3D render."
+    ),
 }
 STYLE = os.environ.get("STORY_STYLE", "watercolor")
 if STYLE not in STYLES:
