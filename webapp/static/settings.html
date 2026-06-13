@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storyteller — book settings</title>
+<style>
+  :root { --bg:#f4efe6; --ink:#2b2622; --muted:#9a8a70; --panel:#fffdf8; --line:#e0d4bd; --accent:#7a5c3e; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:Georgia,'Times New Roman',serif; }
+  header { padding:24px 24px 4px; }
+  a.back { font-family:system-ui,sans-serif; font-size:.85rem; color:var(--accent); text-decoration:none; }
+  h1 { margin:.2em 0 0; font-size:1.7rem; }
+  .auth { color:var(--muted); font-style:italic; }
+  main { max-width:720px; margin:0 auto; padding:10px 24px 60px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px 20px;
+           margin-top:18px; box-shadow:0 4px 16px rgba(0,0,0,.05); }
+  .panel h2 { margin:0 0 12px; font-size:1.05rem; font-family:system-ui,sans-serif; letter-spacing:.3px;
+              text-transform:uppercase; color:var(--muted); }
+  .kv { display:grid; grid-template-columns:140px 1fr; gap:8px 14px; font-family:system-ui,sans-serif; font-size:.95rem; }
+  .kv .k { color:var(--muted); }
+  .total { font-size:2.4rem; font-family:system-ui,sans-serif; font-weight:700; }
+  .split { display:flex; gap:24px; margin:6px 0 14px; font-family:system-ui,sans-serif; }
+  .split b { font-size:1.15rem; }
+  table { width:100%; border-collapse:collapse; font-family:system-ui,sans-serif; font-size:.85rem; }
+  th,td { text-align:right; padding:6px 8px; border-bottom:1px solid var(--line); }
+  th:first-child,td:first-child { text-align:left; }
+  th { color:var(--muted); font-weight:600; }
+  .note { color:var(--muted); font-family:system-ui,sans-serif; font-size:.8rem; margin-top:10px; }
+  .actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:18px; }
+  .btn { font-family:system-ui,sans-serif; font-size:.9rem; padding:9px 16px; border-radius:9px;
+         border:1px solid var(--line); background:var(--bg); color:var(--ink); text-decoration:none; cursor:pointer; }
+  .btn.go { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .pill { font-family:system-ui,sans-serif; font-size:.72rem; text-transform:uppercase; letter-spacing:.5px;
+          padding:2px 8px; border:1px solid var(--line); border-radius:20px; }
+</style>
+</head><body>
+<header>
+  <a class="back" href="/">&#8592; Library</a>
+  <h1 id="title">…</h1>
+  <div class="auth" id="auth"></div>
+</header>
+<main>
+  <div class="panel">
+    <h2>Book</h2>
+    <div class="kv" id="info"></div>
+  </div>
+  <div class="panel">
+    <h2>Cost so far</h2>
+    <div class="total" id="total">…</div>
+    <div class="split">
+      <div>text&nbsp; <b id="textc"></b></div>
+      <div>images&nbsp; <b id="imgc"></b> <span class="pill" id="nimg"></span></div>
+    </div>
+    <table><thead><tr><th>model</th><th>kind</th><th>in tok</th><th>out tok</th><th>imgs</th><th>USD</th></tr></thead>
+      <tbody id="rows"></tbody></table>
+    <div class="note">Counts API spend tagged to this book — the upfront processing (registry,
+      character art, segmentation) plus illustrations generated as you read. Read-time generations
+      began being attributed per-book recently, so very early reading may be under-counted.</div>
+  </div>
+  <div class="actions">
+    <a class="btn go" id="read">Read</a>
+    <a class="btn" id="bookview">Book view</a>
+    <a class="btn back" href="/">Library</a>
+  </div>
+</main>
+<script>
+const ID = __BOOK_ID__;
+const $ = s => document.querySelector(s);
+const usd = n => "$" + (n||0).toFixed(n>=1?2:3);
+
+(async () => {
+  const b = await (await fetch("/api/books/"+ID)).json();
+  $("#title").textContent = b.title;
+  $("#auth").textContent = b.author || "";
+  $("#read").href = "/read/"+ID;
+  $("#bookview").href = "/book/"+ID;
+  $("#info").innerHTML = [
+    ["Art style", (b.style||"").replace(/_/g," ")],
+    ["Illustration cadence", "~"+b.words_per_page+" words / picture"],
+    ["Audience age", b.age],
+    ["Pages", b.num_pages],
+    ["Status", b.status],
+  ].map(([k,v]) => `<div class="k">${k}</div><div>${v}</div>`).join("");
+
+  const c = await (await fetch("/api/books/"+ID+"/cost")).json();
+  $("#total").textContent = usd(c.total_usd);
+  $("#textc").textContent = usd(c.text_usd);
+  $("#imgc").textContent = usd(c.image_usd);
+  $("#nimg").textContent = c.images + " imgs";
+  $("#rows").innerHTML = c.by_model.sort((a,b)=>b.usd-a.usd).map(r =>
+    `<tr><td>${r.model}</td><td>${r.kind}</td><td>${r.in.toLocaleString()}</td>
+     <td>${r.out.toLocaleString()}</td><td>${r.images||""}</td><td>${usd(r.usd)}</td></tr>`).join("")
+    || `<tr><td colspan="6" style="color:var(--muted)">no usage recorded</td></tr>`;
+})();
+</script>
+</body></html>

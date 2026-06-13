@@ -11,7 +11,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-from pipeline import gem
+from pipeline import gem, costs
 from pipeline.config import (STYLES, SHEET_IMAGE_MODEL, PAGE_IMAGE_MODEL, MAX_REFS)
 from pipeline.run import (resolve_cast, scene_members, build_scene_prompt,
                           SCENE_CRITIQUE, PASS_THRESHOLD)
@@ -62,7 +62,8 @@ def generate_style_sample(style_key: str) -> bytes | None:
         if data:
             return data
         prompt = f"{style}\n\n{SAMPLE_SCENE}"
-        data = _gen_to_bytes(prompt, None, PAGE_IMAGE_MODEL, "3:2")
+        with costs.run_as("style_sample"):
+            data = _gen_to_bytes(prompt, None, PAGE_IMAGE_MODEL, "3:2")
         db.save_style_sample(style_key, data)
         return data
 
@@ -116,7 +117,13 @@ def _ensure_sheet(book_id, member, style_text) -> bytes | None:
 
 def generate_scene(book_id: int, idx: int) -> bytes:
     """Render page `idx`'s illustration, store it, and return the image bytes.
-    Synchronous/blocking (the server runs it in a worker thread)."""
+    Synchronous/blocking (the server runs it in a worker thread). All API usage
+    is tagged to this book for the per-book cost view."""
+    with costs.run_as(f"book:{book_id}"):
+        return _render_scene(book_id, idx)
+
+
+def _render_scene(book_id: int, idx: int) -> bytes:
     book = db.get_book(book_id)
     page = db.get_page(book_id, idx)
     if not page:

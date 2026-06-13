@@ -133,6 +133,7 @@ def start_processing(book_id: int):
         "STORY_REGISTRY": str(workdir / "registry.json"),
         "STORY_ASSETS": str(workdir / "sheets"),
         "STORY_APP_DB": str(db.DB),
+        "STORY_RUN": f"book:{book_id}",   # tag all processing usage to this book
     })
     logf = open(LOGS / f"book_{book_id}.log", "ab")
     subprocess.Popen([sys.executable, "-m", "webapp.process", str(book_id)],
@@ -155,6 +156,12 @@ def reader(book_id: int):
 @app.get("/book/{book_id}", response_class=HTMLResponse)
 def book_reader(book_id: int):
     html = (STATIC / "book.html").read_text()
+    return html.replace("__BOOK_ID__", str(book_id))
+
+
+@app.get("/settings/{book_id}", response_class=HTMLResponse)
+def book_settings(book_id: int):
+    html = (STATIC / "settings.html").read_text()
     return html.replace("__BOOK_ID__", str(book_id))
 
 
@@ -224,6 +231,7 @@ def api_book(book_id: int):
         "author": b["author"], "style": b["style"], "status": b["status"],
         "detail": b["detail"], "num_pages": b["num_pages"],
         "seg_ver": b["seg_ver"] if "seg_ver" in b.keys() else 0,
+        "words_per_page": b["words_per_page"], "age": b["age"],
         "position": db.get_progress(book_id),
         "chapters": db.get_chapters(book_id),
         "scenes_done": db.scene_progress(book_id).get("done", 0),
@@ -248,6 +256,14 @@ async def api_reprocess(book_id: int, fresh: bool = False):
     db.set_status(book_id, "queued", "reprocessing…" + (" (fresh)" if fresh else ""))
     await asyncio.to_thread(start_processing, book_id)
     return {"ok": True, "fresh": fresh}
+
+
+@app.get("/api/books/{book_id}/cost")
+def api_book_cost(book_id: int):
+    from pipeline import costs
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    return costs.book_report(book_id)
 
 
 @app.get("/api/books/{book_id}/pages")

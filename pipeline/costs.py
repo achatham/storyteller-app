@@ -7,6 +7,7 @@ counts); we record one row per call, price it from PRICING, and sum on demand.
 NOTE: PRICING is USD per 1,000,000 tokens and is an ESTIMATE -- edit these to
 match the current Gemini price sheet for exact figures.
 """
+import contextlib
 import os
 import sqlite3
 import threading
@@ -14,6 +15,26 @@ import time
 from pathlib import Path
 
 from .config import ROOT
+
+# A per-thread "run" tag so generation that happens in the long-lived server
+# (lazy scenes/sheets) can be attributed to a specific book, where there is no
+# per-book process env to read. Falls back to STORY_RUN / STORY_OUT / STORY_LABEL.
+_local = threading.local()
+
+
+@contextlib.contextmanager
+def run_as(run: str):
+    prev = getattr(_local, "run", None)
+    _local.run = run
+    try:
+        yield
+    finally:
+        _local.run = prev
+
+
+def _resolve_run() -> str:
+    return (getattr(_local, "run", None) or os.environ.get("STORY_RUN")
+            or os.environ.get("STORY_OUT") or os.environ.get("STORY_LABEL", ""))
 
 DB = Path(os.environ.get("STORY_COST_DB", str(ROOT / "output" / "costs.db")))
 
@@ -58,10 +79,10 @@ def record(model: str, kind: str, input_tokens: int, output_tokens: int,
     """Record one API call. Returns its USD cost. Thread- and process-safe."""
     cost = cost_for(model, input_tokens, output_tokens)
     total = total_tokens if total_tokens is not None else input_tokens + output_tokens
-    # key each run by its unique output dir (falls back to label) so reports for
-    # different styles/chapters/models don't collide under a shared section label
+    # key each row by its run (per-book tag / output dir / label) so per-book and
+    # per-run reports can be sliced out of the shared usage table
     if run is None:
-        run = os.environ.get("STORY_OUT") or os.environ.get("STORY_LABEL", "")
+        run = _resolve_run()
     with _lock:
         with _conn() as c:
             c.execute(
@@ -117,6 +138,31 @@ def report(run: str | None = None) -> str:
         f"TOTAL : {calls} calls   ${total:.4f}",
     ]
     return "\n".join(lines)
+
+
+def book_report(book_id) -> dict:
+    """Cost attributed to one book: the new `book:<id>` tag plus the historical
+    processing rows keyed by its work dir (.../work/<id>). Recomputed from tokens."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT model, kind, SUM(input_tokens), SUM(output_tokens), SUM(images) "
+            "FROM usage WHERE run = ? OR run LIKE ? GROUP BY model, kind",
+            (f"book:{book_id}", f"%/work/{book_id}")).fetchall()
+    text = img = 0.0
+    n_img = 0
+    by_model = []
+    for model, kind, sin, sout, simg in rows:
+        sin, sout, simg = sin or 0, sout or 0, simg or 0
+        cost = cost_for(model, sin, sout)
+        by_model.append({"model": model, "kind": kind, "in": sin, "out": sout,
+                         "images": simg, "usd": round(cost, 4)})
+    for m in by_model:
+        if m["kind"] == "image":
+            img += m["usd"]; n_img += m["images"]
+        else:
+            text += m["usd"]
+    return {"text_usd": round(text, 4), "image_usd": round(img, 4),
+            "total_usd": round(text + img, 4), "images": n_img, "by_model": by_model}
 
 
 def main():
