@@ -118,13 +118,14 @@ async function loadChapter(ci, toPage){
   CH = ci;
   const data = await (await fetch(`${API}/chapter/${ci}`)).json();
   const flow = $("#flow");
-  flow.style.transform = "translateX(0)";
+  setX(0, false);   // jump (no transition) to the start so a new chapter doesn't
+                    // animate a long slide back from the previous chapter's last page
   const html = [`<h2 class="chtitle"><span class="ch">${data.title}</span></h2>`];
   for (const n of data.nodes){
     if (n.type === "text")
       html.push(n.text.split(/\n\s*\n/).map(t => `<p>${esc(t.trim())}</p>`).join(""));
     else
-      html.push(`<figure><img loading="lazy" alt="${esc(n.alt||"")}" data-src="${n.src}" onload="this.classList.add('on')"></figure>`);
+      html.push(`<figure><img alt="${esc(n.alt||"")}" data-src="${n.src}" onload="this.classList.add('on')"></figure>`);
   }
   flow.innerHTML = html.join("");
   $("#chap").value = ci;
@@ -148,9 +149,24 @@ function paginate(){
   const f = $("#flow");
   pages = Math.max(1, Math.ceil((f.scrollWidth + (parseFloat(getComputedStyle(f).columnGap)||0)) / stride()));
 }
+// Move the flow. animate=false jumps with no transition (used for chapter loads,
+// resizes, and the initial render) so we never animate a long slide between
+// chapters; animate=true uses the CSS page-turn transition (when enabled).
+function setX(px, animate){
+  const f = $("#flow");
+  if (animate && animOn){
+    f.style.transition = "";
+    f.style.transform = `translateX(${px}px)`;
+  } else {
+    f.style.transition = "none";
+    f.style.transform = `translateX(${px}px)`;
+    void f.offsetWidth;          // commit the jump before any later animated move
+    f.style.transition = "";
+  }
+}
 function goPage(n, force){
   page = Math.max(0, Math.min(pages-1, n));
-  $("#flow").style.transform = `translateX(${-page*stride()}px)`;
+  setX(-page*stride(), !force);   // force => jump (no page-turn animation)
   $("#bar").style.width = ((page+1)/pages*100) + "%";
   $("#pageno").textContent = `${(META.chapters[CH]||{}).title||""} — ${page+1}/${pages}`;
   loadVisibleImages();
@@ -163,7 +179,9 @@ function loadVisibleImages(){
   imgs.forEach(im => {
     const pg = Math.floor(im.offsetLeft / s);
     if (pg >= page-1 && pg <= page+2 && im.dataset.src && !prefetched.has(im.dataset.src)){
-      prefetched.add(im.dataset.src); im.src = im.dataset.src;
+      prefetched.add(im.dataset.src);
+      im.src = im.dataset.src;
+      if (im.complete && im.naturalWidth) im.classList.add("on");   // cached: onload may not fire
     }
   });
 }
