@@ -257,7 +257,8 @@ def _render_scene(book_id: int, idx: int) -> bytes:
 
     cast_index = resolve_cast({"cast": chapter_cast}, registry)
     page_cast = json.loads(page["cast_json"]) if page.get("cast_json") else []
-    spread = {"illustration_brief": page["brief"], "setting": page["setting"], "cast": page_cast}
+    spread = {"illustration_brief": page["brief"], "setting": page["setting"], "cast": page_cast,
+              "read_text": page["read_text"]}
     members = scene_members(spread, cast_index)
     # aspect per entity (set on settings/props by the prop pass): exterior | surface | interior
     aspect = {c.get("entity_id"): c.get("aspect") for c in page_cast if c.get("aspect")}

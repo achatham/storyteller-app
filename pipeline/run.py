@@ -120,8 +120,16 @@ def build_scene_prompt(spread: dict, members: list[dict], ref_members: list[dict
         f"{art_style}\n\n"
         f"Illustrate this scene for a children's picture book:\n{spread['illustration_brief']}\n\n"
         f"Setting: {spread.get('setting','')}\n\n"
-        f"Characters present and their canonical looks:\n{char_desc}\n\n"
     )
+    src = (spread.get("read_text") or "").strip()
+    if src:
+        prompt += (
+            "For accuracy, here is the passage this picture accompanies. Illustrate ONLY the single "
+            "moment described in the brief above -- do NOT add other events from the passage. Use it "
+            "just to get concrete, visible details right (who is present, what they hold or wear, "
+            f"whether anyone is bound, hurt, or carrying something):\n\"{src[:800]}\"\n\n"
+        )
+    prompt += f"Characters present and their canonical looks:\n{char_desc}\n\n"
     if ref_members:
         labels = ", ".join(f"image {i+1} = {m['name']}" for i, m in enumerate(ref_members))
         prompt += (f"Reference images are attached ({labels}). Keep each one's face, hair, "
