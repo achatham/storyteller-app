@@ -17,6 +17,7 @@ Concurrent generations are capped by a semaphore; duplicate work is coalesced by
 a per-(book,page) lock.
 """
 import asyncio
+import hashlib
 import mimetypes
 import os
 import re
@@ -26,7 +27,7 @@ from pathlib import Path
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 
-from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -184,6 +185,18 @@ def book_roster(book_id: int):
 
 # ---------------- API ----------------
 
+def _image_response(data: bytes, request: Request) -> Response:
+    """Serve regenerable image bytes cache-resiliently: a content ETag plus
+    no-cache, so the URL can stay stable while the bytes change. The browser (and
+    the network-first service worker) revalidate on every view -- a regenerated
+    scene/sheet is picked up immediately, and the unchanged case is a cheap 304.
+    Far safer than immutable max-age, which froze old images in place for a year."""
+    etag = '"' + hashlib.md5(data).hexdigest() + '"'
+    headers = {"ETag": etag, "Cache-Control": "no-cache"}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=data, media_type="image/webp", headers=headers)
+
 @app.get("/api/styles")
 def api_styles():
     have = db.styles_with_samples()
@@ -316,13 +329,12 @@ def api_roster(book_id: int):
 
 
 @app.get("/api/books/{book_id}/sheet/{entity_id}/{variant_id}")
-def api_sheet(book_id: int, entity_id: str, variant_id: str):
+def api_sheet(book_id: int, entity_id: str, variant_id: str, request: Request):
     """Serve an already-drawn roster sheet. 404 if not drawn -- never generates."""
     data = db.get_sheet(book_id, entity_id, variant_id)
     if not data:
         raise HTTPException(404, "not drawn yet")
-    return Response(content=data, media_type="image/webp",
-                    headers={"Cache-Control": "public, max-age=86400"})
+    return _image_response(data, request)
 
 
 @app.get("/api/books/{book_id}/cost")
@@ -394,7 +406,7 @@ def api_scene_status(book_id: int, idx: int):
 
 
 @app.get("/api/books/{book_id}/pages/{idx}/image")
-async def api_scene_image(book_id: int, idx: int):
+async def api_scene_image(book_id: int, idx: int, request: Request):
     book = db.get_book(book_id)
     if not book:
         raise HTTPException(404, "no such book")
@@ -407,8 +419,7 @@ async def api_scene_image(book_id: int, idx: int):
     except Exception as ex:  # noqa: BLE001
         raise HTTPException(503, f"generation failed: {str(ex)[:200]}")
     schedule_prefetch(book_id, idx + 1, PREFETCH, book["num_pages"])
-    return Response(content=data, media_type="image/webp",
-                    headers={"Cache-Control": "public, max-age=31536000"})
+    return _image_response(data, request)
 
 
 @app.put("/api/books/{book_id}/progress")
