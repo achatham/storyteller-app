@@ -381,8 +381,16 @@ def _image_offset(text: str, anchor: str | None) -> int:
     if not m:
         return len(text)
     end = m.end()
-    nxt = re.search(r"[.!?][\"'”’)]?\s", text[end:])  # extend to sentence end
-    return end + nxt.end() if nxt else end
+    # extend to the end of the sentence holding the anchor -- incl. when it ends
+    # the page (no trailing space), which is the common case for a picture that
+    # follows the moment. (?=\s|$) avoids matching abbreviations/decimals.
+    nxt = re.search(r"[.!?]+[\"'”’)\]]*(?=\s|$)", text[end:])
+    if nxt:
+        end += nxt.end()
+    # glob any punctuation / closing quotes that still immediately follow, so a
+    # trailing mark (e.g. .”) stays with the text above the picture, not below it.
+    g = re.match(r"[.!?,;:…”’\"')\]]+", text[end:])
+    return end + g.end() if g else end
 
 
 @app.get("/api/books/{book_id}/chapter/{idx}")
