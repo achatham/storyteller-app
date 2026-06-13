@@ -32,8 +32,14 @@ LOCAL_IMPORTANCE = 3  # default rank for section-local characters
 SCENE_CRITIQUE = """You are a strict art director reviewing one illustration for a children's \
 read-aloud picture book (audience: 5 years old).
 
-THE ILLUSTRATION SHOULD DEPICT:
+THE ILLUSTRATION SHOULD DEPICT (the intended illustration for this moment):
 {brief}
+
+THE SOURCE TEXT this illustration accompanies (ground truth for the story moment -- the picture shows \
+ONE moment from it). Use it to catch concrete, VISIBLE details the brief may have dropped (e.g. a \
+character bound or roped, holding something, a wound, who is present). Do NOT penalise the image for \
+not showing dialogue, inner thoughts, or other moments elsewhere on the page:
+{source}
 
 CHARACTERS THAT SHOULD APPEAR (must match these descriptions):
 {chars}
@@ -44,10 +50,11 @@ THE INTENDED ART STYLE IS:
 Judge the attached image. Return JSON only:
 {{
   "consistency": <1-5, do characters match their descriptions and look like coherent recurring characters?>,
-  "accuracy": <1-5, does the image depict the described scene, setting AND every specific action or \
-physical state in the brief? Be strict: if the brief states a concrete state or action -- e.g. \
-characters BOUND / roped / hands tied, kneeling, holding a named object, a stated number of people \
--- and it is missing or wrong in the image, score at most 2 even if the picture is otherwise nice.>,
+  "accuracy": <1-5, does the image faithfully depict the intended moment (per the brief AND the source \
+text), including every concrete physical state or action true at that moment -- BOUND / roped / hands \
+tied, kneeling, holding a named object, a stated number of people? Be strict: if such a detail is \
+stated in the brief or source but missing or wrong in the image, score at most 2 even if the picture \
+is otherwise nice.>,
   "kid_appropriate": <1-5, warm, non-scary, no graphic violence/blood, young-child friendly?>,
   "style_ok": <1-5, matches the intended art style above?>,
   "issues": ["<short concrete problems>"],
@@ -148,6 +155,7 @@ def gen_scene(spread: dict, cast_index: dict, art_style: str, budget: gem.Budget
         log(f"[scene:{sid}] attempt {attempt} -> {cand.name} (budget {budget.remaining()} left)")
         crit = gem.critique_image(
             cand, SCENE_CRITIQUE.format(brief=spread["illustration_brief"],
+                                        source=(spread.get("read_text") or "")[:1200] or "(not available)",
                                         chars=char_desc or "(none)", style=ART_STYLE))
         score = min(crit.get("consistency", 0), crit.get("accuracy", 0),
                     crit.get("kid_appropriate", 0), crit.get("style_ok", 0))
