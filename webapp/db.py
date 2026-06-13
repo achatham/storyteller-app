@@ -350,6 +350,17 @@ def scene_store(book_id, idx, data, score, mime="image/webp"):
                   (book_id, idx, mime, data, score, time.time()))
 
 
+def clear_art(book_id) -> dict:
+    """Drop a book's roster sheets and scene images so they redraw (lazily) with
+    the current prompts/style. Bumps seg_ver to bust cached scene image URLs.
+    Keeps registry + pages (text) intact."""
+    with conn() as c:
+        sheets = c.execute("DELETE FROM sheets WHERE book_id=?", (book_id,)).rowcount
+        scenes = c.execute("DELETE FROM scenes WHERE book_id=?", (book_id,)).rowcount
+        c.execute("UPDATE books SET seg_ver = seg_ver + 1 WHERE id=?", (book_id,))
+    return {"sheets": sheets, "scenes": scenes}
+
+
 def reset_generating():
     """Drop scene rows stuck in 'generating' (a generation killed by a restart
     never committed an image). Removing them makes those pages eligible for

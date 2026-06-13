@@ -275,6 +275,16 @@ async def api_reprocess(book_id: int, fresh: bool = False):
     return {"ok": True, "fresh": fresh}
 
 
+@app.post("/api/books/{book_id}/redraw")
+def api_redraw(book_id: int):
+    """Clear the book's roster sheets + scene images so they redraw with the
+    current pipeline (single-figure sheets, style anchor, aspect refs). Text and
+    registry are kept; art regenerates lazily as you read."""
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    return {"ok": True, **db.clear_art(book_id)}
+
+
 @app.get("/api/books/{book_id}/roster")
 def api_roster(book_id: int):
     """The book's character/setting/prop roster: each entity's variants with a

@@ -65,8 +65,10 @@
     <a class="btn go" id="read">Read</a>
     <a class="btn" id="bookview">Book view</a>
     <a class="btn" id="roster">View roster</a>
+    <button class="btn" id="redraw">Redraw art</button>
     <a class="btn back" href="/">Library</a>
   </div>
+  <div class="note" id="redrawmsg" style="display:none"></div>
 </main>
 <script>
 const ID = __BOOK_ID__;
@@ -80,6 +82,14 @@ const usd = n => "$" + (n||0).toFixed(n>=1?2:3);
   $("#read").href = "/read/"+ID;
   $("#bookview").href = "/book/"+ID;
   $("#roster").href = "/roster/"+ID;
+  $("#redraw").onclick = async () => {
+    if (!confirm("Redraw all art for this book? Existing character sheets and page pictures are cleared and will be regenerated as you read (this costs image generations).")) return;
+    $("#redraw").disabled = true; $("#redraw").textContent = "Clearing…";
+    const r = await (await fetch("/api/books/"+ID+"/redraw", {method:"POST"})).json();
+    const m = $("#redrawmsg"); m.style.display = "block";
+    m.textContent = `Cleared ${r.sheets} sheets and ${r.scenes} pictures — they'll redraw with the latest style as you read.`;
+    $("#redraw").textContent = "Redraw art"; $("#redraw").disabled = false;
+  };
   $("#info").innerHTML = [
     ["Art style", (b.style||"").replace(/_/g," ")],
     ["Illustration cadence", "~"+b.words_per_page+" words / picture"],
