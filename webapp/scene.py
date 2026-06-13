@@ -109,8 +109,9 @@ def _ensure_sheet(book_id, member, style_text, style_ref=None) -> bytes | None:
         return None
     img_aspect = "2:3" if member.get("type") == "character" else "3:2"
     base = (f"{style_text}\n\n{sheet_prompt}\n\nCanonical look (match exactly): "
-            f"{appearance}\nSingle subject only, plain soft neutral background, "
-            "even lighting, no text labels.")
+            f"{appearance}\nEXACTLY ONE figure / a single subject -- never two people, "
+            "and never the same character shown at two ages or in two outfits. Plain soft "
+            "neutral background, even lighting, no text labels.")
     with _entity_lock(book_id, eid):
         data = db.get_sheet(book_id, eid, vid)   # another thread may have just drawn it
         if data:

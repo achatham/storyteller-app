@@ -76,12 +76,12 @@ ENTITY (from the book catalogue):
 
 Return JSON only:
 {{
-  "base_appearance": "<rich, CONCRETE, neutral canonical description: build, hair, eyes, skin, default clothing, distinctive features (for a setting/prop: materials, shapes, colors, mood). Stay consistent with canonical_details; invent reasonable specifics only where the text is silent.>",
+  "base_appearance": "<rich, CONCRETE, neutral canonical description of ONE single look at ONE moment: build, hair, eyes, skin, default clothing, distinctive features (for a setting/prop: materials, shapes, colors, mood). Describe a SINGLE figure as they look at this one point -- do NOT narrate how they change over time, age, or 'later become' anything (those are separate variants). Stay consistent with canonical_details; invent reasonable specifics only where the text is silent.>",
   "base_sheet_prompt": "<a complete, style-AGNOSTIC image prompt for a NEUTRAL REFERENCE SHEET of this entity in its DEFAULT look: for a character, full body, front view, relaxed neutral pose, plain soft off-white background, even lighting, no props, no text; for a setting, a clean establishing view; for a prop, an isolated product-style view. Describe only the subject and framing -- no art-style words.>",
   "variants": [
     {{
       "id": "<echo the variant id you are resolving>",
-      "appearance": "<the FULL resolved appearance for this variant (base look + the variant's delta applied)>",
+      "appearance": "<the FULL resolved appearance for this variant: the base look with THIS variant's delta applied, describing the character as a SINGLE figure at THIS one point only. Do NOT mention any other age/state or how they look at other times, and do NOT say they later 'grow into' or 'become' anything -- that belongs to other variants. One figure, one look.>",
       "sheet_prompt": "<a complete, style-AGNOSTIC reference-sheet image prompt for THIS variant, same neutral framing rules as base, no art-style words>"
     }}
   ]
