@@ -37,10 +37,10 @@
   @keyframes sweepback { 0%{opacity:0; transform:translateX(-140px);} 25%{opacity:1;} 100%{opacity:0; transform:translateX(100vw);} }
   @media (orientation:landscape){ #flow{ column-count:2; } }
   @media (orientation:portrait){  #flow{ column-count:1; } }
-  #flow .chtitle { font-size:1.5rem; margin:0 0 .7em; }
+  #flow .chtitle { font-size:calc(1.5rem * var(--fs,1)); margin:0 0 .7em; }
   #flow .chtitle .ch { display:block; font-family:system-ui,sans-serif; font-size:.72rem;
           letter-spacing:2px; text-transform:uppercase; color:var(--muted); margin-bottom:.3em; }
-  #flow p { font-size:1.18rem; line-height:1.62; margin:0 0 1em; text-align:justify; hyphens:auto; }
+  #flow p { font-size:calc(1.18rem * var(--fs,1)); line-height:1.62; margin:0 0 1em; text-align:justify; hyphens:auto; }
   #flow figure { margin:0 0 1em; break-inside:avoid; aspect-ratio:3/2; border-radius:10px;
           overflow:hidden; background:#ece3d2; box-shadow:0 4px 16px rgba(0,0,0,.16); }
   /* until the image has loaded, the figure is a gentle pulsing placeholder box */
@@ -74,6 +74,10 @@
   .card label.toggle { flex-direction:row; align-items:center; gap:10px; text-transform:none;
           letter-spacing:0; font-size:.95rem; color:var(--ink); cursor:pointer; }
   .card label.toggle input { width:auto; margin:0; }
+  .fsrow { display:flex; align-items:center; gap:10px; }
+  .fsrow .lab { flex:1; font-size:.7rem; letter-spacing:1px; text-transform:uppercase; color:var(--muted); }
+  .fsrow button { width:44px; padding:8px 0; font-size:1.05rem; }
+  .fsrow #fsval { min-width:48px; text-align:center; font-size:.9rem; color:var(--ink); }
   body.noanim #flow { transition:none; }
   #splash { position:fixed; inset:0; z-index:60; background:var(--bg); display:flex; align-items:center;
           justify-content:center; font-family:system-ui,sans-serif; color:var(--muted); }
@@ -89,6 +93,10 @@
   <div class="bk" id="bk"></div>
   <label>Chapter <select id="chap"></select></label>
   <label class="toggle"><input type="checkbox" id="animchk"> Page-turn animation</label>
+  <div class="fsrow"><span class="lab">Text size</span>
+    <button id="fsdown" aria-label="Smaller text">A&#8722;</button>
+    <span id="fsval">100%</span>
+    <button id="fsup" aria-label="Larger text">A+</button></div>
   <a class="btn" id="classic">Switch to single-page view</a>
   <button id="fs">&#9974; Full screen</button>
   <button id="closebook">&#10005; Close book</button>
@@ -106,6 +114,20 @@ let animOn = true;
 try { animOn = localStorage.getItem(ANIM_KEY) !== "0"; } catch(e){}
 function applyAnim(){ document.body.classList.toggle("noanim", !animOn); if($("#animchk")) $("#animchk").checked = animOn; }
 
+const FS_KEY = "book:fs";
+let fontScale = 1;
+try { fontScale = parseFloat(localStorage.getItem(FS_KEY)) || 1; } catch(e){}
+function applyFont(){ document.documentElement.style.setProperty("--fs", fontScale);
+  if ($("#fsval")) $("#fsval").textContent = Math.round(fontScale*100) + "%"; }
+function setFont(delta){
+  fontScale = Math.min(1.8, Math.max(0.7, Math.round((fontScale + delta)*100)/100));
+  try { localStorage.setItem(FS_KEY, fontScale); } catch(e){}
+  applyFont();
+  // text reflows -> re-paginate, staying near the same place in the chapter
+  const frac = page / Math.max(1, pages);
+  requestAnimationFrame(() => { paginate(); goPage(Math.round(frac*pages), true); });
+}
+
 async function boot(){
   try { META = await (await fetch(API)).json(); } catch(e){ $("#splash").textContent="Could not load."; return; }
   if (META.status !== "ready"){ $("#splash").textContent = "Still processing… " + (META.detail||""); setTimeout(boot,3000); return; }
@@ -115,6 +137,7 @@ async function boot(){
   try { const s = JSON.parse(localStorage.getItem(LKEY)); if (s) start = s; } catch(e){}
   $("#splash").hidden = true;
   applyAnim();
+  applyFont();
   await loadChapter(start.ch || 0, start.page || 0);
 }
 
@@ -238,6 +261,8 @@ $("#menu").onclick = e=>{ if(e.target===$("#menu")) $("#menu").hidden=true; e.st
 $("#close").onclick = e=>{ e.stopPropagation(); $("#menu").hidden=true; };
 $("#chap").onchange = e=>{ $("#menu").hidden=true; loadChapter(+e.target.value, 0); };
 $("#animchk").onchange = e=>{ animOn=e.target.checked; try{localStorage.setItem(ANIM_KEY, animOn?"1":"0");}catch(_){} applyAnim(); };
+$("#fsdown").onclick = e=>{ e.stopPropagation(); setFont(-0.1); };
+$("#fsup").onclick = e=>{ e.stopPropagation(); setFont(0.1); };
 $("#classic").href = "/read/" + BOOK_ID;
 const fsEl = document.documentElement;
 const inFS = ()=>document.fullscreenElement||document.webkitFullscreenElement;
