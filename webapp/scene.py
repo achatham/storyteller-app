@@ -259,22 +259,24 @@ def _ensure_sheet(book_id, member, style_text, style_ref=None) -> bytes | None:
 def _view_prompt(name, appearance, view):
     """A general (book-agnostic) reference prompt for a non-exterior view of an
     object -- described by the camera's relationship to it, not by named parts."""
+    # IMPORTANT: examples must match what THIS object actually is (per `appearance`).
+    # Don't lead with a ship example or every building's roof becomes a ship deck.
     if view == "interior":
-        what = (f"the INTERIOR of {name}, seen from INSIDE it -- ONLY its interior surfaces, "
-                f"materials and architecture (e.g. for a ship: wood-panelled cabin walls, beams, a "
-                f"porthole, lanterns; for a building: a room within). Do NOT show the exterior of "
-                f"{name}, its overall outer shape, or any exterior-only identifying feature (a "
-                f"figurehead, the whole hull or outer silhouette) -- not even through a window.")
+        what = (f"the INTERIOR of {name}, seen from INSIDE it -- ONLY its interior surfaces, rooms, "
+                f"materials and architecture, matching the kind of thing {name} actually is (a modern "
+                f"building: a room, lobby or hallway within it; an old house: panelled rooms; a ship: a "
+                f"cabin). Do NOT show the exterior of {name}, its overall outer shape, or any "
+                f"exterior-only identifying feature -- not even through a window.")
     else:  # surface
-        what = (f"the open outer SURFACE / top of {name}, seen by someone standing ON it and looking "
-                f"along it (for a ship: its deck with the base of the mast, rigging, rails, hatches and "
-                f"cabin door; for a building: its rooftop), with only the structures that rise directly "
-                f"from that surface. Do NOT show a separate whole copy of {name} in the distance, and do "
-                f"NOT show its exterior-only identifying features (a figurehead or prow ornament, the "
-                f"full outer hull or silhouette). Draw each feature EXACTLY ONCE -- never a mirrored, "
-                f"doubled or twin copy at both ends.")
-    return (f"A neutral REFERENCE of {what}\nUse this only for the palette, wood tones and materials "
-            f"(do NOT add exterior features from it): {appearance}\n"
+        what = (f"the open top SURFACE of {name} that a person stands ON, matching the kind of thing "
+                f"{name} actually is (a building: its flat rooftop or terrace with parapets, vents and "
+                f"railings; a ship: its deck), showing that surface and only the structures rising "
+                f"directly from it. Do NOT show a separate whole copy of {name} in the distance, and do "
+                f"NOT show its exterior-only identifying features. Draw each feature EXACTLY ONCE -- "
+                f"never a mirrored, doubled or twin copy.")
+    return (f"A neutral REFERENCE of {what}\n"
+            f"What {name} actually is (use this to get its real form, materials, palette and era right; "
+            f"do NOT invent unrelated features): {appearance}\n"
             f"No people, even lighting, single clean reference.")
 
 
