@@ -41,9 +41,13 @@
   #flow .chtitle .ch { display:block; font-family:system-ui,sans-serif; font-size:.72rem;
           letter-spacing:2px; text-transform:uppercase; color:var(--muted); margin-bottom:.3em; }
   #flow p { font-size:1.18rem; line-height:1.62; margin:0 0 1em; text-align:justify; hyphens:auto; }
-  #flow figure { margin:0 0 1em; break-inside:avoid; }
-  #flow figure img { width:100%; aspect-ratio:3/2; object-fit:cover; border-radius:10px;
-          background:#efe7d8; box-shadow:0 4px 16px rgba(0,0,0,.16); display:block; opacity:0; transition:opacity .4s; }
+  #flow figure { margin:0 0 1em; break-inside:avoid; aspect-ratio:3/2; border-radius:10px;
+          overflow:hidden; background:#ece3d2; box-shadow:0 4px 16px rgba(0,0,0,.16); }
+  /* until the image has loaded, the figure is a gentle pulsing placeholder box */
+  #flow figure:not(:has(img.on)) { animation:phpulse 1.5s ease-in-out infinite; }
+  @keyframes phpulse { 0%,100%{ background:#ece3d2; } 50%{ background:#e6dcc6; } }
+  #flow figure img { width:100%; height:100%; object-fit:cover; display:block;
+          opacity:0; transition:opacity .45s; }
   #flow figure img.on { opacity:1; }
 
   .edge { position:fixed; top:50%; transform:translateY(-50%); z-index:5; pointer-events:none;
@@ -125,7 +129,7 @@ async function loadChapter(ci, toPage){
     if (n.type === "text")
       html.push(n.text.split(/\n\s*\n/).map(t => `<p>${esc(t.trim())}</p>`).join(""));
     else
-      html.push(`<figure><img alt="${esc(n.alt||"")}" data-src="${n.src}" onload="this.classList.add('on')"></figure>`);
+      html.push(`<figure><img alt="${esc(n.alt||"")}" data-src="${n.src}" onload="this.classList.add('on')" onerror="imgRetry(this)"></figure>`);
   }
   flow.innerHTML = html.join("");
   $("#chap").value = ci;
@@ -173,17 +177,26 @@ function goPage(n, force){
   save();
 }
 
-// load images on the current page + next 2 (lazy generation + prefetch)
+// Load whatever is actually on (or near) the screen. We scan getBoundingClientRect
+// -- which reflects the page-turn transform -- instead of computing a page index
+// from offsetLeft, which is unreliable inside a CSS multi-column layout and broke
+// when paging backwards. Request each near image once; reveal it once it's ready.
 function loadVisibleImages(){
-  const s = stride();
-  imgs.forEach(im => {
-    const pg = Math.floor(im.offsetLeft / s);
-    if (pg >= page-1 && pg <= page+2 && im.dataset.src && !prefetched.has(im.dataset.src)){
-      prefetched.add(im.dataset.src);
-      im.src = im.dataset.src;
-      if (im.complete && im.naturalWidth) im.classList.add("on");   // cached: onload may not fire
-    }
-  });
+  const W = window.innerWidth;
+  for (const im of imgs){
+    const r = im.getBoundingClientRect();
+    const near = r.right > -1.5*W && r.left < 2.5*W;   // current spread +/- ~1.5 screens
+    if (near && im.dataset.src && !im.src) im.src = im.dataset.src;   // request once
+    if (im.complete && im.naturalWidth) im.classList.add("on");       // cached/loaded -> show
+  }
+}
+// If an image 503s because the server is still generating it, drop the src so the
+// next scan re-requests it, and rescan shortly. Bounded so a real failure stops.
+function imgRetry(im){
+  const n = (+im.dataset.tries || 0) + 1; im.dataset.tries = n;
+  if (n > 8) return;
+  im.removeAttribute("src");
+  setTimeout(loadVisibleImages, 1200);
 }
 
 function sweep(dir){
@@ -233,6 +246,9 @@ $("#closebook").onclick = e=>{ e.stopPropagation(); try{ if(inFS())(document.exi
 
 let rt=null;
 window.addEventListener("resize", ()=>{ clearTimeout(rt); rt=setTimeout(()=>{ const frac=page/Math.max(1,pages); paginate(); goPage(Math.round(frac*pages), true); }, 200); });
+// re-scan once the page-turn animation lands (the goPage() call runs before the
+// transform has moved); also reveal any images that finished loading meanwhile
+$("#flow").addEventListener("transitionend", e => { if (e.propertyName === "transform") loadVisibleImages(); });
 boot();
 </script>
 </body></html>
