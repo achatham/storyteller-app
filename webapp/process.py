@@ -57,20 +57,20 @@ object in view. Judge by MEANING, not exact words: "the vessel", "the boat", "on
 indicate the ship. For each one that appears, choose the best-fitting variant id using the \
 page's description and the variant chapter spans (this is chapter {chapter_num}).
 
-Also give each an "aspect" -- the camera's spatial relationship to the object:
-- "exterior": the scene shows the object FROM OUTSIDE; the whole thing is in view (a ship sailing \
-on the sea, a castle on a hill).
-- "surface": the characters are ON its outer surface/top -- a ship's open deck, a rooftop, a \
-balcony. You see the surface and whatever structure rises from it, but not the whole object.
-- "interior": the characters are ENCLOSED INSIDE it -- a ship's cabin/hold/bunk, a room inside a \
-building, a cave. You see only interior surfaces; you would NOT see the object's exterior at all, \
-not even through a window.
-Only a PLACE you can stand on or go inside (a ship, a building, a room, a cave -- a "setting") can \
-be "surface" or "interior". An ordinary object you merely look at -- a painting, a book, a sword, \
-a chair -- is ALWAYS "exterior" (you show the whole object); it has no surface or interior to be in.
+Also, for each SETTING (a place you can go inside or stand on -- a building, ship, room, cave), say \
+HOW the scene shows it, as a "view":
+- Leave "view" as "" if the scene shows the WHOLE place FROM OUTSIDE (the entire building or ship in \
+view, e.g. a ship sailing on the sea, a house seen from the street).
+- Otherwise the scene happens INSIDE or ON a specific PART of it. Set "view" to a SHORT lowercase \
+label naming that exact spot the way the STORY depicts it -- e.g. "lobby", "rooftop", "the kitchen", \
+"the fifth-floor apartment", "ship's deck", "the captain's cabin", "the cellar". Pick the labels from \
+what the pages actually show -- do NOT invent a part (a rooftop, a deck) the story never uses. Use the \
+SAME label every time the same spot appears, so it gets ONE consistent reference.
+An ordinary object you merely look at -- a painting, a book, a sword, a chair -- is never a place: \
+always leave its "view" as "".
 
 Return JSON only:
-{{"pages": [{{"id": <page id>, "props": [{{"entity_id": "<id>", "variant_id": "<variant id>", "aspect": "exterior|surface|interior"}}]}}]}}
+{{"pages": [{{"id": <page id>, "props": [{{"entity_id": "<id>", "variant_id": "<variant id>", "view": "<short label or empty>"}}]}}]}}
 Only include a page if it has props; omit anything that does not actually appear.
 
 SETTINGS/PROPS:
@@ -82,9 +82,9 @@ PAGES:
 
 
 def _llm_map_props(props, spreads, chapter_num):
-    """Ask the (cheap) model which settings/props appear on each page, and whether
-    each is seen from outside (exterior) or inside/on it (aboard). Returns
-    {page_id: [(entity_id, variant_id, aspect), ...]}."""
+    """Ask the (cheap) model which settings/props appear on each page, and -- for a
+    setting -- which specific named view the scene needs (or "" for the whole thing
+    from outside). Returns {page_id: [(entity_id, variant_id, view), ...]}."""
     from pipeline import gem
     from pipeline.config import PROP_MODEL
     prop_lines = [{"id": e["id"], "name": e.get("name", ""), "aliases": e.get("aliases", []),
@@ -98,7 +98,7 @@ def _llm_map_props(props, spreads, chapter_num):
         pages=json.dumps(page_lines, ensure_ascii=False)), model=PROP_MODEL)
     out = {}
     for pg in data.get("pages", []):
-        out[pg.get("id")] = [(p.get("entity_id"), p.get("variant_id"), p.get("aspect"))
+        out[pg.get("id")] = [(p.get("entity_id"), p.get("variant_id"), p.get("view", ""))
                              for p in pg.get("props", []) if p.get("entity_id")]
     return out
 
@@ -120,43 +120,50 @@ def enrich_setting_props(bible: dict, registry: dict, chapter_num: int):
     chapter_cast = bible.setdefault("cast", [])
     in_chapter = {m.get("entity_id") for m in chapter_cast}
 
-    def add(spread, eid, vid, aspect, force_aspect=True):
+    def _norm_view(view, e):
+        # only a SETTING has a non-whole view; an object you look at is always whole
+        if e.get("type") != "setting":
+            return ""
+        v = (view or "").strip().lower()
+        if v in ("", "whole", "exterior", "outside", "none", "the whole thing"):
+            return ""
+        if v == "aboard":     # legacy two-value tag
+            v = "deck"
+        return v[:40]
+
+    def add(spread, eid, vid, view, force_view=True):
         e = prop_by_id.get(eid)
         if not e or spread is None:
             return
         if vid not in {v["id"] for v in e.get("variants", [])}:
             vid = _variant_for_chapter(e, chapter_num)   # validate / fall back
-        if aspect == "aboard":          # legacy two-value tag
-            aspect = "surface"
-        aspect = aspect if aspect in ("surface", "interior") else "exterior"
-        if e.get("type") != "setting":  # only a place you can stand on / go inside has a
-            aspect = "exterior"         # surface or interior; a prop is always shown whole
+        view = _norm_view(view, e)
         cast = spread.setdefault("cast", [])
-        # aspect = is the scene OUTSIDE the object (exterior) or INSIDE/ON it
-        # (aboard) -- drives which reference sheet the renderer attaches. Update
-        # the existing cast entry too (the segmenter may have added it untagged).
+        # view = "" means show the whole thing from outside; a short label (e.g.
+        # "lobby", "deck") means the scene is at that specific spot -> drives which
+        # reference sheet the renderer attaches. Update an entry the segmenter added.
         existing = next((c for c in cast if c.get("entity_id") == eid), None)
         if existing is None:
-            cast.append({"entity_id": eid, "variant_id": vid, "aspect": aspect})
-        elif force_aspect or not existing.get("aspect"):
-            existing["aspect"] = aspect
+            cast.append({"entity_id": eid, "variant_id": vid, "view": view})
+        elif force_view or not existing.get("view"):
+            existing["view"] = view
             existing.setdefault("variant_id", vid)
         if eid not in in_chapter:
             chapter_cast.append({"entity_id": eid, "variant_id": vid,
                                  "name": e.get("name", ""), "from_registry": True})
             in_chapter.add(eid)
 
-    # primary: model pass (best-effort) -- authoritative on aspect
+    # primary: model pass (best-effort) -- authoritative on the view
     try:
         mapped = _llm_map_props(props, bible.get("spreads", []), chapter_num)
         for pid, items in mapped.items():
-            for eid, vid, aspect in items:
-                add(spread_by_id.get(pid), eid, vid, aspect)
+            for eid, vid, view in items:
+                add(spread_by_id.get(pid), eid, vid, view)
     except Exception as ex:  # noqa: BLE001
         print(f"[props] model pass failed: {type(ex).__name__}: {ex}", flush=True)
 
     # floor: literal name/alias match (strip leading articles to be less brittle).
-    # Only fills a prop/aspect the model pass missed -- never overwrites its aspect.
+    # Only fills a prop the model pass missed -- never overwrites its view.
     for e in props:
         names = [e.get("name", "")] + (e.get("aliases") or [])
         pats = [re.compile(r"\b" + re.escape(re.sub(r"(?i)^(the|a|an)\s+", "", n)) + r"\b", re.I)
@@ -165,7 +172,7 @@ def enrich_setting_props(bible: dict, registry: dict, chapter_num: int):
         for s in bible.get("spreads", []):
             text = f"{s.get('setting','')} {s.get('illustration_brief','')}"
             if any(p.search(text) for p in pats):
-                add(s, e["id"], vid, "exterior", force_aspect=False)
+                add(s, e["id"], vid, "", force_view=False)
 
 # Every epub is laid out differently (NCX present or not, spine vs TOC mismatch,
 # odd front/back matter), so rather than trust the format we hand the model a

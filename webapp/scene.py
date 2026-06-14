@@ -9,6 +9,7 @@ sheet generated and cached on first use. Result image bytes are stored in the DB
 import io
 import json
 import os
+import re
 import tempfile
 import threading
 from pathlib import Path
@@ -256,43 +257,41 @@ def _ensure_sheet(book_id, member, style_text, style_ref=None) -> bytes | None:
         return data
 
 
+def _view_slug(view: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "_", (view or "").strip().lower()).strip("_")
+    return s[:28] or "inside"
+
+
 def _view_prompt(name, appearance, view):
-    """A general (book-agnostic) reference prompt for a non-exterior view of an
-    object -- described by the camera's relationship to it, not by named parts."""
-    # IMPORTANT: examples must match what THIS object actually is (per `appearance`).
-    # Don't lead with a ship example or every building's roof becomes a ship deck.
-    if view == "interior":
-        what = (f"the INTERIOR of {name}, seen from INSIDE it -- ONLY its interior surfaces, rooms, "
-                f"materials and architecture, matching the kind of thing {name} actually is (a modern "
-                f"building: a room, lobby or hallway within it; an old house: panelled rooms; a ship: a "
-                f"cabin). Do NOT show the exterior of {name}, its overall outer shape, or any "
-                f"exterior-only identifying feature -- not even through a window.")
-    else:  # surface
-        what = (f"the open top SURFACE of {name} that a person stands ON, matching the kind of thing "
-                f"{name} actually is (a building: its flat rooftop or terrace with parapets, vents and "
-                f"railings; a ship: its deck), showing that surface and only the structures rising "
-                f"directly from it. Do NOT show a separate whole copy of {name} in the distance, and do "
-                f"NOT show its exterior-only identifying features. Draw each feature EXACTLY ONCE -- "
-                f"never a mirrored, doubled or twin copy.")
+    """A book-agnostic reference prompt for ONE specific place within/on a setting,
+    named by the story (e.g. 'lobby', 'rooftop', 'the deck'). Generic -- no ship or
+    building assumptions baked in; the entity's own appearance drives the look."""
+    what = (f"the '{view}' of {name} -- the specific spot inside or on {name} that the story calls "
+            f"its {view}. Show ONLY what is actually visible at that spot: its local surfaces, "
+            f"fittings, furniture and architecture, true to what {name} is. Do NOT show the whole "
+            f"exterior of {name}, its overall outer shape, or any exterior-only identifying feature "
+            f"of {name} -- not even through a window or doorway. Draw it ONCE, no mirrored or doubled "
+            f"copy.")
     return (f"A neutral REFERENCE of {what}\n"
-            f"What {name} actually is (use this to get its real form, materials, palette and era right; "
-            f"do NOT invent unrelated features): {appearance}\n"
+            f"For context, {name} as a whole is (use only to get its materials, palette and era right; "
+            f"do NOT depict its exterior here): {appearance}\n"
             f"No people, even lighting, single clean reference.")
 
 
 def _ensure_view_sheet(book_id, member, style_text, view, style_ref=None) -> bytes | None:
-    """A non-exterior reference (view = 'surface' or 'interior') for a setting/prop
-    so scenes ON or INSIDE it don't get the whole exterior pasted in. One per
-    (entity, view), keyed under a synthetic '__surface'/'__interior' variant; NOT
+    """A reference for ONE named place within/on a setting (view = a short story label
+    like 'lobby' or 'deck'), so scenes set there don't get the whole exterior pasted
+    in. One per (entity, view), keyed under a synthetic '__v_<slug>' variant; NOT
     seeded from the exterior sheet. Falls back to the normal sheet on failure."""
     eid = member["entity_id"]
-    vid = "__" + view
+    vid = "__v_" + _view_slug(view)
     data = db.get_sheet(book_id, eid, vid)
     if data:
         return data
-    prompt = f"{style_text}\n\n" + _view_prompt(member.get("name", eid),
-                                                member.get("appearance", ""), view)
-    with _entity_lock(book_id, eid + ":" + view):
+    appearance = member.get("appearance", "")
+    prompt = f"{style_text}\n\n" + _view_prompt(member.get("name", eid), appearance, view)
+    desc = _view_prompt(member.get("name", eid), "", view)
+    with _entity_lock(book_id, eid + ":" + vid):
         data = db.get_sheet(book_id, eid, vid)
         if data:
             return data
@@ -302,10 +301,9 @@ def _ensure_view_sheet(book_id, member, style_text, view, style_ref=None) -> byt
                 refs = [style_ref]
                 prompt += ("\n\nThe attached image is a STYLE REFERENCE: match its art style, "
                            "medium and colour palette exactly, but do NOT copy its subject.")
-            desc = f"{_view_prompt(member.get('name', eid), '', view)}"
             data, trace = _draw_sheet(prompt, refs, "3:2", desc)
         except Exception as ex:  # noqa: BLE001
-            print(f"[scene] {view} sheet {eid} failed: {ex}", flush=True)
+            print(f"[scene] view '{view}' sheet {eid} failed: {ex}", flush=True)
             return _ensure_sheet(book_id, member, style_text, style_ref)   # fallback
         db.save_sheet(book_id, eid, vid, data)
         _save_sheet_history(book_id, eid, vid, desc, trace)
@@ -343,7 +341,10 @@ def regenerate_sheet(book_id, entity_id, variant_id) -> dict:
     db.delete_sheet(book_id, entity_id, variant_id)
     with costs.run_as(f"book:{book_id}"), tempfile.TemporaryDirectory() as td:
         style_ref = _style_anchor_path(book, td)
-        if variant_id.startswith("__"):
+        if variant_id.startswith("__v_"):                 # a named view -> recover the label
+            data = _ensure_view_sheet(book_id, member, style_text,
+                                      variant_id[4:].replace("_", " "), style_ref=style_ref)
+        elif variant_id.startswith("__"):                 # legacy __interior/__surface
             data = _ensure_view_sheet(book_id, member, style_text, variant_id[2:], style_ref=style_ref)
         else:
             data = _ensure_sheet(book_id, member, style_text, style_ref=style_ref)
@@ -400,35 +401,19 @@ def _render_scene(book_id: int, idx: int) -> bytes:
     spread = {"illustration_brief": page["brief"], "setting": page["setting"], "cast": page_cast,
               "read_text": page["read_text"]}
     members = scene_members(spread, cast_index)
-    # aspect per entity (set on settings/props by the prop pass): exterior | surface | interior
-    aspect = {c.get("entity_id"): c.get("aspect") for c in page_cast if c.get("aspect")}
+    # view per setting (set by the prop pass): "" = the whole place from outside;
+    # else a short story label for the specific spot the scene is at ("lobby",
+    # "deck", "the cellar"). Props (a painting, a book) are never a place.
+    views_by_id = {}
+    for c in page_cast:
+        v = (c.get("view") or "").strip()
+        if not v and c.get("aspect") in ("surface", "interior"):   # books segmented pre-`view`
+            v = "deck" if c.get("aspect") == "surface" else "interior"
+        if v:
+            views_by_id[c.get("entity_id")] = v
 
-    def _view(m):   # the non-exterior view for a SETTING you can stand on / go inside, or None
-        # Only settings (a ship, a room, a building) have a surface or interior. A
-        # prop -- a painting, a book, a knife -- is always shown whole; "the interior
-        # of a picture" is incoherent and fuses the prop with the room around it.
-        if m.get("type") == "setting":
-            a = aspect.get(m["entity_id"])
-            if a in ("surface", "interior"):
-                return a
-        return None
-
-    # for INTERIOR/SURFACE scenes, rewrite the object's description so the prompt
-    # never narrates its whole exterior -- else the model paints the figurehead
-    # (and tends to mirror it to both edges -> a "double-headed ship" on deck)
-    interior_names, surface_names = [], []
-    for m in members:
-        name = m.get("name", m["entity_id"])
-        v = _view(m)
-        if v == "interior":
-            interior_names.append(name)
-            m["appearance"] = (f"the interior of {name} -- show ONLY what is visible inside; do NOT "
-                               "depict its exterior or exterior-only features, even through a window")
-        elif v == "surface":
-            surface_names.append(name)
-            m["appearance"] = (f"the open deck / top surface of {name} -- show the deck underfoot and the "
-                               f"masts, rigging and rails rising from it; do NOT include {name}'s "
-                               "figurehead, prow ornament or whole outer hull")
+    def _view(m):   # the named place this setting is shown at, or None (whole/exterior)
+        return views_by_id.get(m["entity_id"]) if m.get("type") == "setting" else None
 
     # per-character state for THIS moment, so e.g. one person is bound and another
     # freed in the same picture (attached to the member -> build_scene_prompt renders it)
@@ -456,23 +441,25 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                 ref_members.append(m)
                 ref_paths.append(p)
 
+        # now (after each view reference was drawn from the real appearance) rewrite
+        # the view-settings' descriptions for the SCENE prompt so it focuses on that
+        # spot, not the whole exterior.
+        view_members = [m for m in members if _view(m)]
+        for m in view_members:
+            nm = m.get("name", m["entity_id"])
+            m["appearance"] = (f"the {_view(m)} of {nm} -- show ONLY what is visible at that spot; do "
+                               f"NOT depict the whole exterior of {nm} or its exterior-only features, "
+                               "even through a window")
         char_desc = "\n".join(
             f"- {m['name']}" + (f" (RIGHT NOW: {m['state']})" if m.get("state") else "")
             + f": {m['appearance']}" for m in members)
         place_note = ""
-        if interior_names:
-            names = ", ".join(interior_names)
-            place_note = (f"\n\nThe scene takes place INSIDE {names}: show only its interior. Do NOT "
-                             f"depict the whole exterior of {names} or its exterior-only features "
-                             "(figureheads, the full outer hull/silhouette) anywhere -- not even through "
-                             "a window or doorway.")
-        if surface_names:
-            names = ", ".join(surface_names)
-            place_note += (f"\n\nThe scene takes place ON the open deck/surface of {names}: show the deck "
-                              f"and the masts, rigging and rails rising from it. Do NOT show {names}'s "
-                              "exterior-only identifying features (a figurehead or prow ornament, the full "
-                              "outer hull or silhouette), and NEVER show a mirrored, doubled or twin copy of "
-                              "any feature at both ends/edges of the picture.")
+        if view_members:
+            spots = "; ".join(f"the {_view(m)} of {m.get('name', m['entity_id'])}" for m in view_members)
+            place_note = (f"\n\nThe scene takes place at {spots}: show only that location. Do NOT depict "
+                          "the whole exterior of those place(s) or their exterior-only identifying "
+                          "features anywhere -- not even through a window or doorway, and never a "
+                          "mirrored or doubled copy.")
         best, fix, draft = None, "", None
         gen_id = db.next_gen_id(book_id, idx)   # debug history: this generation run
         trace = {"states": states, "max_tries": SCENE_TRIES, "attempts": []}
