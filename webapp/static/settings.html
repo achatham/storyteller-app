@@ -63,7 +63,7 @@
   </div>
   <div class="actions">
     <a class="btn go" id="read">Read</a>
-    <a class="btn" id="bookview">Book view</a>
+    <a class="btn" id="bookview">Single-page view</a>
     <a class="btn" id="roster">View roster</a>
     <a class="btn" id="debug">Generation debug</a>
     <button class="btn" id="recompress">Recompress art</button>
@@ -81,8 +81,8 @@ const usd = n => "$" + (n||0).toFixed(n>=1?2:3);
   const b = await (await fetch("/api/books/"+ID)).json();
   $("#title").textContent = b.title;
   $("#auth").textContent = b.author || "";
-  $("#read").href = "/read/"+ID;
-  $("#bookview").href = "/book/"+ID;
+  $("#read").href = "/book/"+ID;     // paginated book view is the default reading mode
+  $("#bookview").href = "/read/"+ID;  // single-page (image-focused) viewer
   $("#roster").href = "/roster/"+ID;
   $("#debug").href = "/debug/"+ID;
   $("#redraw").onclick = async () => {

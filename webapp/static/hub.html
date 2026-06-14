@@ -132,7 +132,7 @@ function card(b){
       : b.status}</div>
     ${ready ? `<div class="barwrap"><div class="bar" style="width:${pct}%"></div></div>` : ""}
     <div class="row">
-      <a class="btn go" href="/read/${b.id}" aria-disabled="${ready?'false':'true'}">
+      <a class="btn go" href="/book/${b.id}" aria-disabled="${ready?'false':'true'}">
         ${b.position>0 && ready ? "Continue" : "Read"}</a>
       <a class="btn" href="/settings/${b.id}" title="Settings & cost">&#9881;</a>
       <button class="del" onclick="del(${b.id},event)">✕</button>
