@@ -145,6 +145,27 @@ STYLES = {
         "beasts), now rendered in rich warm FULL COLOR. The exciting, immersive feel of "
         "a middle-grade fantasy chapter book. NOT flat cartoon, NOT photorealistic, NOT 3D render."
     ),
+    "graphic_novel_painted": (
+        "Modern painted graphic-novel illustration: confident ink linework beneath "
+        "rich volumetric shading and cinematic lighting -- dimensional rendering with "
+        "soft gradients, ambient shadow and glowing rim highlights, moody atmospheric "
+        "color. Polished and dramatic like a high-end illustrated graphic album, FULLY "
+        "shaded with real depth (NOT flat cel color). Friendly expressive characters. "
+        "NOT photorealistic, NOT 3D render."
+    ),
+    "cel_shaded": (
+        "Clean cel-shaded illustration: crisp ink outlines with bright flat color "
+        "filled by hard-edged two-tone shadow and highlight shapes (no soft gradients), "
+        "bold and graphic like modern animation or a stylish cel-shaded video game. "
+        "Punchy, polished and all-ages. NOT soft-painted, NOT photorealistic, NOT 3D render."
+    ),
+    "stylized_3d": (
+        "Stylized 3D animated-game render: appealing characters with smooth rounded "
+        "forms, soft global illumination and gentle subsurface lighting, rich materials "
+        "and a shallow depth of field, the warm polished look of a modern animated video "
+        "game or feature film (Pixar / Overwatch-like). Vibrant and friendly. NOT pixel "
+        "art, NOT flat 2D, NOT photorealistic live-action."
+    ),
 }
 STYLE = os.environ.get("STORY_STYLE", "watercolor")
 if STYLE not in STYLES:

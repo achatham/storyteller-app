@@ -133,8 +133,10 @@ def _style_text(style_key: str) -> str:
 SAMPLE_SCENE = (
     "Illustrate this scene for a children's picture book: a young child and a small "
     "friendly red fox sit together on a grassy hill beneath a big oak tree at golden "
-    "sunset; the child holds an open storybook and points up at a butterfly. Warm, "
-    "gentle, full of wonder. Horizontal storybook composition.")
+    "sunset; the child points up at a butterfly. Warm, gentle, full of wonder. "
+    "ONE single seamless illustration that fills the whole frame -- it is NOT a book: "
+    "no open pages, no centre fold, gutter, crease or seam, and no border, frame or "
+    "panel divisions. Horizontal storybook composition.")
 
 
 def generate_style_sample(style_key: str) -> bytes | None:
