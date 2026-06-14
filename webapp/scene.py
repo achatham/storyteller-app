@@ -83,12 +83,13 @@ Return JSON only:
 }}"""
 
 
-def _draw_sheet(prompt, refs, aspect, desc) -> bytes:
-    """Draw a reference sheet with a single-subject critic + retry, keeping the
-    best of SHEET_TRIES attempts. Catches the model's habit of mirroring/doubling
-    a subject (e.g. a figurehead at both ends -> 'two heads')."""
+def _draw_sheet(prompt, refs, aspect, desc):
+    """Draw a reference sheet with a single-subject critic + retry, keeping the best
+    of SHEET_TRIES attempts. Catches the model's habit of mirroring/doubling a subject
+    (e.g. a figurehead at both ends -> 'two heads'). Returns (best_bytes, trace) where
+    trace = {"attempts": [...], "chosen": n} for the debug history."""
     with tempfile.TemporaryDirectory() as td:
-        best, fix = None, ""
+        best, fix, attempts = None, "", []
         for attempt in range(1, SHEET_TRIES + 1):
             p = prompt + (f"\n\nIMPORTANT FIX FROM LAST ATTEMPT: {fix}" if fix else "")
             cand = Path(td) / f"cand{attempt}.webp"
@@ -96,16 +97,37 @@ def _draw_sheet(prompt, refs, aspect, desc) -> bytes:
             data = cand.read_bytes()
             try:
                 crit = gem.critique_image(cand, SHEET_CRITIQUE.format(desc=desc or "(the subject)"))
-                score = min(crit.get("clean_sheet", 0), crit.get("match", 0))
+                cs, mt = crit.get("clean_sheet", 0), crit.get("match", 0)
+                score, avg = min(cs, mt), round((cs + mt) / 2, 2)
             except Exception as ex:  # noqa: BLE001 -- never fail a sheet on a critic error
                 print(f"[scene] sheet critique failed: {ex}", flush=True)
-                return data
+                attempts.append({"attempt": attempt, "prompt": p, "data": data,
+                                 "critique": None, "min": None, "avg": None})
+                return data, {"attempts": attempts, "chosen": attempt}
+            attempts.append({"attempt": attempt, "prompt": p, "data": data,
+                             "critique": crit, "min": score, "avg": avg})
             if best is None or score > best[1]:
-                best = (data, score)
+                best = (data, score, attempt)
             if score >= SHEET_PASS:
                 break
             fix = crit.get("fix_hint", "")
-        return best[0]
+        return best[0], {"attempts": attempts, "chosen": best[2]}
+
+
+def _save_sheet_history(book_id, eid, vid, desc, trace):
+    """Persist a sheet generation's attempts (prompt + candidate image + critique)."""
+    try:
+        gen_id = db.next_sheet_gen_id(book_id, eid, vid)
+        for a in trace["attempts"]:
+            db.sheet_attempt_add(book_id, eid, vid, gen_id, a["attempt"], a["prompt"],
+                                 _compress(a["data"], DEBUG_MAXW, DEBUG_QUALITY),
+                                 json.dumps(a["critique"]) if a["critique"] else None,
+                                 a["min"], a["avg"])
+        chosen = trace["chosen"]
+        final = next((a["min"] for a in trace["attempts"] if a["attempt"] == chosen), None)
+        db.sheet_gen_add(book_id, eid, vid, gen_id, (desc or "")[:600], chosen, final)
+    except Exception as ex:  # noqa: BLE001 -- history is best-effort
+        print(f"[scene] sheet history save failed: {ex}", flush=True)
 
 # Serialize sheet generation per (book, entity): the first variant drawn becomes
 # the identity anchor, and concurrent scenes that need the same character's sheets
@@ -225,11 +247,12 @@ def _ensure_sheet(book_id, member, style_text, style_ref=None) -> bytes | None:
                                  "outfit/moment: keep the SAME facial identity, hair and build; "
                                  "change only the clothing/age/form described above.")
                 prompt = base + ("\n\n" + " ".join(notes) if notes else "")
-                data = _draw_sheet(prompt, refs or None, img_aspect, appearance)
+                data, trace = _draw_sheet(prompt, refs or None, img_aspect, appearance)
         except Exception as ex:  # noqa: BLE001
             print(f"[scene] sheet {eid}/{vid} failed: {ex}", flush=True)
             return None
         db.save_sheet(book_id, eid, vid, data)
+        _save_sheet_history(book_id, eid, vid, appearance, trace)
         return data
 
 
@@ -278,12 +301,51 @@ def _ensure_view_sheet(book_id, member, style_text, view, style_ref=None) -> byt
                 prompt += ("\n\nThe attached image is a STYLE REFERENCE: match its art style, "
                            "medium and colour palette exactly, but do NOT copy its subject.")
             desc = f"{_view_prompt(member.get('name', eid), '', view)}"
-            data = _draw_sheet(prompt, refs, "3:2", desc)
+            data, trace = _draw_sheet(prompt, refs, "3:2", desc)
         except Exception as ex:  # noqa: BLE001
             print(f"[scene] {view} sheet {eid} failed: {ex}", flush=True)
             return _ensure_sheet(book_id, member, style_text, style_ref)   # fallback
         db.save_sheet(book_id, eid, vid, data)
+        _save_sheet_history(book_id, eid, vid, desc, trace)
         return data
+
+
+def _member_for(registry, entity_id, variant_id):
+    """Build the member dict for one entity/variant from the registry (for an
+    on-demand single-sheet redraw). Synthetic view variants (__interior/__surface)
+    use the base entity's look."""
+    e = next((x for x in registry.get("entities", []) if x.get("id") == entity_id), None)
+    if not e:
+        return None
+    var = None if variant_id.startswith("__") else \
+        next((v for v in e.get("variants", []) if v.get("id") == variant_id), None)
+    base_vid = (e.get("variants") or [{}])[0].get("id", "default") \
+        if variant_id.startswith("__") else variant_id
+    return {"entity_id": entity_id, "variant_id": base_vid, "name": e.get("name", entity_id),
+            "appearance": (var or {}).get("appearance") or e.get("base_appearance", ""),
+            "sheet_prompt": (var or {}).get("sheet_prompt") or e.get("base_sheet_prompt", ""),
+            "type": e.get("type", "character")}
+
+
+def regenerate_sheet(book_id, entity_id, variant_id) -> dict:
+    """Force-redraw one roster sheet (clears the cached one) so it regenerates with
+    a fresh debug-history trace. Tagged to the book for cost accounting."""
+    book = db.get_book(book_id)
+    registry = db.get_registry(book_id)
+    if not book or not registry:
+        return {"ok": False, "error": "no book or registry"}
+    member = _member_for(registry, entity_id, variant_id)
+    if not member:
+        return {"ok": False, "error": "no such entity in registry"}
+    style_text = _style_text(book["style"])
+    db.delete_sheet(book_id, entity_id, variant_id)
+    with costs.run_as(f"book:{book_id}"), tempfile.TemporaryDirectory() as td:
+        style_ref = _style_anchor_path(book, td)
+        if variant_id.startswith("__"):
+            data = _ensure_view_sheet(book_id, member, style_text, variant_id[2:], style_ref=style_ref)
+        else:
+            data = _ensure_sheet(book_id, member, style_text, style_ref=style_ref)
+    return {"ok": bool(data)}
 
 
 def generate_scene(book_id: int, idx: int) -> bytes:

@@ -8,20 +8,26 @@
           --good:#3f7d4f; --mid:#b9892f; --bad:#b14b3a; }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--ink); font-family:system-ui,sans-serif; }
-  header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:14px; }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; }
   header h1 { font-family:Georgia,serif; font-size:1.25rem; margin:0; }
   a { color:var(--accent); text-decoration:none; }
-  .wrap { display:grid; grid-template-columns:260px 1fr; min-height:calc(100vh - 52px); }
-  .list { border-right:1px solid var(--line); overflow:auto; max-height:calc(100vh - 52px); }
+  .tabs { display:flex; gap:6px; margin-left:auto; }
+  .tab { font-size:.85rem; padding:5px 14px; border:1px solid var(--line); border-radius:20px; background:var(--panel); cursor:pointer; color:var(--ink); }
+  .tab.sel { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .wrap { display:grid; grid-template-columns:270px 1fr; min-height:calc(100vh - 53px); }
+  .list { border-right:1px solid var(--line); overflow:auto; max-height:calc(100vh - 53px); }
   .pg { padding:9px 16px; border-bottom:1px solid var(--line); cursor:pointer; font-size:.86rem; }
-  .pg:hover { background:#fbf6ec; }
-  .pg.sel { background:#f1e7d3; }
+  .pg:hover { background:#fbf6ec; } .pg.sel { background:#f1e7d3; }
   .pg .t { color:var(--muted); }
   .pg .meta { font-size:.74rem; color:var(--muted); margin-top:2px; }
-  main { padding:18px 22px 60px; overflow:auto; max-height:calc(100vh - 52px); }
+  main { padding:18px 22px 60px; overflow:auto; max-height:calc(100vh - 53px); }
   .empty { color:var(--muted); padding:40px; font-style:italic; }
+  .dhead { display:flex; align-items:center; gap:12px; margin:0 0 14px; flex-wrap:wrap; }
+  .dhead h2 { font-size:1.05rem; margin:0; }
+  .rbtn { font-size:.8rem; padding:6px 13px; border:1px solid var(--accent); border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+  .rbtn[disabled]{ opacity:.5; cursor:default; }
   .gen { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px 18px; margin-bottom:22px; }
-  .gen > h2 { font-size:1rem; margin:0 0 4px; }
+  .gen > h3 { font-size:.95rem; margin:0 0 4px; }
   .brief { color:#5b5347; font-style:italic; margin:2px 0 10px; font-family:Georgia,serif; }
   .states { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px; }
   .chip { font-size:.74rem; background:#f1e7d3; border:1px solid var(--line); border-radius:20px; padding:2px 9px; }
@@ -41,8 +47,7 @@
   .s.bad { background:#f6e6e2; color:var(--bad); }
   ul.iss { margin:6px 0; padding-left:18px; font-size:.8rem; color:#5b5347; }
   .fix { font-size:.8rem; background:#fbf3e6; border-left:3px solid var(--accent); padding:5px 9px; margin-top:7px; }
-  details { margin-top:8px; }
-  summary { cursor:pointer; font-size:.78rem; color:var(--accent); }
+  details { margin-top:8px; } summary { cursor:pointer; font-size:.78rem; color:var(--accent); }
   pre { white-space:pre-wrap; word-break:break-word; font-size:.72rem; background:#faf6ee; border:1px solid var(--line);
         border-radius:8px; padding:9px; margin:6px 0 0; max-height:280px; overflow:auto; }
 </style>
@@ -50,80 +55,112 @@
 <header>
   <h1 id="title">Generation debug</h1>
   <a id="back" href="#">&#8592; Settings</a>
-  <a id="reader" href="#">Open reader</a>
+  <div class="tabs"><span class="tab" data-mode="pages">Page scenes</span><span class="tab" data-mode="sheets">Roster sheets</span></div>
 </header>
 <div class="wrap">
   <div class="list" id="list"></div>
-  <main id="detail"><div class="empty">Pick a page on the left to see its generation history.</div></main>
+  <main id="detail"><div class="empty">Pick an item on the left to see its generation history.</div></main>
 </div>
 <script>
 const ID = __BOOK_ID__, INIT = __PAGE__;
 const $ = s => document.querySelector(s);
 const esc = s => (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 $("#back").href = "/settings/" + ID;
-$("#reader").href = "/book/" + ID;
 const sCls = v => v >= 4 ? "good" : v >= 3 ? "mid" : "bad";
 const when = t => t ? new Date(t*1000).toLocaleString() : "";
+let MODE = "pages", SEL = null;
 
-async function loadList() {
-  const r = await (await fetch(`/api/books/${ID}/debug/pages`)).json();
-  const b = await (await fetch(`/api/books/${ID}`)).json();
-  $("#title").textContent = (b.title || "Book") + " — generation debug";
-  const L = $("#list");
-  if (!r.pages.length) { L.innerHTML = `<div class="empty">No history yet. View some pages in the reader, then come back.</div>`; return; }
-  L.innerHTML = r.pages.map(p => `
-    <div class="pg" data-idx="${p.idx}">
-      <div>p${p.idx} <span class="t">${esc(p.title)}</span></div>
-      <div class="meta">${p.gens} gen${p.gens>1?"s":""} · ${p.attempts} attempts · best ${p.score ?? "—"}</div>
-    </div>`).join("");
-  L.querySelectorAll(".pg").forEach(el => el.onclick = () => loadPage(+el.dataset.idx));
-  if (INIT >= 0) loadPage(INIT);
-}
-
-function critBlock(c) {
-  if (!c) return "";
-  const keys = ["consistency","accuracy","kid_appropriate","style_ok"];
-  const scores = keys.filter(k => k in c).map(k =>
-    `<span class="s ${sCls(c[k])}">${k.replace("_"," ")} ${c[k]}</span>`).join("");
+function critBlock(c){
+  if (!c) return `<div class="scores"><span class="s bad">critic skipped</span></div>`;
+  const scores = Object.entries(c).filter(([k,v]) => typeof v === "number")
+    .map(([k,v]) => `<span class="s ${sCls(v)}">${k.replace(/_/g," ")} ${v}</span>`).join("");
   const iss = (c.issues||[]).length ? `<ul class="iss">${c.issues.map(i=>`<li>${esc(i)}</li>`).join("")}</ul>` : "";
   const fix = c.fix_hint ? `<div class="fix"><b>fix →</b> ${esc(c.fix_hint)}</div>` : "";
   return `<div class="scores">${scores}</div>${iss}${fix}`;
 }
+function attCard(imgUrl, a, kept){
+  const badges = `<div class="badges">${a.mode?`<span class="badge ${a.mode}">${a.mode}</span>`:""}`
+    + `<span class="badge">#${a.attempt}</span>${kept?`<span class="badge kept">kept</span>`:""}`
+    + `<span style="font-size:.72rem;color:var(--muted)">min ${a.min ?? "—"} · avg ${a.avg ?? "—"}</span></div>`;
+  return `<div class="att ${kept?"kept":""}"><img loading="lazy" src="${imgUrl}">
+    <div class="body">${badges}${critBlock(a.critique)}
+    <details><summary>Prompt sent to image model</summary><pre>${esc(a.prompt)}</pre></details></div></div>`;
+}
 
-async function loadPage(idx) {
+async function setMode(m){
+  MODE = m; SEL = null;
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("sel", t.dataset.mode === m));
+  $("#detail").innerHTML = `<div class="empty">Pick ${m==="pages"?"a page":"a roster sheet"} on the left.</div>`;
+  await loadList();
+}
+
+async function loadList(){
+  const L = $("#list");
+  if (MODE === "pages"){
+    const r = await (await fetch(`${API()}/debug/pages`)).json();
+    if (!r.pages.length){ L.innerHTML = `<div class="empty">No page history yet. Read some pages, then return.</div>`; return; }
+    L.innerHTML = r.pages.map(p => `<div class="pg" data-idx="${p.idx}">
+      <div>p${p.idx} <span class="t">${esc(p.title)}</span></div>
+      <div class="meta">${p.gens} gen${p.gens>1?"s":""} · ${p.attempts} attempts · best ${p.score ?? "—"}</div></div>`).join("");
+    L.querySelectorAll(".pg").forEach(el => el.onclick = () => loadPage(+el.dataset.idx));
+    if (INIT >= 0){ loadPage(INIT); }
+  } else {
+    const r = await (await fetch(`${API()}/debug/sheets`)).json();
+    if (!r.sheets.length){ L.innerHTML = `<div class="empty">No sheet history yet. Redraw a sheet (button at top of its detail) or read pages that use it.</div>`; return; }
+    L.innerHTML = r.sheets.map(s => `<div class="pg" data-eid="${esc(s.entity_id)}" data-vid="${esc(s.variant_id)}">
+      <div>${esc(s.entity_id)} <span class="t">${esc(s.variant_id)}</span></div>
+      <div class="meta">${s.gens} gen${s.gens>1?"s":""} · ${s.attempts} attempts · best ${s.score ?? "—"}</div></div>`).join("");
+    L.querySelectorAll(".pg").forEach(el => el.onclick = () => loadSheet(el.dataset.eid, el.dataset.vid));
+  }
+}
+const API = () => `/api/books/${ID}`;
+
+async function loadPage(idx){
+  SEL = {idx};
   document.querySelectorAll(".pg").forEach(e => e.classList.toggle("sel", +e.dataset.idx === idx));
   history.replaceState(null, "", `/debug/${ID}?page=${idx}`);
-  const r = await (await fetch(`/api/books/${ID}/pages/${idx}/history`)).json();
-  const D = $("#detail");
-  if (!r.history.length) { D.innerHTML = `<div class="empty">No generation history for page ${idx}.</div>`; return; }
-  D.innerHTML = r.history.map(g => {
-    const states = Object.entries(g.states||{}).map(([k,v]) =>
-      `<span class="chip"><b>${esc(k)}</b>: ${esc(v)}</span>`).join("");
-    const atts = g.attempts.map(a => {
-      const kept = a.attempt === g.chosen;
-      const img = `/api/books/${ID}/pages/${idx}/gen/${g.gen_id}/attempt/${a.attempt}/image`;
-      return `<div class="att ${kept?"kept":""}">
-        <img loading="lazy" src="${img}" alt="attempt ${a.attempt}">
-        <div class="body">
-          <div class="badges">
-            <span class="badge ${a.mode}">${a.mode}</span>
-            <span class="badge">#${a.attempt}</span>
-            ${kept?`<span class="badge kept">kept</span>`:""}
-            <span style="font-size:.72rem;color:var(--muted)">min ${a.min} · avg ${a.avg}</span>
-          </div>
-          ${critBlock(a.critique)}
-          <details><summary>Prompt sent to image model</summary><pre>${esc(a.prompt)}</pre></details>
-        </div></div>`;
-    }).join("");
-    return `<div class="gen">
-      <h2>Generation #${g.gen_id} · kept attempt ${g.chosen} · final ${g.final_score ?? "—"}</h2>
-      <div class="brief">${esc(g.brief)}</div>
-      <div class="meta" style="font-size:.74rem;color:var(--muted);margin-bottom:8px">${when(g.created_at)}</div>
-      ${states?`<div class="states">${states}</div>`:""}
-      <div class="atts">${atts}</div>
-    </div>`;
-  }).join("");
+  const r = await (await fetch(`${API()}/pages/${idx}/history`)).json();
+  renderHistory(`Page ${idx} — ${esc(r.title||"")}`, null,
+    r.history, g => `${API()}/pages/${idx}/gen/${g.gen_id}/attempt`);
 }
-loadList();
+
+async function loadSheet(eid, vid){
+  SEL = {eid, vid};
+  document.querySelectorAll(".pg").forEach(e => e.classList.toggle("sel", e.dataset.eid===eid && e.dataset.vid===vid));
+  const r = await (await fetch(`${API()}/sheet/${encodeURIComponent(eid)}/${encodeURIComponent(vid)}/history`)).json();
+  renderHistory(`${esc(eid)} / ${esc(vid)}`,
+    {eid, vid}, r.history, g => `${API()}/sheet/${encodeURIComponent(eid)}/${encodeURIComponent(vid)}/gen/${g.gen_id}/attempt`);
+}
+
+function renderHistory(titleHtml, sheet, hist, attBase){
+  const D = $("#detail");
+  const redraw = sheet ? `<button class="rbtn" id="redraw">Redraw this sheet</button>` : "";
+  if (!hist.length){
+    D.innerHTML = `<div class="dhead"><h2>${titleHtml}</h2>${redraw}</div><div class="empty">No generation history${sheet?" — hit Redraw to generate one with a trace.":"."}</div>`;
+  } else {
+    D.innerHTML = `<div class="dhead"><h2>${titleHtml}</h2>${redraw}</div>` + hist.map(g => {
+      const states = Object.entries(g.states||{}).map(([k,v]) => `<span class="chip"><b>${esc(k)}</b>: ${esc(v)}</span>`).join("");
+      const atts = g.attempts.map(a => attCard(`${attBase(g)}/${a.attempt}/image`, a, a.attempt === g.chosen)).join("");
+      return `<div class="gen"><h3>Generation #${g.gen_id} · kept attempt ${g.chosen} · final ${g.final_score ?? "—"}</h3>
+        ${g.brief?`<div class="brief">${esc(g.brief)}</div>`:""}${g.descr?`<div class="brief">${esc(g.descr)}</div>`:""}
+        <div class="meta" style="font-size:.74rem;color:var(--muted);margin-bottom:8px">${when(g.created_at)}</div>
+        ${states?`<div class="states">${states}</div>`:""}<div class="atts">${atts}</div></div>`;
+    }).join("");
+  }
+  if (sheet){
+    $("#redraw").onclick = async () => {
+      const b = $("#redraw"); b.disabled = true; b.textContent = "Redrawing…";
+      await fetch(`${API()}/sheet/${encodeURIComponent(sheet.eid)}/${encodeURIComponent(sheet.vid)}/redraw`, {method:"POST"});
+      await loadList(); await loadSheet(sheet.eid, sheet.vid);
+    };
+  }
+}
+
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => setMode(t.dataset.mode));
+(async () => {
+  const b = await (await fetch(API())).json();
+  $("#title").textContent = (b.title || "Book") + " — generation debug";
+  setMode("pages");
+})();
 </script>
 </body></html>

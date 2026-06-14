@@ -108,6 +108,34 @@ CREATE TABLE IF NOT EXISTS scene_attempts (
     created_at REAL,
     PRIMARY KEY (book_id, idx, gen_id, attempt)
 );
+-- debug history for roster reference sheets (same idea as scene_gens/attempts,
+-- keyed by entity+variant instead of page idx).
+CREATE TABLE IF NOT EXISTS sheet_gens (
+    book_id    INTEGER REFERENCES books(id) ON DELETE CASCADE,
+    entity_id  TEXT,
+    variant_id TEXT,
+    gen_id     INTEGER,
+    descr      TEXT,
+    chosen     INTEGER,
+    final_score REAL,
+    created_at REAL,
+    PRIMARY KEY (book_id, entity_id, variant_id, gen_id)
+);
+CREATE TABLE IF NOT EXISTS sheet_attempts (
+    book_id    INTEGER REFERENCES books(id) ON DELETE CASCADE,
+    entity_id  TEXT,
+    variant_id TEXT,
+    gen_id     INTEGER,
+    attempt    INTEGER,
+    prompt     TEXT,
+    mime       TEXT,
+    data       BLOB,
+    critique   TEXT,
+    min_score  REAL,
+    avg_score  REAL,
+    created_at REAL,
+    PRIMARY KEY (book_id, entity_id, variant_id, gen_id, attempt)
+);
 CREATE TABLE IF NOT EXISTS style_samples (
     style_key  TEXT PRIMARY KEY,
     mime       TEXT,
@@ -486,6 +514,81 @@ def scene_attempt_image(book_id, idx, gen_id, attempt):
     with conn() as c:
         r = c.execute("SELECT mime,data FROM scene_attempts WHERE book_id=? AND idx=? "
                       "AND gen_id=? AND attempt=?", (book_id, idx, gen_id, attempt)).fetchone()
+    return (r["mime"], r["data"]) if r else (None, None)
+
+
+# ---- debug generation history for roster sheets ----
+
+def delete_sheet(book_id, entity_id, variant_id):
+    with conn() as c:
+        c.execute("DELETE FROM sheets WHERE book_id=? AND entity_id=? AND variant_id=?",
+                  (book_id, entity_id, variant_id))
+
+
+def next_sheet_gen_id(book_id, entity_id, variant_id) -> int:
+    with conn() as c:
+        r = c.execute("SELECT COALESCE(MAX(gen_id),0)+1 AS g FROM sheet_gens "
+                      "WHERE book_id=? AND entity_id=? AND variant_id=?",
+                      (book_id, entity_id, variant_id)).fetchone()
+    return r["g"]
+
+
+def sheet_attempt_add(book_id, entity_id, variant_id, gen_id, attempt, prompt, data,
+                      critique, min_score, avg_score, mime="image/webp"):
+    with conn() as c:
+        c.execute("INSERT OR REPLACE INTO sheet_attempts(book_id,entity_id,variant_id,gen_id,"
+                  "attempt,prompt,mime,data,critique,min_score,avg_score,created_at) "
+                  "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                  (book_id, entity_id, variant_id, gen_id, attempt, prompt, mime, data,
+                   critique, min_score, avg_score, time.time()))
+
+
+def sheet_gen_add(book_id, entity_id, variant_id, gen_id, descr, chosen, final_score):
+    with conn() as c:
+        c.execute("INSERT OR REPLACE INTO sheet_gens(book_id,entity_id,variant_id,gen_id,"
+                  "descr,chosen,final_score,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                  (book_id, entity_id, variant_id, gen_id, descr, chosen, final_score, time.time()))
+
+
+def debug_sheets(book_id) -> list[dict]:
+    """Roster sheets that have generation history: entity/variant, #gens, best score."""
+    with conn() as c:
+        rows = c.execute(
+            "SELECT g.entity_id AS eid, g.variant_id AS vid, COUNT(DISTINCT g.gen_id) AS gens, "
+            "COUNT(a.attempt) AS attempts, MAX(g.final_score) AS score "
+            "FROM sheet_gens g LEFT JOIN sheet_attempts a ON a.book_id=g.book_id "
+            "AND a.entity_id=g.entity_id AND a.variant_id=g.variant_id AND a.gen_id=g.gen_id "
+            "WHERE g.book_id=? GROUP BY g.entity_id, g.variant_id ORDER BY g.entity_id, g.variant_id",
+            (book_id,)).fetchall()
+    return [{"entity_id": r["eid"], "variant_id": r["vid"], "gens": r["gens"],
+             "attempts": r["attempts"], "score": r["score"]} for r in rows]
+
+
+def sheet_history(book_id, entity_id, variant_id) -> list[dict]:
+    """Full history for one sheet: generations (newest first), each with its attempts."""
+    with conn() as c:
+        gens = c.execute("SELECT * FROM sheet_gens WHERE book_id=? AND entity_id=? AND "
+                         "variant_id=? ORDER BY gen_id DESC", (book_id, entity_id, variant_id)).fetchall()
+        atts = c.execute("SELECT gen_id,attempt,prompt,critique,min_score,avg_score,created_at "
+                         "FROM sheet_attempts WHERE book_id=? AND entity_id=? AND variant_id=? "
+                         "ORDER BY gen_id DESC, attempt", (book_id, entity_id, variant_id)).fetchall()
+    by_gen = {}
+    for a in atts:
+        by_gen.setdefault(a["gen_id"], []).append({
+            "attempt": a["attempt"], "prompt": a["prompt"],
+            "critique": json.loads(a["critique"]) if a["critique"] else None,
+            "min": a["min_score"], "avg": a["avg_score"], "created_at": a["created_at"],
+        })
+    return [{"gen_id": g["gen_id"], "descr": g["descr"], "chosen": g["chosen"],
+             "final_score": g["final_score"], "created_at": g["created_at"],
+             "attempts": by_gen.get(g["gen_id"], [])} for g in gens]
+
+
+def sheet_attempt_image(book_id, entity_id, variant_id, gen_id, attempt):
+    with conn() as c:
+        r = c.execute("SELECT mime,data FROM sheet_attempts WHERE book_id=? AND entity_id=? "
+                      "AND variant_id=? AND gen_id=? AND attempt=?",
+                      (book_id, entity_id, variant_id, gen_id, attempt)).fetchone()
     return (r["mime"], r["data"]) if r else (None, None)
 
 

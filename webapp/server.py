@@ -435,6 +435,41 @@ def api_debug_pages(book_id: int):
     return {"book_id": book_id, "pages": db.debug_pages(book_id)}
 
 
+@app.get("/api/books/{book_id}/debug/sheets")
+def api_debug_sheets(book_id: int):
+    """Roster sheets that have generation history (for the debug UI sheet list)."""
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    return {"book_id": book_id, "sheets": db.debug_sheets(book_id)}
+
+
+@app.get("/api/books/{book_id}/sheet/{entity_id}/{variant_id}/history")
+def api_sheet_history(book_id: int, entity_id: str, variant_id: str):
+    """Full generation history for one roster sheet (every run + attempt)."""
+    return {"book_id": book_id, "entity_id": entity_id, "variant_id": variant_id,
+            "history": db.sheet_history(book_id, entity_id, variant_id)}
+
+
+@app.get("/api/books/{book_id}/sheet/{entity_id}/{variant_id}/gen/{gen_id}/attempt/{attempt}/image")
+def api_sheet_attempt_image(book_id: int, entity_id: str, variant_id: str,
+                            gen_id: int, attempt: int, request: Request):
+    """One candidate roster-sheet image from history -- including rejected attempts."""
+    mime, data = db.sheet_attempt_image(book_id, entity_id, variant_id, gen_id, attempt)
+    if not data:
+        raise HTTPException(404, "no such attempt image")
+    return _image_response(data, request)
+
+
+@app.post("/api/books/{book_id}/sheet/{entity_id}/{variant_id}/redraw")
+async def api_sheet_redraw(book_id: int, entity_id: str, variant_id: str):
+    """Force-redraw one roster sheet so it regenerates with a fresh debug trace."""
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    async with _sem:
+        res = await asyncio.to_thread(scene.regenerate_sheet, book_id, entity_id, variant_id)
+    return res
+
+
 @app.get("/api/books/{book_id}/pages/{idx}/history")
 def api_scene_history(book_id: int, idx: int):
     """Full generation history for one page: every run, every attempt (prompt +
