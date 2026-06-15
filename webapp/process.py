@@ -248,29 +248,110 @@ def chunk_text(text: str, size: int = 1800) -> list[str]:
     return [c for c in chunks if c.strip()] or [text]
 
 
+_GUT_START = re.compile(r"\*\*\*\s*START OF TH(?:E|IS) PROJECT GUTENBERG EBOOK.*?\*\*\*", re.I | re.S)
+_GUT_END = re.compile(r"\*\*\*\s*END OF TH(?:E|IS) PROJECT GUTENBERG EBOOK.*?\*\*\*", re.I | re.S)
+
+
+def _strip_gutenberg(text: str) -> str:
+    """Keep only the text between the Project Gutenberg START/END markers (drops the
+    license header/footer). No-op for non-Gutenberg books."""
+    m = _GUT_START.search(text)
+    if m:
+        text = text[m.end():]
+    m = _GUT_END.search(text)
+    if m:
+        text = text[:m.start()]
+    return text
+
+
+FRONT_MATTER_PROMPT = """Here is the BEGINNING of a book's text. It may open with FRONT MATTER that is NOT \
+the story -- a title page, a table of contents, a list of illustrations, a dedication, an epigraph, a \
+publisher/copyright notice, a Project Gutenberg notice -- before the actual narrative starts.
+
+Return the SHORT verbatim snippet (8-15 consecutive words, copied EXACTLY from the text) at which the \
+real STORY narrative begins. If the text already begins with the story, return its first ~12 words.
+
+Return JSON only: {{"start": "<verbatim snippet>"}}
+
+TEXT:
+{head}
+"""
+
+
+def _story_start_offset(text: str) -> int:
+    """Offset to trim leading front matter to, located by the model. 0 if none/unsure."""
+    from pipeline import gem
+    from pipeline.config import CHAPTER_MODEL
+    try:
+        data = gem.text_json(FRONT_MATTER_PROMPT.format(head=text[:6000]), model=CHAPTER_MODEL)
+        snip = (data.get("start") or "").strip()
+    except Exception as ex:  # noqa: BLE001
+        print(f"[frontmatter] trim failed: {type(ex).__name__}: {ex}", flush=True)
+        return 0
+    toks = re.findall(r"\w+", snip)[:8]
+    if not toks:
+        return 0
+    m = re.compile(r"\W+".join(re.escape(t) for t in toks), re.I).search(text)
+    off = m.start() if m else 0
+    # only trim a genuinely-leading region, and never trim away most of the text
+    if 0 < off < len(text) * 0.4 and len(text) - off > 500:
+        print(f"[frontmatter] trimmed {off} leading chars of front matter", flush=True)
+        return off
+    return 0
+
+
+def _prep_units(units: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Strip front matter from the first unit, then split any oversized unit so each
+    segmentation call targets ~PAGES_PER_CALL pages -- the model caps how many page
+    anchors it emits per call, so a whole-book-in-one-document must be chunked or it
+    truncates to a handful of huge pages."""
+    from pipeline.config import WORDS_PER_PAGE
+    units = [(t, _strip_gutenberg(txt).strip()) for (t, txt) in units if txt and txt.strip()]
+    if units:
+        t0, txt0 = units[0]
+        off = _story_start_offset(txt0)
+        if off:
+            units[0] = (t0, txt0[off:].lstrip())
+    PAGES_PER_CALL = 14
+    chunk_words = max(1200, PAGES_PER_CALL * WORDS_PER_PAGE)
+    out = []
+    for title, txt in units:
+        if len(txt.split()) <= chunk_words * 1.4:   # fits in one call -> keep as-is
+            out.append((title, txt))
+            continue
+        parts = chunk_text(txt, size=chunk_words)
+        generic = (not title) or title.lower() in ("story", "part")
+        for j, p in enumerate(parts):
+            out.append((f"Part {j + 1}" if generic else f"{title} ({j + 1})", p))
+    return out
+
+
 def chapter_units() -> list[tuple[str, str]]:
-    """Ordered (title, text) units for the whole book. EPUB -> real story
-    chapters with their table-of-contents titles (front/back matter skipped);
-    PDF -> word-bounded chunks of the whole body."""
+    """Ordered (title, text) units for the whole book, with front matter trimmed and
+    oversized units chunked. EPUB -> real story chapters (front/back matter skipped);
+    PDF -> the whole body."""
     from pipeline import extract
     from pipeline.config import IS_EPUB, PDF
     if IS_EPUB:
         # primary: let the model confirm chapters from a skeleton of the book;
         # fall back to TOC/heuristic parsing if that call fails or returns nothing
+        units = None
         try:
-            units, skel = _epub_skeleton()
-            chosen = _llm_chapter_units(units, skel)
+            spine, skel = _epub_skeleton()
+            chosen = _llm_chapter_units(spine, skel)
             if chosen:
-                print(f"[chapters] LLM confirmed {len(chosen)}/{len(units)} "
+                print(f"[chapters] LLM confirmed {len(chosen)}/{len(spine)} "
                       f"spine docs as chapters", flush=True)
-                return chosen
-            print("[chapters] LLM returned no chapters; using TOC heuristic", flush=True)
+                units = chosen
+            else:
+                print("[chapters] LLM returned no chapters; using TOC heuristic", flush=True)
         except Exception as ex:  # noqa: BLE001
             print(f"[chapters] LLM plan failed ({type(ex).__name__}: {ex}); "
                   "using TOC heuristic", flush=True)
-        return extract.epub_chapters_titled(PDF)
-    body = extract.full_story_text()
-    return [(f"Part {i + 1}", t) for i, t in enumerate(chunk_text(body))]
+        if units is None:
+            units = extract.epub_chapters_titled(PDF)
+        return _prep_units(units)
+    return _prep_units([("Story", extract.full_story_text())])
 
 
 def segment(book_id, registry, workers: int = 4, report=None):
