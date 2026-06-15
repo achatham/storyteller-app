@@ -36,6 +36,19 @@ from . import db, scene
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = Path(__file__).resolve().parent / "static"
+
+
+def _compute_version() -> str:
+    """A build id that changes whenever the front-end (static files) changes, so the
+    installed PWA can tell when a newer version is available."""
+    h = hashlib.md5()
+    for p in sorted(STATIC.glob("*")):
+        if p.is_file():
+            h.update(p.read_bytes())
+    return h.hexdigest()[:10]
+
+
+APP_VERSION = _compute_version()
 WORK = Path(os.environ.get("STORY_WORK", str(ROOT / "output" / "work")))
 LOGS = Path(os.environ.get("STORY_LOGS", str(ROOT / "output" / "logs")))
 PREFETCH = int(os.environ.get("STORY_PREFETCH", "2"))
@@ -165,10 +178,16 @@ def reader(book_id: int):
     return html.replace("__BOOK_ID__", str(book_id))
 
 
+@app.get("/api/version")
+def api_version():
+    """Current front-end build id; the PWA polls this to offer an update."""
+    return {"version": APP_VERSION}
+
+
 @app.get("/book/{book_id}", response_class=HTMLResponse)
 def book_reader(book_id: int):
     html = (STATIC / "book.html").read_text()
-    return html.replace("__BOOK_ID__", str(book_id))
+    return html.replace("__BOOK_ID__", str(book_id)).replace("__BUILD__", APP_VERSION)
 
 
 @app.get("/settings/{book_id}", response_class=HTMLResponse)

@@ -99,12 +99,14 @@
     <button id="fsup" aria-label="Larger text">A+</button></div>
   <a class="btn" id="classic">Switch to single-page view</a>
   <button id="fs">&#9974; Full screen</button>
+  <button id="update">&#8635; Check for updates</button>
   <button id="closebook">&#10005; Close book</button>
   <button id="close">Close menu</button>
 </div></div>
 <div id="splash">Loading…</div>
 <script>
 const BOOK_ID = __BOOK_ID__;
+const BUILD = "__BUILD__";   // front-end build this page was served with
 const API = "/api/books/" + BOOK_ID;
 const $ = s => document.querySelector(s);
 const LKEY = "book:" + BOOK_ID;
@@ -263,6 +265,15 @@ $("#chap").onchange = e=>{ $("#menu").hidden=true; loadChapter(+e.target.value, 
 $("#animchk").onchange = e=>{ animOn=e.target.checked; try{localStorage.setItem(ANIM_KEY, animOn?"1":"0");}catch(_){} applyAnim(); };
 $("#fsdown").onclick = e=>{ e.stopPropagation(); setFont(-0.1); };
 $("#fsup").onclick = e=>{ e.stopPropagation(); setFont(0.1); };
+$("#update").onclick = async e=>{
+  e.stopPropagation();
+  const btn = $("#update"); const label = btn.innerHTML; btn.textContent = "Checking…";
+  let latest = BUILD;
+  try { latest = (await (await fetch("/api/version", {cache:"no-store"})).json()).version; } catch(_){}
+  try { const r = await navigator.serviceWorker?.getRegistration(); if (r) await r.update(); } catch(_){}
+  if (latest && latest !== BUILD){ btn.textContent = "Updating…"; location.reload(); }
+  else { btn.textContent = "✓ Up to date"; setTimeout(()=>{ btn.innerHTML = label; }, 2000); }
+};
 $("#classic").href = "/read/" + BOOK_ID;
 const fsEl = document.documentElement;
 const inFS = ()=>document.fullscreenElement||document.webkitFullscreenElement;
