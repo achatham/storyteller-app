@@ -54,8 +54,15 @@ and this chapter's pages (each with an id, its setting, and a description of its
 For EACH page, decide which of the listed settings/props actually APPEAR IN or DEFINE that \
 page's scene -- e.g. a ship the characters are aboard, a castle they are inside, a notable \
 object in view. Judge by MEANING, not exact words: "the vessel", "the boat", "on deck" all \
-indicate the ship. For each one that appears, choose the best-fitting variant id using the \
-page's description and the variant chapter spans (this is chapter {chapter_num}).
+indicate the ship.
+
+For each one that appears, choose the best-fitting variant id by what THIS page actually \
+depicts. An entity's variant can change PARTWAY through the chapter (a ship is undamaged early \
+on and only gets wrecked later; a setting is decorated, then bare). The pages below are in \
+reading order: keep the EARLIER variant for pages before the change, and switch to the new \
+variant only from the page where the change actually happens onward -- match each variant's \
+described difference to the page text. The chapter spans are a rough hint only (this is chapter \
+{chapter_num}); the page's own description wins, even within a single chapter.
 
 Also, for each SETTING (a place you can go inside or stand on -- a building, ship, room, cave), say \
 HOW the scene shows it, as a "view":

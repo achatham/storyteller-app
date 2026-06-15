@@ -72,6 +72,7 @@ Guidance:
   * If it matches a registry entity -> from_registry=true, reuse its id, choose the best variant_id, and leave appearance/sheet_prompt empty.
   * If it is a real character in this passage that is NOT in the registry (a locally-important minor character), from_registry=false, give it a new id, variant_id "default", and fill in appearance + sheet_prompt yourself.
 - Each spread's "cast" lists the ids+variants actually visible in that illustration (a subset of the section cast).
+- An entity's VARIANT can change PARTWAY through this passage -- a ship gets damaged, a character changes clothes, ages, or is injured. Choose each spread's variant by what the text shows AT THAT page, in reading order: keep the EARLIER variant for pages before the change, and switch to the new variant only from the page where the change actually happens onward. The registry's chapter spans ("when") are a rough hint only -- this page's own text wins, even if the span suggests the change already happened.
 - CADENCE: split the passage into about {target_pages} pages of ~{words_per_page} words each (one illustration per page), in reading order, covering the ENTIRE passage start to finish with no gaps/overlaps. Give ONLY each page's start_anchor (not the page text). Choose page breaks at natural beats so each page is one strong, distinct, illustratable moment, but keep every page close to the target length.
 - For passages with no clearly visible characters (interludes, disembodied dialogue between unseen adults), use an evocative NON-LITERAL illustration (atmospheric setting, meaningful object) and an empty or setting-only cast.
 - This passage may start mid-story: just illustrate what happens here.
@@ -87,7 +88,7 @@ def render_registry(registry: dict) -> str:
     """Compact roster string for the analyze prompt (ids + variant labels only)."""
     lines = []
     for e in registry.get("entities", []):
-        vs = "; ".join(f"{v['id']} ({v.get('label','')}, {v.get('when','')})"
+        vs = "; ".join(f"{v['id']} = {v.get('label','')} (approx when: {v.get('when','')})"
                        for v in e.get("variants", [])) or "(no variants)"
         aka = (" aka " + "/".join(e["aliases"])) if e.get("aliases") else ""
         lines.append(f"- [{e['type']}] {e['id']}: {e['name']}{aka}\n    variants: {vs}")
