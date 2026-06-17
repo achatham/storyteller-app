@@ -485,8 +485,8 @@ def _render_scene(book_id: int, idx: int) -> bytes:
             crit = gem.critique_image(cand, SCENE_CRITIQUE.format(
                 brief=page["brief"], chars=char_desc or "(none)", style=style_text,
                 source=(page["read_text"] or "")[:1200] or "(not available)"))
-            keys = ("consistency", "accuracy", "kid_appropriate", "style_ok")
-            scores = [crit.get(k, 0) for k in keys]
+            keys = ("consistency", "accuracy", "kid_appropriate", "style_ok", "no_stray_text")
+            scores = [crit.get(k, 5 if k == "no_stray_text" else 0) for k in keys]
             score = min(scores)
             avg = sum(scores) / len(scores)
             data = cand.read_bytes()

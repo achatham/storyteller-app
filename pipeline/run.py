@@ -57,6 +57,11 @@ stated in the brief or source but missing or wrong in the image, score at most 2
 is otherwise nice.>,
   "kid_appropriate": <1-5, warm, non-scary, no graphic violence/blood, young-child friendly?>,
   "style_ok": <1-5, matches the intended art style above?>,
+  "no_stray_text": <1-5, is the image FREE of unwanted text? Score 5 if there is NO text, OR the only \
+text is something the scene genuinely calls for (a sign, a shop name, a book cover, a labelled object \
+that the brief or source text actually describes). Score 1-2 if there is gibberish lettering, a \
+watermark, floating words, captions, or fragments of the description/prompt rendered as text that the \
+story does not call for.>,
   "issues": ["<short concrete problems>"],
   "fix_hint": "<one actionable sentence naming the single most important missing/wrong element to add or fix>"
 }}"""
@@ -142,7 +147,9 @@ def build_scene_prompt(spread: dict, members: list[dict], ref_members: list[dict
         prompt += (f"Reference images are attached ({labels}). Keep each one's face, hair, "
                    "and clothing CONSISTENT with their reference image. ")
     prompt += ("Horizontal storybook composition. Keep it warm, gentle, and age-5 "
-               "appropriate: no blood, no graphic violence.")
+               "appropriate: no blood, no graphic violence. Do NOT render any text, words, "
+               "letters, captions or labels in the image unless the scene itself calls for it "
+               "(e.g. a sign or book the story describes) -- never put the description into the picture.")
     if fix:
         prompt += f"\n\nIMPORTANT FIX FROM LAST ATTEMPT: {fix}"
     return prompt
@@ -173,7 +180,8 @@ def gen_scene(spread: dict, cast_index: dict, art_style: str, budget: gem.Budget
                                         source=(spread.get("read_text") or "")[:1200] or "(not available)",
                                         chars=char_desc or "(none)", style=ART_STYLE))
         score = min(crit.get("consistency", 0), crit.get("accuracy", 0),
-                    crit.get("kid_appropriate", 0), crit.get("style_ok", 0))
+                    crit.get("kid_appropriate", 0), crit.get("style_ok", 0),
+                    crit.get("no_stray_text", 5))
         rec = {"path": cand, "score": score, "crit": crit, "attempt": attempt, "prompt": prompt}
         if best is None or score > best["score"]:
             best = rec
