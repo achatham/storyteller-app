@@ -9,7 +9,7 @@ data/
 
 # input books are copyrighted; keep only the public-domain A Christmas Carol
 stories/*
-!stories/Dickens_Carol.pdf
+!stories/A_Christmas_Carol.epub
 
 # one-off scratch run scripts (book/run-specific; not reusable tooling)
 /run_dawn_styles.sh

@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Storyteller</title>
+<style>
+  :root { --bg:#f4efe6; --ink:#2b2622; --muted:#9a8a70; --panel:#fffdf8; --line:#e0d4bd;
+          --accent:#7a5c3e; --pad:30px; --gap:54px; --mh:42px; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+              font-family:Georgia,'Times New Roman',serif; -webkit-tap-highlight-color:transparent; overflow:hidden; }
+  #viewport { position:fixed; inset:0; overflow:hidden; }
+  #flow { position:absolute; top:0; bottom:0; left:var(--mh); right:var(--mh);
+          padding:var(--pad) 0 50px; column-gap:var(--gap); column-fill:auto;
+          transition:transform .40s cubic-bezier(.33,0,.2,1); will-change:transform; }
+  #turn { position:fixed; top:0; bottom:0; width:140px; z-index:25; pointer-events:none; opacity:0;
+          background:linear-gradient(90deg, transparent, rgba(40,30,20,.20), transparent); }
+  #turn.fwd  { animation:sweepfwd .42s ease; }
+  #turn.back { animation:sweepback .42s ease; }
+  @keyframes sweepfwd  { 0%{opacity:0; transform:translateX(100vw);} 25%{opacity:1;} 100%{opacity:0; transform:translateX(-140px);} }
+  @keyframes sweepback { 0%{opacity:0; transform:translateX(-140px);} 25%{opacity:1;} 100%{opacity:0; transform:translateX(100vw);} }
+  @media (orientation:landscape){ #flow{ column-count:2; } }
+  @media (orientation:portrait){  #flow{ column-count:1; } }
+  #flow .chtitle { font-size:calc(1.5rem * var(--fs,1)); margin:0 0 .7em; }
+  #flow .chtitle .ch { display:block; font-family:system-ui,sans-serif; font-size:.72rem;
+          letter-spacing:2px; text-transform:uppercase; color:var(--muted); margin-bottom:.3em; }
+  #flow p { font-size:calc(1.18rem * var(--fs,1)); line-height:1.62; margin:0 0 1em; text-align:justify; hyphens:auto; }
+  #flow figure { margin:0 0 1em; break-inside:avoid; aspect-ratio:3/2; border-radius:10px;
+          overflow:hidden; background:#ece3d2; box-shadow:0 4px 16px rgba(0,0,0,.16); }
+  #flow figure:not(:has(img.on)) { animation:phpulse 1.5s ease-in-out infinite; }
+  @keyframes phpulse { 0%,100%{ background:#ece3d2; } 50%{ background:#e6dcc6; } }
+  #flow figure img { width:100%; height:100%; object-fit:cover; display:block; opacity:0; transition:opacity .45s; }
+  #flow figure img.on { opacity:1; }
+  .edge { position:fixed; top:50%; transform:translateY(-50%); z-index:5; pointer-events:none;
+          font-size:2.2rem; color:rgba(43,38,34,.16); font-family:system-ui,sans-serif; }
+  .edge.left{ left:8px; } .edge.right{ right:8px; }
+  #bar { position:fixed; left:0; bottom:0; height:3px; background:var(--muted); z-index:20; transition:width .2s; }
+  #pageno { position:fixed; bottom:6px; left:50%; transform:translateX(-50%); z-index:20;
+          font-family:system-ui,sans-serif; font-size:.72rem; color:var(--muted); }
+  #menuBtn { position:fixed; top:10px; right:10px; z-index:30; width:40px; height:40px; border-radius:50%;
+          border:1px solid var(--line); background:rgba(255,253,248,.82); color:var(--ink);
+          font-size:1.15rem; cursor:pointer; backdrop-filter:blur(3px); }
+  #menu { position:fixed; inset:0; z-index:40; background:rgba(0,0,0,.4); display:flex; align-items:center; justify-content:center; }
+  #menu[hidden]{ display:none; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:20px;
+          width:min(360px,88vw); display:flex; flex-direction:column; gap:14px;
+          font-family:system-ui,sans-serif; box-shadow:0 12px 40px rgba(0,0,0,.3); }
+  .card .bk { font-weight:bold; font-family:Georgia,serif; }
+  .card .bk small { font-weight:normal; color:var(--muted); }
+  .card label { display:flex; flex-direction:column; gap:5px; font-size:.7rem; letter-spacing:1px;
+          text-transform:uppercase; color:var(--muted); }
+  .card select, .card button { font:inherit; font-size:1rem; padding:10px; border-radius:9px;
+          border:1px solid var(--line); background:var(--bg); color:var(--ink); cursor:pointer; }
+  .card label.toggle { flex-direction:row; align-items:center; gap:10px; text-transform:none; letter-spacing:0; font-size:.95rem; color:var(--ink); cursor:pointer; }
+  .card label.toggle input { width:auto; margin:0; }
+  .fsrow { display:flex; align-items:center; gap:10px; }
+  .fsrow .lab { flex:1; font-size:.7rem; letter-spacing:1px; text-transform:uppercase; color:var(--muted); }
+  .fsrow button { width:44px; padding:8px 0; font-size:1.05rem; }
+  .fsrow #fsval { min-width:48px; text-align:center; font-size:.9rem; }
+  body.noanim #flow { transition:none; }
+  #splash { position:fixed; inset:0; z-index:60; background:var(--bg); display:flex; align-items:center; justify-content:center; font-family:system-ui,sans-serif; color:var(--muted); }
+  #splash[hidden]{ display:none; }
+</style>
+</head><body>
+<div id="viewport"><div id="flow"></div></div>
+<div class="edge left">&#8249;</div><div class="edge right">&#8250;</div>
+<div id="turn"></div>
+<div id="bar"></div><div id="pageno"></div>
+<button id="menuBtn">&#9776;</button>
+<div id="menu" hidden><div class="card">
+  <div class="bk" id="bk"></div>
+  <label>Chapter <select id="chap"></select></label>
+  <label class="toggle"><input type="checkbox" id="animchk"> Page-turn animation</label>
+  <div class="fsrow"><span class="lab">Text size</span>
+    <button id="fsdown" aria-label="Smaller text">A&#8722;</button>
+    <span id="fsval">100%</span>
+    <button id="fsup" aria-label="Larger text">A+</button></div>
+  <button id="fs">&#9974; Full screen</button>
+  <button id="close">Close menu</button>
+</div></div>
+<div id="splash">Loading…</div>
+<script>window.BOOK = __BOOK_JSON__;</script>
+<script>
+const BOOK = window.BOOK || {title:"", chapters:[]};
+const $ = s => document.querySelector(s);
+const LKEY = "export:" + (BOOK.title || "book");
+let CH = 0, page = 0, pages = 1, imgs = [];
+const ANIM_KEY = "export:anim"; let animOn = true;
+try { animOn = localStorage.getItem(ANIM_KEY) !== "0"; } catch(e){}
+function applyAnim(){ document.body.classList.toggle("noanim", !animOn); if($("#animchk")) $("#animchk").checked = animOn; }
+const FS_KEY = "export:fs"; let fontScale = 1;
+try { fontScale = parseFloat(localStorage.getItem(FS_KEY)) || 1; } catch(e){}
+function applyFont(){ document.documentElement.style.setProperty("--fs", fontScale);
+  if ($("#fsval")) $("#fsval").textContent = Math.round(fontScale*100) + "%"; }
+function setFont(d){ fontScale = Math.min(1.8, Math.max(0.7, Math.round((fontScale+d)*100)/100));
+  try { localStorage.setItem(FS_KEY, fontScale); } catch(e){} applyFont();
+  const frac = page/Math.max(1,pages); requestAnimationFrame(()=>{ paginate(); goPage(Math.round(frac*pages), true); }); }
+
+function esc(s){ return (s||"").replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+function boot(){
+  if (!BOOK.chapters.length){ $("#splash").textContent = "Empty book."; return; }
+  $("#bk").innerHTML = esc(BOOK.title) + (BOOK.author ? `<br><small>${esc(BOOK.author)}</small>` : "");
+  document.title = BOOK.title || "Storyteller";
+  $("#chap").innerHTML = BOOK.chapters.map((c,i) => `<option value="${i}">${esc(c.title)}</option>`).join("");
+  let start = { ch:0, page:0 };
+  try { const s = JSON.parse(localStorage.getItem(LKEY)); if (s) start = s; } catch(e){}
+  $("#splash").hidden = true; applyAnim(); applyFont();
+  loadChapter(Math.min(start.ch||0, BOOK.chapters.length-1), start.page||0);
+}
+
+function loadChapter(ci, toPage){
+  CH = ci;
+  const data = BOOK.chapters[ci];
+  setX(0, false);
+  const html = [`<h2 class="chtitle"><span class="ch">${esc(data.title)}</span></h2>`];
+  for (const n of data.nodes){
+    if (n.type === "text")
+      html.push(n.text.split(/\n\s*\n/).map(t => `<p>${esc(t.trim())}</p>`).join(""));
+    else
+      html.push(`<figure><img alt="${esc(n.alt||"")}" src="${n.src}" onload="this.classList.add('on')"></figure>`);
+  }
+  $("#flow").innerHTML = html.join("");
+  $("#chap").value = ci;
+  imgs = [...$("#flow").querySelectorAll("img")];
+  imgs.forEach(im => { if (im.complete && im.naturalWidth) im.classList.add("on"); });
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{
+    paginate(); goPage(toPage === -1 ? pages-1 : Math.min(toPage||0, pages-1), true);
+  }));
+}
+
+function stride(){ const f = $("#flow"); return f.clientWidth + (parseFloat(getComputedStyle(f).columnGap)||0); }
+function paginate(){ const f = $("#flow");
+  pages = Math.max(1, Math.ceil((f.scrollWidth + (parseFloat(getComputedStyle(f).columnGap)||0)) / stride())); }
+function setX(px, animate){ const f = $("#flow");
+  if (animate && animOn){ f.style.transition = ""; f.style.transform = `translateX(${px}px)`; }
+  else { f.style.transition = "none"; f.style.transform = `translateX(${px}px)`; void f.offsetWidth; f.style.transition = ""; } }
+function goPage(n, force){
+  page = Math.max(0, Math.min(pages-1, n));
+  setX(-page*stride(), !force);
+  $("#bar").style.width = ((page+1)/pages*100) + "%";
+  $("#pageno").textContent = `${(BOOK.chapters[CH]||{}).title||""} — ${page+1}/${pages}`;
+  try { localStorage.setItem(LKEY, JSON.stringify({ch:CH, page})); } catch(e){}
+}
+
+function sweep(dir){ if (!animOn) return; const t = $("#turn"); t.classList.remove("fwd","back"); void t.offsetWidth; t.classList.add(dir); }
+function next(){ if (page < pages-1){ sweep("fwd"); goPage(page+1); } else if (CH < BOOK.chapters.length-1) loadChapter(CH+1, 0); }
+function prev(){ if (page > 0){ sweep("back"); goPage(page-1); } else if (CH > 0) loadChapter(CH-1, -1); }
+
+let tx=null, ty=null, moved=false;
+document.addEventListener("touchstart", e=>{ tx=e.touches[0].clientX; ty=e.touches[0].clientY; moved=false; }, {passive:true});
+document.addEventListener("touchmove", e=>{ if(tx!==null && (Math.abs(e.touches[0].clientX-tx)>10||Math.abs(e.touches[0].clientY-ty)>10)) moved=true; }, {passive:true});
+document.addEventListener("touchend", e=>{ if(tx===null) return; const dx=e.changedTouches[0].clientX-tx, dy=e.changedTouches[0].clientY-ty; tx=null;
+  if(Math.abs(dx)>50 && Math.abs(dx)>Math.abs(dy)){ moved=true; dx<0?next():prev(); } }, {passive:true});
+document.addEventListener("click", e=>{
+  if(moved){ moved=false; return; }
+  if(!$("#menu").hidden) return;
+  if(e.target.closest("#menuBtn,#menu")) return;
+  (e.clientX/window.innerWidth < 0.5) ? prev() : next();
+});
+document.addEventListener("keydown", e=>{
+  if(e.key==="ArrowRight"||e.key===" "){ next(); e.preventDefault(); }
+  if(e.key==="ArrowLeft") prev();
+  if(e.key==="Escape") $("#menu").hidden=true;
+});
+$("#menuBtn").onclick = e=>{ e.stopPropagation(); $("#menu").hidden=false; };
+$("#menu").onclick = e=>{ if(e.target===$("#menu")) $("#menu").hidden=true; e.stopPropagation(); };
+$("#close").onclick = e=>{ e.stopPropagation(); $("#menu").hidden=true; };
+$("#chap").onchange = e=>{ $("#menu").hidden=true; loadChapter(+e.target.value, 0); };
+$("#animchk").onchange = e=>{ animOn=e.target.checked; try{localStorage.setItem(ANIM_KEY, animOn?"1":"0");}catch(_){} applyAnim(); };
+$("#fsdown").onclick = e=>{ e.stopPropagation(); setFont(-0.1); };
+$("#fsup").onclick = e=>{ e.stopPropagation(); setFont(0.1); };
+const fsEl = document.documentElement;
+const inFS = ()=>document.fullscreenElement||document.webkitFullscreenElement;
+$("#fs").onclick = e=>{ e.stopPropagation(); try{ inFS()?(document.exitFullscreen||document.webkitExitFullscreen).call(document):(fsEl.requestFullscreen||fsEl.webkitRequestFullscreen).call(fsEl);}catch(_){} };
+let rt=null;
+window.addEventListener("resize", ()=>{ clearTimeout(rt); rt=setTimeout(()=>{ const frac=page/Math.max(1,pages); paginate(); goPage(Math.round(frac*pages), true); }, 200); });
+boot();
+</script>
+</body></html>

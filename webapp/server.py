@@ -32,7 +32,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from pipeline.config import STYLES
-from . import db, scene
+from . import db, flow, scene
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = Path(__file__).resolve().parent / "static"
@@ -387,29 +387,6 @@ def api_pages(book_id: int):
              "text": p["read_text"]} for p in db.get_pages(book_id)]
 
 
-def _image_offset(text: str, anchor: str | None) -> int:
-    """Where in `text` to place the illustration: just after the sentence holding
-    `anchor` (a verbatim phrase the model chose so the picture follows -- not
-    precedes -- the moment it depicts). Falls back to end-of-text if no anchor."""
-    if not anchor:
-        return len(text)
-    toks = re.findall(r"\w+", anchor)[:8]
-    if not toks:
-        return len(text)
-    m = re.compile(r"\W+".join(re.escape(t) for t in toks), re.I).search(text)
-    if not m:
-        return len(text)
-    end = m.end()
-    # extend to the end of the sentence holding the anchor -- incl. when it ends
-    # the page (no trailing space), which is the common case for a picture that
-    # follows the moment. (?=\s|$) avoids matching abbreviations/decimals.
-    nxt = re.search(r"[.!?]+[\"'”’)\]]*(?=\s|$)", text[end:])
-    if nxt:
-        end += nxt.end()
-    # glob any punctuation / closing quotes that still immediately follow, so a
-    # trailing mark (e.g. .”) stays with the text above the picture, not below it.
-    g = re.match(r"[.!?,;:…”’\"')\]]+", text[end:])
-    return end + g.end() if g else end
 
 
 @app.get("/api/books/{book_id}/chapter/{idx}")
@@ -424,19 +401,9 @@ def api_chapter_flow(book_id: int, idx: int):
     if not ch:
         raise HTTPException(404, "no such chapter")
     seg = book["seg_ver"] if "seg_ver" in book.keys() else 0
-    nodes = []
-    for p in db.get_pages(book_id):
-        if p["chapter_idx"] != idx:
-            continue
-        t = p["read_text"] or ""
-        pos = _image_offset(t, p.get("image_anchor"))
-        before, after = t[:pos].strip(), t[pos:].strip()
-        if before:
-            nodes.append({"type": "text", "text": before})
-        nodes.append({"type": "image", "idx": p["idx"], "alt": p.get("title", ""),
-                      "src": f"/api/books/{book_id}/pages/{p['idx']}/image?v={seg}"})
-        if after:
-            nodes.append({"type": "text", "text": after})
+    nodes = flow.chapter_nodes(
+        book_id, idx,
+        src_for=lambda p: f"/api/books/{book_id}/pages/{p['idx']}/image?v={seg}")
     return {"book_id": book_id, "idx": idx, "title": ch["title"],
             "num_chapters": len(chapters), "nodes": nodes}
 

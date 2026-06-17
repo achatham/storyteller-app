@@ -32,6 +32,28 @@ manifest loads. The manifest links already set `crossorigin="use-credentials"`
 to send the session cookie; if a gate still blocks it, skip auth for the
 non-sensitive PWA assets (`/static/*`, `/sw.js`, the manifest).
 
+## Static export (GitHub Pages)
+
+Export a fully-illustrated book as a **self-contained static site** -- one
+`index.html` with the text inlined plus the illustrations as image files -- that
+needs no backend to read (suitable for GitHub Pages or any static host):
+
+```sh
+# inside the container (the SQLite DB lives there); --pages limits a demo slice
+docker compose exec storyteller python -m webapp.export <book_id> /out --pages 5 \
+    --title "A Christmas Carol" --author "Charles Dickens"
+docker compose cp storyteller:/out ./site     # copy the result out
+python -m http.server -d ./site                # preview locally
+```
+
+Output: `index.html` (the paginated reader with the book data inlined),
+`images/p<idx>.webp` per illustrated page, and `.nojekyll`. Only pages that have
+a drawn scene image get an illustration; `--pages N` exports just the first N
+pages so you can iterate before illustrating the whole book. To publish, commit
+the output directory to a Pages-served location (e.g. a `docs/` folder or a
+`gh-pages` branch). The reader layout/pagination matches the in-app book view
+(`webapp/flow.py` builds the same text+image node stream for both).
+
 ## Run without Docker
 
 ```sh
