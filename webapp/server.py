@@ -373,9 +373,32 @@ def api_sheet(book_id: int, entity_id: str, variant_id: str, request: Request):
 @app.get("/api/books/{book_id}/cost")
 def api_book_cost(book_id: int):
     from pipeline import costs
+    from pipeline.run import PASS_THRESHOLD
     if not db.get_book(book_id):
         raise HTTPException(404, "no such book")
-    return costs.book_report(book_id)
+    report = costs.book_report(book_id)
+
+    # How many of each page's current illustration succeeded on the Nth try, plus
+    # the resulting images-per-page multiplier. Pages that never cleared the quality
+    # bar used the full try budget and fell back to the best-of judge -- those are
+    # the ones that push the multiplier up.
+    rows = db.page_attempt_rows(book_id)
+    if rows:
+        total = sum(r["n"] for r in rows)
+        passed = [r for r in rows if (r["score"] or 0) >= PASS_THRESHOLD]
+        fellback = [r for r in rows if (r["score"] or 0) < PASS_THRESHOLD]
+        max_try = max(r["n"] for r in rows)
+        buckets = [{"tries": n, "pages": sum(1 for r in passed if r["n"] == n)}
+                   for n in range(1, max_try + 1)]
+        report["attempts"] = {
+            "pages": len(rows),
+            "total": total,
+            "multiplier": round(total / len(rows), 2),
+            "buckets": [b for b in buckets if b["pages"]],
+            "fellback": len(fellback),
+            "fellback_tries": max_try,
+        }
+    return report
 
 
 @app.get("/api/books/{book_id}/pages")

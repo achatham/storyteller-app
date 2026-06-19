@@ -488,6 +488,23 @@ def debug_pages(book_id) -> list[dict]:
              "attempts": r["attempts"], "score": r["score"]} for r in rows]
 
 
+def page_attempt_rows(book_id) -> list[dict]:
+    """For each page's current (latest) scene generation: how many image attempts
+    it took (n), which attempt was kept (chosen), and the kept image's score.
+    Feeds the settings page's 'succeeded on the Nth try' breakdown."""
+    with conn() as c:
+        rows = c.execute(
+            "SELECT g.idx AS idx, g.chosen AS chosen, g.final_score AS score, "
+            "  (SELECT COUNT(*) FROM scene_attempts a "
+            "     WHERE a.book_id=g.book_id AND a.idx=g.idx AND a.gen_id=g.gen_id) AS n "
+            "FROM scene_gens g "
+            "JOIN (SELECT idx, MAX(gen_id) AS mg FROM scene_gens "
+            "        WHERE book_id=? GROUP BY idx) m ON m.idx=g.idx AND m.mg=g.gen_id "
+            "WHERE g.book_id=? ORDER BY g.idx", (book_id, book_id)).fetchall()
+    return [{"idx": r["idx"], "chosen": r["chosen"], "score": r["score"], "n": r["n"]}
+            for r in rows]
+
+
 def scene_history(book_id, idx) -> list[dict]:
     """Full history for one page: a list of generations (newest first), each with
     its attempts (prompt + critique + metadata, no image blobs)."""

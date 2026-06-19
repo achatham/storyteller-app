@@ -61,6 +61,16 @@
       character art, segmentation) plus illustrations generated as you read. Read-time generations
       began being attributed per-book recently, so very early reading may be under-counted.</div>
   </div>
+  <div class="panel" id="attpanel" style="display:none">
+    <h2>Image attempts</h2>
+    <div class="split">
+      <div>images / page&nbsp; <b id="mult"></b></div>
+      <div>total images&nbsp; <b id="natt"></b></div>
+    </div>
+    <table><thead><tr><th>outcome</th><th>pages</th><th>share</th></tr></thead>
+      <tbody id="tries"></tbody></table>
+    <div class="note" id="attnote"></div>
+  </div>
   <div class="actions">
     <a class="btn go" id="read">Read</a>
     <a class="btn" id="bookview">Single-page view</a>
@@ -117,6 +127,27 @@ const usd = n => "$" + (n||0).toFixed(n>=1?2:3);
     `<tr><td>${r.model}</td><td>${r.kind}</td><td>${r.in.toLocaleString()}</td>
      <td>${r.out.toLocaleString()}</td><td>${r.images||""}</td><td>${usd(r.usd)}</td></tr>`).join("")
     || `<tr><td colspan="6" style="color:var(--muted)">no usage recorded</td></tr>`;
+
+  const a = c.attempts;
+  if (a && a.pages) {
+    const pct = n => Math.round(n / a.pages * 100) + "%";
+    $("#attpanel").style.display = "block";
+    $("#mult").textContent = a.multiplier.toFixed(2) + "×";
+    $("#natt").textContent = a.total + " for " + a.pages + " illustrated page" + (a.pages>1?"s":"");
+    const rows = a.buckets.map(b =>
+      `<tr><td>kept on try ${b.tries}</td><td>${b.pages}</td><td>${pct(b.pages)}</td></tr>`);
+    if (a.fellback)
+      rows.push(`<tr><td>no clean pass — kept best of ${a.fellback_tries}</td>`
+              + `<td>${a.fellback}</td><td>${pct(a.fellback)}</td></tr>`);
+    $("#tries").innerHTML = rows.join("");
+    $("#attnote").textContent = a.fellback
+      ? `${a.fellback} page${a.fellback>1?"s":""} never cleared the quality bar, so each ran the full `
+        + `${a.fellback_tries} tries before the best-of judge picked one — that's what pushes the `
+        + `images-per-page multiplier up. Counts each page's current illustration only; redraws and `
+        + `character sheets add to the totals above but aren't shown here.`
+      : `Every page kept the first image that cleared the quality bar. Counts each page's current `
+        + `illustration only; redraws and character sheets add to the totals above.`;
+  }
 })();
 </script>
 </body></html>
