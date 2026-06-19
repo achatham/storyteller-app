@@ -457,6 +457,28 @@ def api_sheet_attempt_image(book_id: int, entity_id: str, variant_id: str,
     return _image_response(data, request)
 
 
+@app.post("/api/books/{book_id}/pages/{idx}/redraw")
+async def api_page_redraw(book_id: int, idx: int):
+    """Clear one page's scene and kick off a fresh render (non-blocking)."""
+    if not db.get_book(book_id) or not db.get_page(book_id, idx):
+        raise HTTPException(404, "no such page")
+    await asyncio.to_thread(db.delete_scene, book_id, idx)
+    asyncio.create_task(_safe_ensure(book_id, idx))
+    return {"ok": True}
+
+
+@app.post("/api/books/{book_id}/debug/redraw-flagged")
+async def api_redraw_flagged(book_id: int, threshold: float = 4.0):
+    """Redraw every page whose best score is below the pass threshold."""
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    flagged = await asyncio.to_thread(db.flagged_scenes, book_id, threshold)
+    for p in flagged:
+        await asyncio.to_thread(db.delete_scene, book_id, p["idx"])
+        asyncio.create_task(_safe_ensure(book_id, p["idx"]))
+    return {"ok": True, "redrawing": [p["idx"] for p in flagged]}
+
+
 @app.post("/api/books/{book_id}/sheet/{entity_id}/{variant_id}/redraw")
 async def api_sheet_redraw(book_id: int, entity_id: str, variant_id: str):
     """Force-redraw one roster sheet so it regenerates with a fresh debug trace."""

@@ -409,6 +409,12 @@ def scene_data(book_id, idx) -> bytes | None:
         return r["data"] if r and r["data"] else None
 
 
+def delete_scene(book_id, idx):
+    """Drop one page's stored scene image so it regenerates on next request."""
+    with conn() as c:
+        c.execute("DELETE FROM scenes WHERE book_id=? AND idx=?", (book_id, idx))
+
+
 def scene_set_status(book_id, idx, status, detail=None):
     with conn() as c:
         c.execute("INSERT INTO scenes(book_id,idx,status,detail,updated_at) "

@@ -104,10 +104,19 @@ async function loadList(){
       ...r.sheets.map(s => ({sheet:true, key:`${s.entity_id}/${s.variant_id}`, label:`${s.entity_id} · ${s.variant_id}`, score:s.score, issues:s.issues, go:()=>loadSheet(s.entity_id, s.variant_id)})),
     ];
     if (!items.length){ L.innerHTML = `<div class="empty">Nothing below the pass threshold (${r.threshold}) — every kept image cleared the critic. 🎉</div>`; return; }
-    L.innerHTML = items.map((it,i) => `<div class="pg" data-i="${i}">
+    const bar = `<div style="padding:10px 16px;border-bottom:1px solid var(--line)">
+      <button class="rbtn" id="redrawAll">Redraw all ${r.pages.length} flagged pages</button></div>`;
+    L.innerHTML = bar + items.map((it,i) => `<div class="pg" data-i="${i}">
       <div><span class="s ${sCls(it.score)}">${it.score}</span> ${it.sheet?"🎭":"📄"} <span class="t">${esc(it.label)}</span></div>
       ${it.issues&&it.issues.length?`<div class="meta">${esc(it.issues[0])}</div>`:""}</div>`).join("");
     L.querySelectorAll(".pg").forEach((el,i) => el.onclick = items[i].go);
+    if ($("#redrawAll")) $("#redrawAll").onclick = async () => {
+      const b = $("#redrawAll");
+      if (!confirm(`Redraw all ${r.pages.length} flagged pages? They regenerate in the background under the current loop (costs image generations).`)) return;
+      b.disabled = true; b.textContent = "Redrawing in background…";
+      await fetch(`${API()}/debug/redraw-flagged`, {method:"POST"});
+      b.textContent = "Started — re-check the list in a few minutes";
+    };
     return;
   }
   if (MODE === "pages"){
@@ -134,7 +143,7 @@ async function loadPage(idx){
   document.querySelectorAll(".pg").forEach(e => e.classList.toggle("sel", +e.dataset.idx === idx));
   history.replaceState(null, "", `/debug/${ID}?page=${idx}`);
   const r = await (await fetch(`${API()}/pages/${idx}/history`)).json();
-  renderHistory(`Page ${idx} — ${esc(r.title||"")}`, null,
+  renderHistory(`Page ${idx} — ${esc(r.title||"")}`, {page: idx},
     r.history, g => `${API()}/pages/${idx}/gen/${g.gen_id}/attempt`);
 }
 
@@ -146,13 +155,15 @@ async function loadSheet(eid, vid){
     {eid, vid}, r.history, g => `${API()}/sheet/${encodeURIComponent(eid)}/${encodeURIComponent(vid)}/gen/${g.gen_id}/attempt`);
 }
 
-function renderHistory(titleHtml, sheet, hist, attBase){
+function renderHistory(titleHtml, target, hist, attBase){
   const D = $("#detail");
-  const redraw = sheet ? `<button class="rbtn" id="redraw">Redraw this sheet</button>` : "";
+  const isPage = target && target.page !== undefined;
+  const redraw = target ? `<button class="rbtn" id="redraw">Redraw this ${isPage?"page":"sheet"}</button>` : "";
+  const head = `<div class="dhead"><h2>${titleHtml}</h2>${redraw}</div>`;
   if (!hist.length){
-    D.innerHTML = `<div class="dhead"><h2>${titleHtml}</h2>${redraw}</div><div class="empty">No generation history${sheet?" — hit Redraw to generate one with a trace.":"."}</div>`;
+    D.innerHTML = head + `<div class="empty">No generation history${target?" — hit Redraw to generate one with a trace.":"."}</div>`;
   } else {
-    D.innerHTML = `<div class="dhead"><h2>${titleHtml}</h2>${redraw}</div>` + hist.map(g => {
+    D.innerHTML = head + hist.map(g => {
       const states = Object.entries(g.states||{}).map(([k,v]) => `<span class="chip"><b>${esc(k)}</b>: ${esc(v)}</span>`).join("");
       const atts = g.attempts.map(a => attCard(`${attBase(g)}/${a.attempt}/image`, a, a.attempt === g.chosen)).join("");
       return `<div class="gen"><h3>Generation #${g.gen_id} · kept attempt ${g.chosen} · final ${g.final_score ?? "—"}</h3>
@@ -161,11 +172,20 @@ function renderHistory(titleHtml, sheet, hist, attBase){
         ${states?`<div class="states">${states}</div>`:""}<div class="atts">${atts}</div></div>`;
     }).join("");
   }
-  if (sheet){
+  if (target){
     $("#redraw").onclick = async () => {
       const b = $("#redraw"); b.disabled = true; b.textContent = "Redrawing…";
-      await fetch(`${API()}/sheet/${encodeURIComponent(sheet.eid)}/${encodeURIComponent(sheet.vid)}/redraw`, {method:"POST"});
-      await loadList(); await loadSheet(sheet.eid, sheet.vid);
+      if (isPage){
+        await fetch(`${API()}/pages/${target.page}/redraw`, {method:"POST"});
+        for (let i=0; i<60; i++){                       // poll the background render
+          await new Promise(r => setTimeout(r, 3000));
+          if ((await fetch(`${API()}/pages/${target.page}/image`, {cache:"no-store"})).ok) break;
+        }
+        await loadList(); await loadPage(target.page);
+      } else {
+        await fetch(`${API()}/sheet/${encodeURIComponent(target.eid)}/${encodeURIComponent(target.vid)}/redraw`, {method:"POST"});
+        await loadList(); await loadSheet(target.eid, target.vid);
+      }
     };
   }
 }
