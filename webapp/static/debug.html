@@ -55,7 +55,7 @@
 <header>
   <h1 id="title">Generation debug</h1>
   <a id="back" href="#">&#8592; Settings</a>
-  <div class="tabs"><span class="tab" data-mode="pages">Page scenes</span><span class="tab" data-mode="sheets">Roster sheets</span></div>
+  <div class="tabs"><span class="tab" data-mode="pages">Page scenes</span><span class="tab" data-mode="sheets">Roster sheets</span><span class="tab" data-mode="flagged">⚑ Flagged</span></div>
 </header>
 <div class="wrap">
   <div class="list" id="list"></div>
@@ -90,12 +90,26 @@ function attCard(imgUrl, a, kept){
 async function setMode(m){
   MODE = m; SEL = null;
   document.querySelectorAll(".tab").forEach(t => t.classList.toggle("sel", t.dataset.mode === m));
-  $("#detail").innerHTML = `<div class="empty">Pick ${m==="pages"?"a page":"a roster sheet"} on the left.</div>`;
+  const hint = m==="pages" ? "a page" : m==="sheets" ? "a roster sheet" : "a flagged item";
+  $("#detail").innerHTML = `<div class="empty">Pick ${hint} on the left.</div>`;
   await loadList();
 }
 
 async function loadList(){
   const L = $("#list");
+  if (MODE === "flagged"){
+    const r = await (await fetch(`${API()}/debug/flagged`)).json();
+    const items = [
+      ...r.pages.map(p => ({sheet:false, key:`p${p.idx}`, label:`p${p.idx} ${p.title||""}`, score:p.score, issues:p.issues, go:()=>loadPage(p.idx)})),
+      ...r.sheets.map(s => ({sheet:true, key:`${s.entity_id}/${s.variant_id}`, label:`${s.entity_id} · ${s.variant_id}`, score:s.score, issues:s.issues, go:()=>loadSheet(s.entity_id, s.variant_id)})),
+    ];
+    if (!items.length){ L.innerHTML = `<div class="empty">Nothing below the pass threshold (${r.threshold}) — every kept image cleared the critic. 🎉</div>`; return; }
+    L.innerHTML = items.map((it,i) => `<div class="pg" data-i="${i}">
+      <div><span class="s ${sCls(it.score)}">${it.score}</span> ${it.sheet?"🎭":"📄"} <span class="t">${esc(it.label)}</span></div>
+      ${it.issues&&it.issues.length?`<div class="meta">${esc(it.issues[0])}</div>`:""}</div>`).join("");
+    L.querySelectorAll(".pg").forEach((el,i) => el.onclick = items[i].go);
+    return;
+  }
   if (MODE === "pages"){
     const r = await (await fetch(`${API()}/debug/pages`)).json();
     if (!r.pages.length){ L.innerHTML = `<div class="empty">No page history yet. Read some pages, then return.</div>`; return; }

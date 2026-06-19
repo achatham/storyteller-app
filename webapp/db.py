@@ -592,6 +592,60 @@ def sheet_attempt_image(book_id, entity_id, variant_id, gen_id, attempt):
     return (r["mime"], r["data"]) if r else (None, None)
 
 
+def _critique_issues(blob) -> list:
+    if not blob:
+        return []
+    try:
+        return json.loads(blob).get("issues", []) or []
+    except (ValueError, TypeError):
+        return []
+
+
+def flagged_scenes(book_id, threshold: float = 4.0) -> list[dict]:
+    """Pages whose best kept score stayed BELOW the critic's pass threshold -- i.e.
+    no attempt ever passed. Includes the latest run's critic issues when recorded."""
+    with conn() as c:
+        rows = c.execute(
+            "SELECT s.idx AS idx, s.score AS score, p.title AS title FROM scenes s "
+            "LEFT JOIN pages p ON p.book_id=s.book_id AND p.idx=s.idx "
+            "WHERE s.book_id=? AND s.score IS NOT NULL AND s.score < ? "
+            "ORDER BY s.score, s.idx", (book_id, threshold)).fetchall()
+        out = []
+        for r in rows:
+            g = c.execute("SELECT gen_id,chosen FROM scene_gens WHERE book_id=? AND idx=? "
+                          "ORDER BY gen_id DESC LIMIT 1", (book_id, r["idx"])).fetchone()
+            issues = []
+            if g:
+                a = c.execute("SELECT critique FROM scene_attempts WHERE book_id=? AND idx=? "
+                              "AND gen_id=? AND attempt=?", (book_id, r["idx"], g["gen_id"],
+                                                            g["chosen"])).fetchone()
+                issues = _critique_issues(a["critique"] if a else None)
+            out.append({"idx": r["idx"], "title": r["title"] or "", "score": r["score"],
+                        "issues": issues})
+    return out
+
+
+def flagged_sheets(book_id, threshold: float = 4.0) -> list[dict]:
+    """Roster sheets whose latest generation's best score stayed below the pass
+    threshold (only sheets with recorded history -- drawn since debug logging)."""
+    with conn() as c:
+        rows = c.execute(
+            "SELECT g.entity_id AS eid, g.variant_id AS vid, g.final_score AS score, "
+            "g.gen_id AS gen, g.chosen AS chosen FROM sheet_gens g WHERE g.book_id=? "
+            "AND g.gen_id=(SELECT MAX(gen_id) FROM sheet_gens WHERE book_id=g.book_id "
+            "AND entity_id=g.entity_id AND variant_id=g.variant_id) "
+            "AND g.final_score IS NOT NULL AND g.final_score < ? "
+            "ORDER BY g.final_score", (book_id, threshold)).fetchall()
+        out = []
+        for r in rows:
+            a = c.execute("SELECT critique FROM sheet_attempts WHERE book_id=? AND entity_id=? "
+                          "AND variant_id=? AND gen_id=? AND attempt=?",
+                          (book_id, r["eid"], r["vid"], r["gen"], r["chosen"])).fetchone()
+            out.append({"entity_id": r["eid"], "variant_id": r["vid"], "score": r["score"],
+                        "issues": _critique_issues(a["critique"] if a else None)})
+    return out
+
+
 def clear_art(book_id) -> dict:
     """Drop a book's roster sheets and scene images so they redraw (lazily) with
     the current prompts/style. Bumps seg_ver to bust cached scene image URLs.

@@ -429,6 +429,17 @@ def api_debug_sheets(book_id: int):
     return {"book_id": book_id, "sheets": db.debug_sheets(book_id)}
 
 
+@app.get("/api/books/{book_id}/debug/flagged")
+def api_debug_flagged(book_id: int, threshold: float = 4.0):
+    """Pages and roster sheets whose best score never reached the critic's pass
+    threshold -- the images that consistently failed and were kept anyway."""
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    return {"book_id": book_id, "threshold": threshold,
+            "pages": db.flagged_scenes(book_id, threshold),
+            "sheets": db.flagged_sheets(book_id, threshold)}
+
+
 @app.get("/api/books/{book_id}/sheet/{entity_id}/{variant_id}/history")
 def api_sheet_history(book_id: int, entity_id: str, variant_id: str):
     """Full generation history for one roster sheet (every run + attempt)."""
