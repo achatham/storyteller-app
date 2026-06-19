@@ -36,9 +36,9 @@ STORY_APP_DB="$DB" python3 -m webapp.export "$book_id" "$out" \
 # 2. Ensure the gh-pages deploy clone exists and is current.
 if [ ! -d "$GHP/.git" ]; then
   git clone "$REPO_URL" "$GHP"
-  git -C "$GHP" checkout gh-pages
 fi
-git -C "$GHP" pull --ff-only
+git -C "$GHP" checkout gh-pages
+git -C "$GHP" pull --ff-only origin gh-pages
 
 # 3. Mirror this book into books/<slug>/. The scoped --delete only prunes stale
 #    files inside this one book's dir, never other books.
