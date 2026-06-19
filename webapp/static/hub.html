@@ -141,8 +141,20 @@ function card(b){
 }
 
 async function refresh(){
-  const books = await (await fetch("/api/books")).json();
   const el = $("#books");
+  let books;
+  try {
+    const r = await fetch("/api/books", {cache: "no-store"});
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    books = await r.json();
+    if (!Array.isArray(books)) throw new Error("not signed in");
+  } catch (e) {
+    // an offline/auth failure must not silently look like an empty library
+    el.innerHTML = `<div class="empty">⚠ Couldn't load your library — check your connection
+      or sign in again. <a href="#" id="retry" style="color:var(--accent)">Tap to retry</a>.</div>`;
+    $("#retry").onclick = ev => { ev.preventDefault(); refresh(); };
+    return;
+  }
   el.innerHTML = books.length ? books.map(card).join("")
     : `<div class="empty">No books yet — add one below.</div>`;
   if (books.some(b => PROCESSING.includes(b.status))) setTimeout(refresh, 2500);
