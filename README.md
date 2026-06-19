@@ -2,6 +2,12 @@
 
 **[Live demo →](https://achatham.github.io/storyteller-app/)**
 
+<p align="center">
+  <img src="docs/img/reader-1.webp" width="30%" alt="A page of A Christmas Carol with an illustration of a cold, solitary Scrooge at his desk by the fire">
+  <img src="docs/img/reader-2.webp" width="30%" alt="A page with an illustration of Scrooge and his former fiancée on a bench among autumn leaves">
+  <img src="docs/img/reader-3.webp" width="30%" alt="A page with an illustration of a reformed Scrooge walking cheerfully through a snowy street">
+</p>
+
 This is an AI-illustrated rendering of a book. It creates consistent images across a
 full story, with (mostly) the same characters and settings used across the pages.
 
