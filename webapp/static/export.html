@@ -60,6 +60,14 @@
   body.noanim #flow { transition:none; }
   #splash { position:fixed; inset:0; z-index:60; background:var(--bg); display:flex; align-items:center; justify-content:center; font-family:system-ui,sans-serif; color:var(--muted); }
   #splash[hidden]{ display:none; }
+  #intro { position:fixed; inset:0; z-index:55; background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center; padding:20px; }
+  #intro[hidden]{ display:none; }
+  .introcard { width:min(440px,90vw); max-height:86vh; overflow:auto; gap:14px; }
+  .introcard .introhd { font-family:Georgia,serif; font-size:1.45rem; color:var(--ink); }
+  .introcard .introbody p { font-family:Georgia,serif; font-size:1rem; line-height:1.62; color:var(--ink); margin:0 0 .85em; text-align:left; }
+  .introcard .introbody p:last-child { margin-bottom:0; }
+  .introcard .introbody a { color:var(--accent); }
+  .introcard #introbtn { margin-top:2px; }
 </style>
 </head><body>
 <div id="viewport"><div id="flow"></div></div>
@@ -78,9 +86,37 @@
   <button id="fs">&#9974; Full screen</button>
   <button id="close">Close menu</button>
 </div></div>
+<div id="intro" hidden><div class="card introcard">
+  <div class="introhd" id="introhd"></div>
+  <div class="introbody" id="introbody"></div>
+  <button id="introbtn"></button>
+</div></div>
 <div id="splash">Loading…</div>
 <script>window.BOOK = __BOOK_JSON__;</script>
 <script>
+// ─────────────────────────────────────────────────────────────────────────────
+//  INTRO — the welcome screen shown when the viewer first opens. EDIT FREELY.
+//  • heading    : the title at the top of the card
+//  • paragraphs : one string per paragraph (plain text, add/remove as you like).
+//                 These tokens are filled in automatically per book:
+//                   {title}    → this book's title
+//                   {style}    → this book's art style
+//                   {project}  → a link using `github` below
+//  • github     : the link {project} turns into (url + visible label)
+//  • button     : the label on the dismiss button
+//  • show       : set to false to skip the intro entirely
+// ─────────────────────────────────────────────────────────────────────────────
+const INTRO = {
+  show: true,
+  heading: "About this demo",
+  paragraphs: [
+    "This is an AI-illustrated version of {title} rendered in the artistic style of {style}. It's a demo of what can be created with {project}. It creates consistent images across a full story, with (mostly) the same characters and settings used across the pages.",
+    "I've found that my young children will pay attention to more sophisticated stories if they're accompanied by color illustrations. I've had great luck reading to them so far and hope you enjoy it too. Of course these images are nowhere near the quality and consistency of a real human artist and I'd encourage you to look for those first.",
+  ],
+  github: { url: "https://github.com/achatham/storyteller-app", label: "this project" },
+  button: "Begin reading",
+};
+
 const BOOK = window.BOOK || {title:"", chapters:[]};
 const $ = s => document.querySelector(s);
 const LKEY = "export:" + (BOOK.title || "book");
@@ -106,8 +142,29 @@ function boot(){
   let start = { ch:0, page:0 };
   try { const s = JSON.parse(localStorage.getItem(LKEY)); if (s) start = s; } catch(e){}
   $("#splash").hidden = true; applyAnim(); applyFont();
+  showIntro();
   loadChapter(Math.min(start.ch||0, BOOK.chapters.length-1), start.page||0);
 }
+
+function fillIntro(t){
+  const gh = INTRO.github || {};
+  const link = gh.url
+    ? `<a href="${esc(gh.url)}" target="_blank" rel="noopener">${esc(gh.label || gh.url)}</a>`
+    : esc(gh.label || "");
+  return esc(t)                                  // escape author text first, then fill tokens
+    .split("{title}").join(esc(BOOK.title || ""))
+    .split("{style}").join(esc(BOOK.style || ""))
+    .split("{project}").join(link);
+}
+function showIntro(){
+  if (!INTRO.show) return;
+  $("#introhd").textContent = INTRO.heading || "";
+  $("#introbody").innerHTML = (INTRO.paragraphs || []).map(t => `<p>${fillIntro(t)}</p>`).join("");
+  $("#introbtn").textContent = INTRO.button || "Begin";
+  $("#intro").hidden = false;
+}
+// true while any blocking overlay (intro or menu) is open — pauses page turns
+function modalOpen(){ return !$("#intro").hidden || !$("#menu").hidden; }
 
 function loadChapter(ci, toPage){
   CH = ci;
@@ -151,18 +208,21 @@ let tx=null, ty=null, moved=false;
 document.addEventListener("touchstart", e=>{ tx=e.touches[0].clientX; ty=e.touches[0].clientY; moved=false; }, {passive:true});
 document.addEventListener("touchmove", e=>{ if(tx!==null && (Math.abs(e.touches[0].clientX-tx)>10||Math.abs(e.touches[0].clientY-ty)>10)) moved=true; }, {passive:true});
 document.addEventListener("touchend", e=>{ if(tx===null) return; const dx=e.changedTouches[0].clientX-tx, dy=e.changedTouches[0].clientY-ty; tx=null;
+  if(modalOpen()) return;
   if(Math.abs(dx)>50 && Math.abs(dx)>Math.abs(dy)){ moved=true; dx<0?next():prev(); } }, {passive:true});
 document.addEventListener("click", e=>{
   if(moved){ moved=false; return; }
-  if(!$("#menu").hidden) return;
+  if(modalOpen()) return;
   if(e.target.closest("#menuBtn,#menu")) return;
   (e.clientX/window.innerWidth < 0.5) ? prev() : next();
 });
 document.addEventListener("keydown", e=>{
+  if(!$("#intro").hidden){ if(["Escape"," ","Enter"].includes(e.key)){ $("#intro").hidden=true; e.preventDefault(); } return; }
   if(e.key==="ArrowRight"||e.key===" "){ next(); e.preventDefault(); }
   if(e.key==="ArrowLeft") prev();
   if(e.key==="Escape") $("#menu").hidden=true;
 });
+$("#introbtn").onclick = e=>{ e.stopPropagation(); $("#intro").hidden=true; };
 $("#menuBtn").onclick = e=>{ e.stopPropagation(); $("#menu").hidden=false; };
 $("#menu").onclick = e=>{ if(e.target===$("#menu")) $("#menu").hidden=true; e.stopPropagation(); };
 $("#close").onclick = e=>{ e.stopPropagation(); $("#menu").hidden=true; };

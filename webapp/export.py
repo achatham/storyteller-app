@@ -48,7 +48,9 @@ def export_book(book_id: int, out_dir, max_pages: int | None = None,
             chapters_out.append({"title": ch["title"], "nodes": nodes})
 
     book_json = {"title": title or book["title"] or "Untitled",
-                 "author": author or book["author"] or "", "chapters": chapters_out}
+                 "author": author or book["author"] or "",
+                 "style": (book["style"] or "").replace("_", " "),
+                 "chapters": chapters_out}
     # inline the data; escape </ so book text can never break out of the <script>
     payload = json.dumps(book_json, ensure_ascii=False).replace("</", "<\\/")
     html = (STATIC / "export.html").read_text().replace("__BOOK_JSON__", payload)
