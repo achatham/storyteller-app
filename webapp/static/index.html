@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storyteller</title>
+<style>
+  :root { --bg:#f4efe6; --ink:#2b2622; --muted:#9a8a70; --panel:#fffdf8;
+          --line:#e0d4bd; --accent:#7a5c3e; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; min-height:100%; background:var(--bg); color:var(--ink);
+              font-family:Georgia,'Times New Roman',serif; }
+  header { text-align:center; padding:56px 20px 8px; }
+  header h1 { margin:0; font-size:2.6rem; letter-spacing:.5px; }
+  header p { margin:.6em 0 0; color:var(--muted); font-size:1.05rem; }
+  main { max-width:1040px; margin:0 auto; padding:34px 20px 72px; }
+  .grid { display:grid; gap:26px; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); }
+  a.book { display:flex; flex-direction:column; text-decoration:none; color:inherit;
+           background:var(--panel); border:1px solid var(--line); border-radius:14px;
+           overflow:hidden; box-shadow:0 4px 16px rgba(0,0,0,.10);
+           transition:transform .18s ease, box-shadow .18s ease; }
+  a.book:hover { transform:translateY(-4px); box-shadow:0 12px 30px rgba(0,0,0,.18); }
+  .cover { aspect-ratio:3/2; background:#ece3d2; }
+  .cover img { width:100%; height:100%; object-fit:cover; display:block; }
+  .meta { padding:16px 18px 20px; }
+  .meta .title { font-size:1.25rem; line-height:1.25; }
+  .meta .author { color:var(--accent); font-size:.98rem; margin-top:.25em; }
+  .meta .style { font-family:system-ui,sans-serif; font-size:.68rem; letter-spacing:1.5px;
+                 text-transform:uppercase; color:var(--muted); margin-top:.7em; }
+  .empty { text-align:center; color:var(--muted); padding:60px 0; }
+  footer { text-align:center; color:var(--muted); font-family:system-ui,sans-serif;
+           font-size:.82rem; padding:0 20px 48px; }
+  footer a { color:var(--accent); }
+</style>
+</head><body>
+<header>
+  <h1>Storyteller</h1>
+  <p>Illustrated classics, generated page by page.</p>
+</header>
+<main><div class="grid" id="grid"></div></main>
+<footer>Built with <a href="https://github.com/achatham/storyteller-app">Storyteller</a>.</footer>
+
+<script>
+const BOOKS = __BOOKS_JSON__;
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c =>
+  ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+
+const grid = document.getElementById("grid");
+if (!BOOKS.length) {
+  grid.outerHTML = '<p class="empty">No books published yet.</p>';
+} else {
+  grid.innerHTML = BOOKS.map(b => `
+    <a class="book" href="${esc(b.url)}">
+      <div class="cover">${b.cover ? `<img src="${esc(b.cover)}" alt="${esc(b.title)} cover" loading="lazy">` : ""}</div>
+      <div class="meta">
+        <div class="title">${esc(b.title)}</div>
+        ${b.author ? `<div class="author">${esc(b.author)}</div>` : ""}
+        ${b.style ? `<div class="style">${esc(b.style)}</div>` : ""}
+      </div>
+    </a>`).join("");
+}
+</script>
+</body></html>

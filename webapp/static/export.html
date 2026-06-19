@@ -99,8 +99,8 @@
 //  • heading    : the title at the top of the card
 //  • paragraphs : one string per paragraph (plain text, add/remove as you like).
 //                 These tokens are filled in automatically per book:
-//                   {title}    → this book's title
-//                   {style}    → this book's art style
+//                   {title}    → this book's title (rendered in italics)
+//                   {style}    → this book's art style (rendered in “quotes”)
 //                   {project}  → a link using `github` below
 //  • github     : the link {project} turns into (url + visible label)
 //  • button     : the label on the dismiss button
@@ -152,8 +152,8 @@ function fillIntro(t){
     ? `<a href="${esc(gh.url)}" target="_blank" rel="noopener">${esc(gh.label || gh.url)}</a>`
     : esc(gh.label || "");
   return esc(t)                                  // escape author text first, then fill tokens
-    .split("{title}").join(esc(BOOK.title || ""))
-    .split("{style}").join(esc(BOOK.style || ""))
+    .split("{title}").join(`<em>${esc(BOOK.title || "")}</em>`)
+    .split("{style}").join(`“${esc(BOOK.style || "")}”`)
     .split("{project}").join(link);
 }
 function showIntro(){
