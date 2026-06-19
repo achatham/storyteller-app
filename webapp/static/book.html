@@ -215,13 +215,14 @@ function loadVisibleImages(){
     if (im.complete && im.naturalWidth) im.classList.add("on");       // cached/loaded -> show
   }
 }
-// If an image 503s because the server is still generating it, drop the src so the
-// next scan re-requests it, and rescan shortly. Bounded so a real failure stops.
+// The image endpoint returns 202 while the server renders the page in the
+// background (~30-40s), so poll: drop the src and re-request on a steady cadence.
+// Patient enough to outlast a slow render, then give up so a real failure stops.
 function imgRetry(im){
   const n = (+im.dataset.tries || 0) + 1; im.dataset.tries = n;
-  if (n > 8) return;
+  if (n > 45) return;                     // ~90s of polling
   im.removeAttribute("src");
-  setTimeout(loadVisibleImages, 1200);
+  setTimeout(loadVisibleImages, 2000);
 }
 
 function sweep(dir){

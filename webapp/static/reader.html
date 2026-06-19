@@ -188,8 +188,14 @@ function render(){
   img.classList.add("loading");
   spin.classList.remove("hidden");
   $("#spinmsg").textContent = "drawing this page…";
+  let tries = 0;
   img.onload = () => { if (req===curReq){ img.classList.remove("loading"); spin.classList.add("hidden"); } };
-  img.onerror = () => { if (req===curReq){ $("#spinmsg").textContent = "couldn't draw this one — tap to retry"; } };
+  // the endpoint returns 202 while it renders in the background (~30-40s) -> poll
+  img.onerror = () => {
+    if (req !== curReq) return;
+    if (++tries > 45){ $("#spinmsg").textContent = "couldn't draw this one — tap to retry"; return; }
+    setTimeout(() => { if (req===curReq) img.src = API + "/pages/" + p.idx + "/image?v=" + DATA.segVer + "&r=" + tries; }, 2000);
+  };
   img.src = API + "/pages/" + p.idx + "/image?v=" + DATA.segVer;
   img.alt = p.title;
 

@@ -505,12 +505,16 @@ async def api_scene_image(book_id: int, idx: int, request: Request):
         raise HTTPException(409, f"book not ready ({book['status']})")
     if not db.get_page(book_id, idx):
         raise HTTPException(404, "no such page")
-    try:
-        data = await ensure_scene(book_id, idx)
-    except Exception as ex:  # noqa: BLE001
-        raise HTTPException(503, f"generation failed: {str(ex)[:200]}")
+    data = await asyncio.to_thread(db.scene_data, book_id, idx)
     schedule_prefetch(book_id, idx + 1, PREFETCH, book["num_pages"])
-    return _image_response(data, request)
+    if data:
+        return _image_response(data, request)
+    # Not drawn yet: a scene takes ~30-40s (sheets + critic + revise). Don't hold the
+    # connection that long (it trips reverse-proxy timeouts and stalls reading-ahead).
+    # Kick off a background render and tell the client to poll; it shows a placeholder.
+    if await asyncio.to_thread(db.scene_status, book_id, idx) != "generating":
+        asyncio.create_task(_safe_ensure(book_id, idx))
+    return Response(status_code=202, headers={"Retry-After": "2", "Cache-Control": "no-store"})
 
 
 @app.put("/api/books/{book_id}/progress")
