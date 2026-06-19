@@ -169,3 +169,23 @@ def critique_image(image_path: Path, brief: str, schema: dict | None = None,
         return _coerce_json(resp.text)
 
     return _retry(_go, what="critique")
+
+
+def judge_images(image_paths: list[Path], prompt: str, schema: dict | None = None,
+                 model: str = CRITIQUE_MODEL) -> dict:
+    """Show the model several candidate images (labelled Candidate 1..N) alongside
+    `prompt`, and return its JSON verdict (e.g. which candidate is best)."""
+    from PIL import Image
+    contents = [prompt]
+    for i, p in enumerate(image_paths):
+        contents.append(f"--- Candidate {i + 1} ---")
+        contents.append(Image.open(p))
+    cfg = types.GenerateContentConfig(
+        response_mime_type="application/json", response_schema=schema, temperature=0.2)
+
+    def _go():
+        resp = _client.models.generate_content(model=model, contents=contents, config=cfg)
+        _record_usage(resp, model, "critique")
+        return _coerce_json(resp.text)
+
+    return _retry(_go, what="judge_images")

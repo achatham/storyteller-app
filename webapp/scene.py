@@ -64,8 +64,20 @@ from pipeline.run import (resolve_cast, scene_members, build_scene_prompt,
                           SCENE_CRITIQUE, PASS_THRESHOLD)
 from . import db
 
-SCENE_TRIES = int(os.environ.get("STORY_SCENE_TRIES", "2"))  # max image attempts/scene (1 fresh + revises)
-REVISE_AVG = 3.5  # if a failed candidate averages this high, edit it (img2img) vs restart
+SCENE_TRIES = int(os.environ.get("STORY_SCENE_TRIES", "3"))  # max image attempts per scene
+# revise a broadly-good near-miss (img2img edit) vs always regenerate from scratch
+SCENE_REVISE = os.environ.get("STORY_SCENE_REVISE", "1") != "0"
+REVISE_AVG = 3.5  # a failed candidate averaging this high gets revised (when SCENE_REVISE)
+
+# When no attempt clears the bar, a vision critic picks the best of the candidates.
+JUDGE_BEST = """You are an art director choosing the BEST of several candidate illustrations for one \
+page of a children's picture book. None is perfect -- pick the single candidate that best depicts the \
+scene, matches the characters, and is most usable (fewest/least serious problems).
+
+THE SCENE SHOULD SHOW:
+{brief}
+
+Return JSON only: {{"best": <the 1-based number of the best candidate>, "why": "<short reason>"}}"""
 SHEET_TRIES = 2  # reference sheets are drawn once + cached, so a reroll is cheap insurance
 SHEET_PASS = 4   # min(clean_sheet, match) needed to accept a sheet
 
@@ -489,7 +501,7 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                           "the whole exterior of those place(s) or their exterior-only identifying "
                           "features anywhere -- not even through a window or doorway, and never a "
                           "mirrored or doubled copy.")
-        best, fix, draft = None, "", None
+        best, fix, draft, cands = None, "", None, []
         gen_id = db.next_gen_id(book_id, idx)   # debug history: this generation run
         trace = {"states": states, "max_tries": SCENE_TRIES, "attempts": []}
         for attempt in range(1, SCENE_TRIES + 1):
@@ -528,17 +540,34 @@ def _render_scene(book_id: int, idx: int) -> bytes:
             db.scene_attempt_add(book_id, idx, gen_id, attempt, mode, used_prompt,
                                  _compress(data, DEBUG_MAXW, DEBUG_QUALITY),
                                  json.dumps(crit), score, round(avg, 2))
+            cands.append({"n": attempt, "path": cand, "data": data, "score": score})
             if best is None or score > best[1]:
                 best = (data, score, attempt)
             if score >= PASS_THRESHOLD:
                 break
             fix = crit.get("fix_hint", "")
-            # "very close" (broadly good, one weak spot) -> revise this image next;
-            # otherwise discard it and regenerate the scene from scratch.
-            draft = cand if avg >= REVISE_AVG else None
+            # "very close" (broadly good, one weak spot) -> revise this image next
+            # (img2img); otherwise (or if SCENE_REVISE is off) regenerate from scratch.
+            draft = cand if (SCENE_REVISE and avg >= REVISE_AVG) else None
 
-    data, score, chosen = best
-    data = _compress(data, SCENE_MAXW, WEBP_QUALITY)   # downscale for display storage
+        data, score, chosen = best
+        # If nothing cleared the bar, don't just trust the min-score: let a vision
+        # critic look at all the candidates and pick the best one.
+        if score < PASS_THRESHOLD and len(cands) > 1:
+            try:
+                verdict = gem.judge_images(
+                    [c["path"] for c in cands], JUDGE_BEST.format(brief=page["brief"]),
+                    schema={"type": "object", "properties": {
+                        "best": {"type": "integer"}, "why": {"type": "string"}}, "required": ["best"]})
+                pick = int(verdict.get("best", 0)) - 1
+                if 0 <= pick < len(cands):
+                    c = cands[pick]
+                    data, score, chosen = c["data"], c["score"], c["n"]
+                    trace["judge_pick"] = {"attempt": chosen, "why": verdict.get("why", "")}
+            except Exception as ex:  # noqa: BLE001 -- fall back to the best-min-score
+                print(f"[scene] best-of judge failed: {ex}", flush=True)
+        data = _compress(data, SCENE_MAXW, WEBP_QUALITY)   # downscale for display storage
+
     trace["chosen"] = chosen
     db.scene_store(book_id, idx, data, score, trace=json.dumps(trace))
     db.scene_gen_add(book_id, idx, gen_id, page["brief"], json.dumps(states), chosen, score)

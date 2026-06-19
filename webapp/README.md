@@ -92,7 +92,8 @@ Reads `GEMINI_API_KEY` from `.env` (same as the CLI pipeline).
 | `STORY_WARM_PAGES` | `2` | first pages drawn during import (instant open) |
 | `STORY_PREFETCH` | `4` | pages drawn ahead while reading |
 | `STORY_GEN_CONCURRENCY` | `3` | max simultaneous image generations |
-| `STORY_SCENE_TRIES` | `2` | max image attempts per scene (1 fresh + critic-driven revises); raise for quality at more image cost |
+| `STORY_SCENE_TRIES` | `3` | max image attempts per scene; if none pass the critic, a vision judge picks the best of them |
+| `STORY_SCENE_REVISE` | `1` | revise a broadly-good near-miss with an img2img edit; set `0` to always regenerate from scratch |
 | `STORY_WEBP_QUALITY` | `72` | lossy WebP quality for stored art (1–100) |
 | `STORY_SCENE_MAXW` | `1152` | downscale stored scenes to this max width px (0 = keep generated ~1264) |
 | `STORY_DEBUG_MAXW` / `STORY_DEBUG_QUALITY` | `960` / `52` | harder compression for review-only debug-history candidates |
