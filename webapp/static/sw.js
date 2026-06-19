@@ -1,25 +1,46 @@
-// Minimal service worker: makes the app installable and gives an offline-ish
-// fallback. Network-first so updates always show when online; cached responses
-// (incl. already-read pages and their images) are served if the network fails.
-const CACHE = "storyteller-v1";
+// Service worker. Two strategies:
+//  - /api/*  : NETWORK-FIRST (data must be fresh; fall back to cache when offline).
+//  - shell   : STALE-WHILE-REVALIDATE (HTML/JS/CSS/icons) -- serve the cached copy
+//              instantly so reloads are fast even on a slow/flaky connection, and
+//              refresh the cache in the background for next time. (Use the in-app
+//              "Check for updates" to jump straight to a new build.)
+const CACHE = "storyteller-v2";
 
 self.addEventListener("install", () => self.skipWaiting());
-self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
+self.addEventListener("activate", (e) => e.waitUntil((async () => {
+  for (const k of await caches.keys()) if (k !== CACHE) await caches.delete(k);
+  await self.clients.claim();
+})()));
+
+// Cache only successful, same-origin responses (never a 202 "generating" or a
+// cross-origin auth-redirect login page).
+function maybeCache(req, res) {
+  try {
+    if (res && res.ok && new URL(res.url).origin === location.origin) {
+      const copy = res.clone();
+      caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+    }
+  } catch (_) {}
+  return res;
+}
 
 self.addEventListener("fetch", (e) => {
   const req = e.request;
   if (req.method !== "GET") return;
   const url = new URL(req.url);
   if (url.origin !== location.origin) return;
-  e.respondWith(
-    fetch(req)
-      .then((res) => {
-        if (res.ok) {                       // don't cache 202 "still generating" etc.
-          const copy = res.clone();
-          caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
-        }
-        return res;
-      })
-      .catch(() => caches.match(req))
+
+  if (url.pathname.startsWith("/api/")) {           // network-first
+    e.respondWith(
+      fetch(req).then((res) => maybeCache(req, res)).catch(() => caches.match(req))
+    );
+    return;
+  }
+
+  e.respondWith(                                     // stale-while-revalidate
+    caches.match(req).then((cached) => {
+      const net = fetch(req).then((res) => maybeCache(req, res)).catch(() => cached);
+      return cached || net;
+    })
   );
 });
