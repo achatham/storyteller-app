@@ -86,6 +86,14 @@ Return JSON only:
     }}
   ]
 }}
+ANATOMY & DISTINCTIVE FEATURES: If the entity has any UNUSUAL or non-human anatomy or a striking \
+defining trait (e.g. one leg, three eyes, four arms, a tail, wings, an animal head, an odd size or \
+shape), LEAD base_appearance and each variant appearance with that feature and state it EXPLICITLY \
+and unambiguously, with exact COUNTS ("exactly ONE central leg, not two"; "three eyes"). Never phrase \
+it in a way an artist would default to an ordinary human/animal. When a body part merely RESEMBLES an \
+object, say it is an organic body part shaped LIKE that object, never just the object (write "one huge \
+flat foot shaped like a canoe -- an organic foot, NOT an actual boat", not "a canoe-shaped foot"). The \
+single most identity-defining trait comes FIRST, before clothing and incidental details.
 Resolve EVERY variant listed on the entity (echo each variant id). If the entity has no variants, return an empty variants list.
 """
 
