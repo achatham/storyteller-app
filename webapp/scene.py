@@ -401,6 +401,35 @@ def _render_scene(book_id: int, idx: int) -> bytes:
     spread = {"illustration_brief": page["brief"], "setting": page["setting"], "cast": page_cast,
               "read_text": page["read_text"]}
     members = scene_members(spread, cast_index)
+    # A page can reference a registry VARIANT the chapter-level cast never listed --
+    # e.g. young/schoolboy Scrooge in a flashback while the chapter cast only has the
+    # present-day Scrooge. scene_members drops those (no reference sheet, ad-hoc look,
+    # missing from the roster). Resolve any such registry variant straight from the
+    # registry so it gets a proper sheet like everyone else.
+    have = {(m["entity_id"], m["variant_id"]) for m in members}
+    reg_by_id = {e["id"]: e for e in registry.get("entities", [])}
+    for cc in page_cast:
+        eid, vid = cc.get("entity_id"), cc.get("variant_id") or "default"
+        if not eid or (eid, vid) in have:
+            continue
+        e = reg_by_id.get(eid)
+        if not e:
+            continue
+        var = next((v for v in e.get("variants", []) if v.get("id") == vid), None)
+        if var is None and vid != "default":
+            continue   # not a real variant of this entity
+        appearance = (var or {}).get("appearance") or e.get("base_appearance", "")
+        sheet_prompt = (var or {}).get("sheet_prompt") or e.get("base_sheet_prompt", "")
+        if not (appearance or sheet_prompt):
+            continue
+        name = e.get("name", eid)
+        if var and var.get("label"):   # distinguish two ages/looks of one character in a scene
+            name = f"{name} ({var['label']})"
+        members.append({"entity_id": eid, "variant_id": vid, "name": name,
+                        "appearance": appearance, "sheet_prompt": sheet_prompt,
+                        "type": e.get("type", "character"), "importance": e.get("importance", 3)})
+        have.add((eid, vid))
+    members.sort(key=lambda m: -m.get("importance", 3))
     # view per setting (set by the prop pass): "" = the whole place from outside;
     # else a short story label for the specific spot the scene is at ("lobby",
     # "deck", "the cellar"). Props (a painting, a book) are never a place.
