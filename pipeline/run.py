@@ -44,27 +44,77 @@ not showing dialogue, inner thoughts, or other moments elsewhere on the page:
 CHARACTERS THAT SHOULD APPEAR (must match these descriptions):
 {chars}
 
+EVERY NAMED CHARACTER IN THIS BOOK (use ONLY to recognise background or secondary figures -- do NOT \
+expect them all to appear; most scenes show just the cast above). If a figure ANYWHERE in the picture, \
+including the background, is clearly meant to be one of these but gets their core identity wrong -- wrong \
+species/creature, or a defining feature missing or changed (e.g. Reepicheep is a Talking Mouse, NOT a \
+cat) -- that is a real error:
+{roster}
+
 THE INTENDED ART STYLE IS:
 {style}
 
+Canonical reference sheets for some characters MAY be attached after the image (each labelled with the \
+character's name). When they are, use them to judge `figure_match` below.
+
 Judge the attached image. Return JSON only:
 {{
+  "physical": <1-5: ANATOMICAL AND PHYSICAL CORRECTNESS -- the single most important check. Is every \
+figure (people AND animals/creatures) well-formed -- correct number of fingers, hands, limbs and eyes, no \
+fused/extra/missing/malformed parts, no melted or distorted faces, no impossible joints or merged bodies -- \
+AND does the scene obey physical reality, with every figure and object properly supported and positioned \
+(nothing floating, defying gravity, badly out of scale, or passing through solid objects)? Score 1-2 for \
+any clear anatomical or physical defect, even on a small/background figure; 4 for minor awkwardness or \
+stiffness; 5 only when everything is well-formed and believably placed.>,
   "consistency": <1-5, do characters match their descriptions and look like coherent recurring characters?>,
+  "figure_match": <1-5: are the characters in the image the RIGHT individuals? Compare the foreground cast \
+to their attached reference sheets, AND check any background or secondary figure that is clearly meant to \
+be one of the named book characters listed above. Judge IDENTITY/species only, not minor variation: pose, \
+expression, camera angle, crop, lighting or slight shading is FINE and must still score 5. Score 1-2 if \
+ANY figure -- foreground OR background -- that is clearly a specific named character is the WRONG \
+person/creature or has a wrong core identity (e.g. a Talking Mouse drawn as a cat, a defining feature \
+missing/changed). Do NOT penalise generic unnamed extras (a random sailor, a crowd) who are not a specific \
+named character, and do NOT penalise minor differences. If there are no reference sheets AND no \
+recognisable named characters, score 5.>,
   "accuracy": <1-5, does the image faithfully depict the intended moment (per the brief AND the source \
 text), including every concrete physical state or action true at that moment -- BOUND / roped / hands \
 tied, kneeling, holding a named object, a stated number of people? Be strict: if such a detail is \
 stated in the brief or source but missing or wrong in the image, score at most 2 even if the picture \
 is otherwise nice.>,
-  "kid_appropriate": <1-5, warm, non-scary, no graphic violence/blood, young-child friendly?>,
   "style_ok": <1-5, matches the intended art style above?>,
   "no_stray_text": <1-5, is the image FREE of unwanted text? Score 5 if there is NO text, OR the only \
 text is something the scene genuinely calls for (a sign, a shop name, a book cover, a labelled object \
 that the brief or source text actually describes). Score 1-2 if there is gibberish lettering, a \
 watermark, floating words, captions, or fragments of the description/prompt rendered as text that the \
 story does not call for.>,
+  "wrong_figures": ["<the NAME of any character -- foreground OR background -- drawn as the WRONG \
+person/creature or with a wrong core identity (use the reference-sheet label, or the book character name \
+for a background figure); empty list if every recognisable figure is correct>"],
+  "drop_figures": ["<the NAME of any figure that is wrong or unwanted and would be EASIER to simply REMOVE \
+from the picture than to fix -- typically a background character NOT required by the brief or source text. \
+NEVER list anyone the brief or source actually calls for; leave empty unless removing the figure is clearly \
+the simpler fix>"],
   "issues": ["<short concrete problems>"],
   "fix_hint": "<one actionable sentence naming the single most important missing/wrong element to add or fix>"
 }}"""
+
+
+def roster_digest(registry: dict, max_each: int = 140) -> str:
+    """A compact text list of EVERY named character in the book (name + a short
+    canonical appearance), for the scene critic to recognise background/secondary
+    figures that aren't in this page's reference set -- so it can flag e.g. a
+    background Reepicheep drawn as a cat. Characters only (not settings/props),
+    ranked by importance. Cheap: text, no images."""
+    ents = [e for e in registry.get("entities", []) if e.get("type", "character") == "character"]
+    ents.sort(key=lambda e: -e.get("importance", 0))
+    lines = []
+    for e in ents:
+        app = " ".join((e.get("base_appearance") or "").split())
+        if len(app) > max_each:
+            app = app[:max_each].rsplit(" ", 1)[0] + "…"
+        name = e.get("name") or e.get("id")
+        lines.append(f"- {name}: {app}" if app else f"- {name}")
+    return "\n".join(lines) or "(none listed)"
 
 
 def log(msg):
@@ -155,8 +205,10 @@ def build_scene_prompt(spread: dict, members: list[dict], ref_members: list[dict
     return prompt
 
 
-def gen_scene(spread: dict, cast_index: dict, art_style: str, budget: gem.Budget) -> dict:
+def gen_scene(spread: dict, cast_index: dict, art_style: str, budget: gem.Budget,
+              registry: dict | None = None) -> dict:
     sid = spread["id"]
+    roster = roster_digest(registry or {"entities": []})
     members = scene_members(spread, cast_index)
     char_desc = "\n".join(f"- {m['name']}: {m['appearance']}" for m in members)
     # attach only the top-ranked references that actually have a sheet on disk
@@ -178,10 +230,10 @@ def gen_scene(spread: dict, cast_index: dict, art_style: str, budget: gem.Budget
         crit = gem.critique_image(
             cand, SCENE_CRITIQUE.format(brief=spread["illustration_brief"],
                                         source=(spread.get("read_text") or "")[:1200] or "(not available)",
-                                        chars=char_desc or "(none)", style=ART_STYLE))
-        score = min(crit.get("consistency", 0), crit.get("accuracy", 0),
-                    crit.get("kid_appropriate", 0), crit.get("style_ok", 0),
-                    crit.get("no_stray_text", 5))
+                                        chars=char_desc or "(none)", style=ART_STYLE, roster=roster),
+            refs=ref_paths, ref_labels=[m["name"] for m in ref_members])
+        score = min(crit.get("physical", 0), crit.get("consistency", 0), crit.get("accuracy", 0),
+                    crit.get("style_ok", 0), crit.get("no_stray_text", 5), crit.get("figure_match", 5))
         rec = {"path": cand, "score": score, "crit": crit, "attempt": attempt, "prompt": prompt}
         if best is None or score > best["score"]:
             best = rec
@@ -237,7 +289,8 @@ def main():
         f"(budget {budget.remaining()} left) ===")
     results = []
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        futs = {ex.submit(gen_scene, s, cast_index, art_style, budget): s["id"] for s in pending}
+        futs = {ex.submit(gen_scene, s, cast_index, art_style, budget, registry): s["id"]
+                for s in pending}
         for f in as_completed(futs):
             sid = futs[f]
             try:

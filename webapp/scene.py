@@ -61,7 +61,7 @@ def recompress_book(book_id) -> dict:
     return {"changed": changed, "before_kb": before // 1024, "after_kb": after // 1024,
             "saved_kb": (before - after) // 1024}
 from pipeline.run import (resolve_cast, scene_members, build_scene_prompt,
-                          SCENE_CRITIQUE, PASS_THRESHOLD)
+                          roster_digest, SCENE_CRITIQUE, PASS_THRESHOLD)
 from . import db
 
 SCENE_TRIES = int(os.environ.get("STORY_SCENE_TRIES", "3"))  # max image attempts per scene
@@ -501,39 +501,115 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                           "the whole exterior of those place(s) or their exterior-only identifying "
                           "features anywhere -- not even through a window or doorway, and never a "
                           "mirrored or doubled copy.")
-        best, fix, draft, cands = None, "", None, []
+        best, best_key, fix, draft, cands = None, None, "", None, []
+        to_replace, drop = [], []   # figures to img2img-replace / remove on next revise
         gen_id = db.next_gen_id(book_id, idx)   # debug history: this generation run
         trace = {"states": states, "max_tries": SCENE_TRIES, "attempts": []}
+
+        # Resolve a character NAME (as the critic names it) -> a labelled reference
+        # sheet path, drawing/fetching the sheet on demand. Lets a wrong BACKGROUND
+        # figure (not in this page's ref set) still be submitted for replacement.
+        reg_by_name = {(e.get("name") or e.get("id")): e for e in registry.get("entities", [])}
+        _name_sheet: dict = {}
+
+        def _sheet_for_name(name):
+            if name in _name_sheet:
+                return _name_sheet[name]
+            res = None
+            for mm, pp in zip(ref_members, ref_paths):   # already an attached cast reference?
+                if mm["name"] == name:
+                    res = (mm["entity_id"], pp)
+                    break
+            if res is None:
+                e = reg_by_name.get(name)
+                if e:
+                    eid = e["id"]
+                    data = db.get_any_sheet(book_id, eid)   # reuse any already-drawn variant
+                    if not data:                            # else draw the default once
+                        vid = (e.get("variants") or [{}])[0].get("id", "default")
+                        member = _member_for(registry, eid, vid)
+                        data = _ensure_sheet(book_id, member, style_text, style_ref=style_ref) if member else None
+                    if data:
+                        sp = Path(td) / f"fix_{eid}.webp"
+                        sp.write_bytes(data)
+                        res = (eid, sp)
+            _name_sheet[name] = res
+            return res
+
         for attempt in range(1, SCENE_TRIES + 1):
             mode = "revise" if draft is not None else "fresh"
             cand = Path(td) / f"cand{attempt}.webp"
             if draft is not None:
-                # REVISE: the last attempt was broadly right with one flagged defect.
-                # Edit that image (keep composition/characters/style, change only the
-                # defect) instead of regenerating -- preserves what worked and lets us
-                # actually land a specific fix (e.g. "their hands must be bound").
+                # REVISE (img2img): keep what worked, change only the flagged defects.
+                # Attach the draft as image 1, then labelled reference sheets -- the
+                # figures we must REPLACE first (incl. background characters, whose
+                # sheets are fetched/drawn on demand by _sheet_for_name), then the rest
+                # of the cast for consistency. Figures the critic asked to DROP are just
+                # removed (no sheet needed). Budget: MAX_REFS total incl. the draft.
+                sheet_refs, seen_ent = [], set()
+
+                def _add(name, ent, path):
+                    if ent not in seen_ent and len(sheet_refs) < MAX_REFS - 1:
+                        seen_ent.add(ent)
+                        sheet_refs.append((name, path))
+
+                for name in to_replace:
+                    got = _sheet_for_name(name)
+                    if got:
+                        _add(name, got[0], got[1])
+                for m, p in zip(ref_members, ref_paths):
+                    _add(m["name"], m["entity_id"], p)
+                label = {nm: i + 2 for i, (nm, _) in enumerate(sheet_refs)}
+                ref_lbls = ", ".join(f"image {label[nm]} = {nm}" for nm, _ in sheet_refs)
+                notes = []
+                rep = [n for n in to_replace if n in label]
+                if rep:
+                    named = "; ".join(f"{n} (image {label[n]})" for n in rep)
+                    notes.append(f"The figure(s) for {named} in the draft are the WRONG person/creature "
+                                 "-- REPLACE each so it matches its reference image exactly (face, build, "
+                                 "species, clothing), keeping its position and pose in the scene.")
+                if drop:
+                    notes.append("REMOVE these figures from the picture entirely -- it is fine to simply "
+                                 f"leave them out: {', '.join(drop)}.")
                 used_prompt = (f"{style_text}\n\nImage 1 is a DRAFT illustration that is almost right. "
                                f"Redraw it keeping its composition, characters, poses, setting and art "
-                               f"style the SAME, and change ONLY this: {fix}\n\n"
-                               f"The people must still match:\n{char_desc}{place_note}")
-                refs = ([draft] + ref_paths)[:MAX_REFS]
+                               f"style the SAME, and change ONLY what is noted: {fix}"
+                               + (f"\n\nReference sheets are attached ({ref_lbls}); keep every character "
+                                  "consistent with their reference." if ref_lbls else "")
+                               + ("\n\n" + " ".join(notes) if notes else "")
+                               + f"\n\nThe people must still match:\n{char_desc}{place_note}")
+                refs = [draft] + [p for _, p in sheet_refs]
                 gem.generate_image(used_prompt, refs=refs, out_path=cand, aspect="3:2",
                                    model=PAGE_IMAGE_MODEL)
             else:
                 used_prompt = build_scene_prompt(spread, members, ref_members, style_text, fix=fix) + place_note
                 gem.generate_image(used_prompt, refs=ref_paths, out_path=cand, aspect="3:2",
                                    model=PAGE_IMAGE_MODEL)
+            # give the critic the SAME roster sheets that were selected as references
+            # for this scene (to flag a foreground figure drawn as the wrong person),
+            # plus the full character roster as text (to flag background/secondary
+            # figures that aren't referenced -- e.g. Reepicheep drawn as a cat).
             crit = gem.critique_image(cand, SCENE_CRITIQUE.format(
                 brief=page["brief"], chars=char_desc or "(none)", style=style_text,
-                source=(page["read_text"] or "")[:1200] or "(not available)"))
-            keys = ("consistency", "accuracy", "kid_appropriate", "style_ok", "no_stray_text")
-            scores = [crit.get(k, 5 if k == "no_stray_text" else 0) for k in keys]
+                roster=roster_digest(registry),
+                source=(page["read_text"] or "")[:1200] or "(not available)"),
+                refs=ref_paths, ref_labels=[m["name"] for m in ref_members])
+            keys = ("physical", "consistency", "accuracy", "style_ok",
+                    "no_stray_text", "figure_match")
+            scores = [crit.get(k, 5 if k in ("no_stray_text", "figure_match") else 0) for k in keys]
             score = min(scores)
             avg = sum(scores) / len(scores)
+            # figures the critic flagged: replace the wrong ones (we fetch a sheet for
+            # each, foreground OR background), drop the ones it says to remove. A name
+            # in both -> drop wins (removing is the simpler fix).
+            wrong_all = [w for w in crit.get("wrong_figures", []) if isinstance(w, str) and w.strip()]
+            drop = [d for d in crit.get("drop_figures", []) if isinstance(d, str) and d.strip()]
+            to_replace = [w for w in wrong_all if w not in drop]
             data = cand.read_bytes()
             trace["attempts"].append({
                 "n": attempt, "mode": mode, "scores": dict(zip(keys, scores)),
                 "min": score, "avg": round(avg, 2),
+                "wrong_figures": wrong_all, "drop_figures": drop,
                 "issues": crit.get("issues", []), "fix_hint": crit.get("fix_hint", ""),
             })
             # debug history: keep EVERY candidate (even rejected) with its prompt + critique
@@ -541,14 +617,22 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                                  _compress(data, DEBUG_MAXW, DEBUG_QUALITY),
                                  json.dumps(crit), score, round(avg, 2))
             cands.append({"n": attempt, "path": cand, "data": data, "score": score})
-            if best is None or score > best[1]:
-                best = (data, score, attempt)
-            if score >= PASS_THRESHOLD:
+            # An image with a figure the critic named to replace/drop is not "done"
+            # even if its min-score clears the bar (the critic often docks a wrong
+            # BACKGROUND figure only to 4). Prefer a clean candidate over a flagged one,
+            # then higher score; and don't stop while something actionable remains.
+            actionable = bool(to_replace or drop)
+            key = (0 if actionable else 1, score)
+            if best is None or key > best_key:
+                best, best_key = (data, score, attempt), key
+            if score >= PASS_THRESHOLD and not actionable:
                 break
             fix = crit.get("fix_hint", "")
             # "very close" (broadly good, one weak spot) -> revise this image next
             # (img2img); otherwise (or if SCENE_REVISE is off) regenerate from scratch.
-            draft = cand if (SCENE_REVISE and avg >= REVISE_AVG) else None
+            # A wrong figure to replace or drop also routes to revise, so we can resubmit
+            # the roster sheet and instruct an in-place replacement / removal.
+            draft = cand if (SCENE_REVISE and (avg >= REVISE_AVG or actionable)) else None
 
         data, score, chosen = best
         # If nothing cleared the bar, don't just trust the min-score: let a vision

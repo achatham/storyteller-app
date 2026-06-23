@@ -152,11 +152,30 @@ def generate_image(prompt: str, refs: list[Path] | None = None, out_path: Path |
     return None
 
 
-def critique_image(image_path: Path, brief: str, schema: dict | None = None,
+def critique_image(image_path: Path, brief: str, refs: list[Path] | None = None,
+                   ref_labels: list[str] | None = None, schema: dict | None = None,
                    model: str = CRITIQUE_MODEL) -> dict:
-    """Vision-model critique of a generated image against its brief."""
+    """Vision-model critique of a generated image against its brief.
+
+    If `refs` are given they are attached AFTER the judged image as the canonical
+    reference sheets for the named characters (labelled, in order via `ref_labels`),
+    so the critic can check whether the figures in the image are actually the RIGHT
+    people -- catching a totally-wrong face -- rather than only matching them against
+    a text description."""
     from PIL import Image
-    contents = [brief, Image.open(image_path)]
+    contents = [brief]
+    if refs:
+        contents.append("THE IMAGE TO JUDGE:")
+    contents.append(Image.open(image_path))
+    if refs:
+        contents.append(
+            "CANONICAL CHARACTER REFERENCE SHEETS follow -- each shows what one named "
+            "character is supposed to look like. Compare the figures in the image above "
+            "against them to judge `figure_match`:")
+        for i, r in enumerate(refs):
+            label = ref_labels[i] if ref_labels and i < len(ref_labels) else f"character {i + 1}"
+            contents.append(f"--- Reference: {label} ---")
+            contents.append(Image.open(r))
     cfg = types.GenerateContentConfig(
         response_mime_type="application/json",
         response_schema=schema,
