@@ -239,7 +239,29 @@ async function prev(){
   if (page > 0){ sweep("back"); goPage(page-1); }
   else if (CH > 0) await loadChapter(CH-1, -1);
 }
-function save(){ try{ localStorage.setItem(LKEY, JSON.stringify({ch:CH, page})); }catch(e){} }
+function save(){ try{ localStorage.setItem(LKEY, JSON.stringify({ch:CH, page})); }catch(e){} reportProgress(); }
+
+// The library progress bar keys off the server-side global page index
+// (position / num_pages). This view paginates by chapter + reflowed page, so map
+// the current spot onto that index: chapter start + how far through the chapter we
+// are. Debounced so a flurry of page turns is one write.
+let progT = null;
+function reportProgress(){
+  if (!META || !META.num_pages) return;
+  const chs = META.chapters || [];
+  const i = chs.findIndex(c => c.idx === CH);
+  if (i < 0) return;
+  const start = chs[i].first_page || 0;
+  const end = (i + 1 < chs.length) ? (chs[i + 1].first_page || META.num_pages) : META.num_pages;
+  const span = Math.max(1, end - start);
+  const frac = pages > 1 ? page / (pages - 1) : 1;     // 0 at chapter start, 1 at its last page
+  const pos = Math.min(META.num_pages - 1, Math.max(0, Math.round(start + frac * (span - 1))));
+  clearTimeout(progT);
+  progT = setTimeout(() => {
+    fetch(API + "/progress", {method:"PUT", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({position:pos})}).catch(()=>{});
+  }, 600);
+}
 
 // nav: tap zones + swipe + keys
 let tx=null, ty=null, moved=false;
