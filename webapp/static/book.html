@@ -82,6 +82,12 @@
   #splash { position:fixed; inset:0; z-index:60; background:var(--bg); display:flex; align-items:center;
           justify-content:center; font-family:system-ui,sans-serif; color:var(--muted); }
   #splash[hidden]{ display:none; }
+  #flow figure img.on { cursor:zoom-in; }
+  #zoom { position:fixed; inset:0; z-index:70; background:rgba(20,16,12,.94); display:flex;
+          align-items:center; justify-content:center; cursor:zoom-out; animation:zfade .18s ease; }
+  #zoom[hidden]{ display:none; }
+  #zoom img { max-width:100%; max-height:100%; object-fit:contain; }
+  @keyframes zfade { from{ opacity:0; } to{ opacity:1; } }
 </style>
 </head><body>
 <div id="viewport"><div id="flow"></div></div>
@@ -103,6 +109,7 @@
   <button id="closebook">&#10005; Close book</button>
   <button id="close">Close menu</button>
 </div></div>
+<div id="zoom" hidden><img alt=""></div>
 <div id="splash">Loading…</div>
 <script>
 const BOOK_ID = __BOOK_ID__;
@@ -268,17 +275,25 @@ let tx=null, ty=null, moved=false;
 document.addEventListener("touchstart", e=>{ tx=e.touches[0].clientX; ty=e.touches[0].clientY; moved=false; }, {passive:true});
 document.addEventListener("touchmove", e=>{ if(tx!==null && (Math.abs(e.touches[0].clientX-tx)>10||Math.abs(e.touches[0].clientY-ty)>10)) moved=true; }, {passive:true});
 document.addEventListener("touchend", e=>{ if(tx===null) return; const dx=e.changedTouches[0].clientX-tx, dy=e.changedTouches[0].clientY-ty; tx=null;
+  if(!$("#zoom").hidden) return;   // no page turns while an image is zoomed
   if(Math.abs(dx)>50 && Math.abs(dx)>Math.abs(dy)){ moved=true; dx<0?next():prev(); } }, {passive:true});
+// tapping a loaded image blows it up to fullscreen; tap again to return
+function openZoom(im){ const z=$("#zoom"); const zi=z.firstElementChild;
+  zi.src = im.currentSrc || im.src; zi.alt = im.alt || ""; z.hidden = false; }
+function closeZoom(){ const z=$("#zoom"); z.hidden = true; z.firstElementChild.removeAttribute("src"); }
 document.addEventListener("click", e=>{
   if(moved){ moved=false; return; }
+  if(!$("#zoom").hidden){ closeZoom(); return; }   // any tap while zoomed = back
   if(!$("#menu").hidden) return;
+  const img = e.target.closest("#flow figure img.on");
+  if(img){ openZoom(img); return; }                // don't turn the page on an image tap
   if(e.target.closest("#menuBtn,#menu")) return;
   (e.clientX/window.innerWidth < 0.5) ? prev() : next();
 });
 document.addEventListener("keydown", e=>{
   if(e.key==="ArrowRight"||e.key===" "){ next(); e.preventDefault(); }
   if(e.key==="ArrowLeft") prev();
-  if(e.key==="Escape") $("#menu").hidden=true;
+  if(e.key==="Escape"){ if(!$("#zoom").hidden) closeZoom(); else $("#menu").hidden=true; }
 });
 
 $("#menuBtn").onclick = e=>{ e.stopPropagation(); $("#menu").hidden=false; };
