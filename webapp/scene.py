@@ -17,8 +17,17 @@ from pathlib import Path
 from PIL import Image
 
 from pipeline import gem, costs
-from pipeline.config import (STYLES, SHEET_IMAGE_MODEL, PAGE_IMAGE_MODEL, MAX_REFS, ANALYZE_MODEL,
-                             WEBP_QUALITY, SCENE_MAXW)
+from pipeline.config import (STYLES, SHEET_IMAGE_MODEL, PAGE_IMAGE_MODEL, LITE_IMAGE_MODEL, MAX_REFS,
+                             ANALYZE_MODEL, WEBP_QUALITY, SCENE_MAXW)
+
+# The image models offered for a manual roster-sheet correction, keyed by the short
+# name the roster UI sends. "pro" is the high-fidelity sheet model; "lite" is the new
+# cheap/fast "nano banana lite". Order here is the order the radio buttons render in.
+EDIT_MODELS = {
+    "pro": SHEET_IMAGE_MODEL,     # gemini-3-pro-image-preview  (Nano Banana Pro)
+    "flash": PAGE_IMAGE_MODEL,    # gemini-3.1-flash-image
+    "lite": LITE_IMAGE_MODEL,     # gemini-3.1-flash-lite-image (Nano Banana Lite)
+}
 
 # Debug-history candidates are review-only -> compress them harder than display art.
 DEBUG_MAXW = int(os.environ.get("STORY_DEBUG_MAXW", "960"))
@@ -361,6 +370,48 @@ def regenerate_sheet(book_id, entity_id, variant_id) -> dict:
         else:
             data = _ensure_sheet(book_id, member, style_text, style_ref=style_ref)
     return {"ok": bool(data)}
+
+
+def edit_sheet(book_id, entity_id, variant_id, instruction, model_key="pro") -> dict:
+    """Apply a user's written correction to one roster sheet as an img2img edit:
+    keep the same subject/identity/style, change ONLY what the instruction asks, then
+    replace the cached sheet. `model_key` picks the image model (see EDIT_MODELS)."""
+    instruction = (instruction or "").strip()
+    if not instruction:
+        return {"ok": False, "error": "empty instruction"}
+    model = EDIT_MODELS.get(model_key)
+    if not model:
+        return {"ok": False, "error": f"unknown model '{model_key}'"}
+    book = db.get_book(book_id)
+    if not book:
+        return {"ok": False, "error": "no such book"}
+    current = db.get_sheet(book_id, entity_id, variant_id)
+    if not current:
+        return {"ok": False, "error": "sheet not drawn yet"}
+    registry = db.get_registry(book_id)
+    member = _member_for(registry, entity_id, variant_id) if registry else None
+    style_text = _style_text(book["style"])
+    aspect = "2:3" if (member or {}).get("type", "character") == "character" else "3:2"
+    appearance = (member or {}).get("appearance", "")
+    with costs.run_as(f"book:{book_id}"), tempfile.TemporaryDirectory() as td:
+        ref = Path(td) / "current.webp"
+        ref.write_bytes(current)
+        prompt = (f"{style_text}\n\nImage 1 is the CURRENT reference sheet for this subject. "
+                  f"Redraw it keeping the SAME subject, facial identity, art style, framing and "
+                  f"plain neutral background, and change ONLY this, as requested: {instruction}"
+                  + (f"\n\nFor reference, the subject is: {appearance}" if appearance else "")
+                  + "\nKeep EXACTLY ONE subject, drawn once, even lighting, no text labels.")
+        try:
+            data = _gen_to_bytes(prompt, [ref], model, aspect)
+        except Exception as ex:  # noqa: BLE001
+            print(f"[scene] sheet edit {entity_id}/{variant_id} failed: {ex}", flush=True)
+            return {"ok": False, "error": str(ex)}
+    data = _compress(data, 0, WEBP_QUALITY)   # sheets feed generation -> keep resolution
+    db.save_sheet(book_id, entity_id, variant_id, data)
+    _save_sheet_history(book_id, entity_id, variant_id, f"EDIT ({model}): {instruction}",
+                        {"attempts": [{"attempt": 1, "prompt": prompt, "data": data,
+                                       "critique": None, "min": None, "avg": None}], "chosen": 1})
+    return {"ok": True, "model": model}
 
 
 def generate_scene(book_id: int, idx: int) -> bytes:

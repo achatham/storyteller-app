@@ -34,6 +34,37 @@
   .vlabel { font-family:system-ui,sans-serif; font-size:.8rem; text-transform:capitalize; }
   .vwhen { font-family:system-ui,sans-serif; font-size:.7rem; color:var(--muted); }
   .legend { font-family:system-ui,sans-serif; font-size:.8rem; color:var(--muted); margin-top:6px; }
+  .editbtn { font-family:system-ui,sans-serif; font-size:.72rem; color:var(--accent); background:none;
+             border:1px solid var(--line); border-radius:20px; padding:3px 10px; cursor:pointer;
+             align-self:flex-start; }
+  .editbtn:hover { background:#fff; }
+  #ov { position:fixed; inset:0; z-index:50; background:rgba(0,0,0,.45); display:flex;
+        align-items:center; justify-content:center; padding:16px; font-family:system-ui,sans-serif; }
+  #ov[hidden]{ display:none; }
+  .dlg { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:20px;
+         width:min(460px,94vw); max-height:92vh; overflow:auto; display:flex; flex-direction:column; gap:14px;
+         box-shadow:0 14px 44px rgba(0,0,0,.34); }
+  .dlg h3 { margin:0; font-family:Georgia,serif; font-size:1.15rem; }
+  .dlg .who { color:var(--muted); font-size:.8rem; margin-top:-8px; }
+  .dlg .prev { aspect-ratio:3/4; max-height:220px; align-self:center; border:1px solid var(--line);
+               border-radius:10px; overflow:hidden; background:var(--bg); }
+  .dlg .prev img { height:100%; width:auto; display:block; }
+  .dlg textarea { font:inherit; font-size:.95rem; padding:10px; border-radius:9px; border:1px solid var(--line);
+                  background:var(--bg); color:var(--ink); resize:vertical; min-height:74px; }
+  .dlg .flabel { font-size:.68rem; letter-spacing:1px; text-transform:uppercase; color:var(--muted); }
+  .models { display:flex; flex-wrap:wrap; gap:8px; }
+  .models label { display:flex; align-items:center; gap:6px; border:1px solid var(--line); border-radius:9px;
+                  padding:8px 11px; cursor:pointer; font-size:.9rem; background:var(--bg); }
+  .models label:has(input:checked) { border-color:var(--accent); background:#fbf6ee; color:var(--accent); }
+  .models small { color:var(--muted); font-size:.7rem; }
+  .row { display:flex; gap:10px; }
+  .dlg button.go, .dlg button.cancel { font:inherit; font-size:1rem; padding:10px; border-radius:9px;
+         border:1px solid var(--line); cursor:pointer; flex:1; }
+  .dlg button.go { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .dlg button.go:disabled { opacity:.55; cursor:default; }
+  .dlg button.cancel { background:var(--bg); color:var(--ink); }
+  .dlg .status { font-size:.82rem; color:var(--muted); min-height:1em; }
+  .dlg .status.err { color:#9b3d2e; }
 </style>
 </head><body>
 <header>
@@ -42,6 +73,24 @@
   <div class="sub" id="sub"></div>
 </header>
 <main id="main"></main>
+<div id="ov" hidden><div class="dlg">
+  <h3>Suggest an edit</h3>
+  <div class="who" id="ovwho"></div>
+  <div class="prev"><img id="ovimg" alt=""></div>
+  <div class="flabel">What should change?</div>
+  <textarea id="ovtext" placeholder="e.g. make her hair red, not blonde; remove the second sword; give him a green cloak"></textarea>
+  <div class="flabel">Model</div>
+  <div class="models">
+    <label><input type="radio" name="ovmodel" value="pro" checked> Pro <small>Nano Banana Pro · best</small></label>
+    <label><input type="radio" name="ovmodel" value="flash"> Flash <small>faster</small></label>
+    <label><input type="radio" name="ovmodel" value="lite"> Lite <small>Nano Banana Lite · fastest</small></label>
+  </div>
+  <div class="status" id="ovstatus"></div>
+  <div class="row">
+    <button class="cancel" id="ovcancel">Cancel</button>
+    <button class="go" id="ovgo">Render fix</button>
+  </div>
+</div></div>
 <script>
 const ID = __BOOK_ID__;
 const $ = s => document.querySelector(s);
@@ -60,8 +109,9 @@ $("#back").href = "/settings/" + ID;
       <div class="vgrid">
         ${e.variants.map(v => v.drawn ? `
           <div class="vcard">
-            <div class="frame"><img loading="lazy" src="/api/books/${ID}/sheet/${enc(e.entity_id)}/${enc(v.variant_id)}?v=${b.seg_ver}" alt="${esc(v.label)}"></div>
+            <div class="frame"><img loading="lazy" id="sheet-${esc(e.entity_id)}-${esc(v.variant_id)}" src="/api/books/${ID}/sheet/${enc(e.entity_id)}/${enc(v.variant_id)}?v=${b.seg_ver}" alt="${esc(v.label)}"></div>
             <div class="vlabel">${esc(v.label)}</div>${v.when?`<div class="vwhen">${esc(v.when)}</div>`:""}
+            <button class="editbtn" data-eid="${esc(e.entity_id)}" data-vid="${esc(v.variant_id)}" data-name="${esc(e.name)} — ${esc(v.label)}">&#9998; Suggest edit</button>
           </div>` : `
           <div class="vcard">
             <div class="frame placeholder">
@@ -76,5 +126,54 @@ $("#back").href = "/settings/" + ID;
 })();
 function esc(s){ return (s||"").replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function enc(s){ return encodeURIComponent(s); }
+
+// --- sheet correction editor ---
+let cur = null;   // { eid, vid } being edited
+function sheetUrl(eid, vid){ return `/api/books/${ID}/sheet/${enc(eid)}/${enc(vid)}`; }
+function openEditor(eid, vid, name){
+  cur = { eid, vid };
+  $("#ovwho").textContent = name;
+  $("#ovtext").value = "";
+  $("#ovimg").src = sheetUrl(eid, vid) + "?t=" + Date.now();
+  setStatus("");
+  $("#ovgo").disabled = false;
+  $("#ov").hidden = false;
+  $("#ovtext").focus();
+}
+function closeEditor(){ $("#ov").hidden = true; cur = null; }
+function setStatus(msg, err){ const s = $("#ovstatus"); s.textContent = msg || ""; s.classList.toggle("err", !!err); }
+
+async function submitEdit(){
+  if (!cur) return;
+  const instruction = $("#ovtext").value.trim();
+  if (!instruction){ setStatus("Describe what to change first.", true); return; }
+  const model = document.querySelector('input[name="ovmodel"]:checked').value;
+  $("#ovgo").disabled = true;
+  setStatus("Rendering… this can take up to a minute.");
+  try {
+    const r = await fetch(sheetUrl(cur.eid, cur.vid) + "/edit", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({ instruction, model }) });
+    if (!r.ok){ const e = await r.json().catch(()=>({})); throw new Error(e.detail || ("HTTP "+r.status)); }
+    const bust = "?t=" + Date.now();
+    $("#ovimg").src = sheetUrl(cur.eid, cur.vid) + bust;   // refresh preview
+    const card = document.getElementById(`sheet-${cur.eid}-${cur.vid}`);
+    if (card) card.src = sheetUrl(cur.eid, cur.vid) + bust; // refresh the roster thumbnail
+    setStatus("Done — updated. Edit again or close.");
+  } catch (ex) {
+    setStatus("Failed: " + ex.message, true);
+  } finally {
+    $("#ovgo").disabled = false;
+  }
+}
+
+document.addEventListener("click", e => {
+  const b = e.target.closest(".editbtn");
+  if (b){ openEditor(b.dataset.eid, b.dataset.vid, b.dataset.name); return; }
+  if (e.target === $("#ov")) closeEditor();
+});
+$("#ovcancel").onclick = closeEditor;
+$("#ovgo").onclick = submitEdit;
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#ov").hidden) closeEditor(); });
 </script>
 </body></html>

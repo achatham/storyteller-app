@@ -512,6 +512,24 @@ async def api_sheet_redraw(book_id: int, entity_id: str, variant_id: str):
     return res
 
 
+@app.post("/api/books/{book_id}/sheet/{entity_id}/{variant_id}/edit")
+async def api_sheet_edit(book_id: int, entity_id: str, variant_id: str, body: dict):
+    """Apply a written correction to one roster sheet, re-rendered with the chosen
+    image model, and replace the cached sheet. Body: {instruction, model}."""
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    instruction = (body.get("instruction") or "").strip()
+    if not instruction:
+        raise HTTPException(400, "instruction required")
+    model_key = body.get("model") or "pro"
+    async with _sem:
+        res = await asyncio.to_thread(scene.edit_sheet, book_id, entity_id, variant_id,
+                                      instruction, model_key)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error", "edit failed"))
+    return res
+
+
 @app.get("/api/books/{book_id}/pages/{idx}/history")
 def api_scene_history(book_id: int, idx: int):
     """Full generation history for one page: every run, every attempt (prompt +

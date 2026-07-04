@@ -179,6 +179,9 @@ ART_STYLE = STYLES[STYLE]
 # the many per-page SCENE illustrations use the cheaper "flash" model.
 SHEET_IMAGE_MODEL = os.environ.get("STORY_SHEET_IMAGE_MODEL", "gemini-3-pro-image-preview")
 PAGE_IMAGE_MODEL = os.environ.get("STORY_PAGE_IMAGE_MODEL", "gemini-3.1-flash-image")
+# "Nano Banana Lite": the cheapest/fastest image model, offered as a manual
+# choice for roster-sheet correction edits (not used in the automatic pipeline).
+LITE_IMAGE_MODEL = os.environ.get("STORY_LITE_IMAGE_MODEL", "gemini-3.1-flash-lite-image")
 # general default (used when a caller doesn't specify) = the page model
 IMAGE_MODEL = os.environ.get("STORY_IMAGE_MODEL", PAGE_IMAGE_MODEL)
 TEXT_MODEL = os.environ.get("STORY_TEXT_MODEL", "gemini-3.5-flash")

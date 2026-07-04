@@ -49,6 +49,7 @@ PRICING = {
     "gemini-3-pro-image-preview":  {"in": 2.00, "out": 120.00},  # pro image: ~$0.134/1K-2K img
     "gemini-3.1-flash-image":      {"in": 0.50, "out": 60.00},   # flash image: ~$0.067/1K img
     "gemini-3.1-flash-image-preview": {"in": 0.50, "out": 60.00},
+    "gemini-3.1-flash-lite-image": {"in": 0.30, "out": 40.00},   # "nano banana lite" (estimated)
     "gemini-2.5-flash-image":      {"in": 0.30, "out": 30.00},   # older flash: ~$0.039/img
 }
 DEFAULT_PRICE = {"in": 0.0, "out": 0.0}
