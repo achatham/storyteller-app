@@ -41,6 +41,12 @@ character bound or roped, holding something, a wound, who is present). Do NOT pe
 not showing dialogue, inner thoughts, or other moments elsewhere on the page:
 {source}
 
+WHAT HAPPENS LATER IN THIS CHAPTER (the text that comes AFTER this moment -- the young reader has \
+NOT reached it yet; it tells you WHERE in the chapter this moment sits). The illustration accompanies \
+ONLY the moment above and must NOT depict, reveal or foreshadow anything that happens solely in the text \
+below -- doing so SPOILS a later surprise, reveal, arrival, death or transformation for the child:
+{chapter_ahead}
+
 CHARACTERS THAT SHOULD APPEAR (must match these descriptions):
 {chars}
 
@@ -87,6 +93,11 @@ text is something the scene genuinely calls for (a sign, a shop name, a book cov
 that the brief or source text actually describes). Score 1-2 if there is gibberish lettering, a \
 watermark, floating words, captions, or fragments of the description/prompt rendered as text that the \
 story does not call for.>,
+  "no_spoiler": <1-5: does the image avoid SPOILING anything that only happens LATER in this chapter \
+(see "WHAT HAPPENS LATER" above)? Score 5 if the picture depicts only the CURRENT moment and gives away \
+nothing from the text that comes after it. Score 1-2 if it depicts, reveals or foreshadows a later event, \
+reveal, a character's fate, a hidden identity, a transformation, or the arrival/appearance of someone or \
+something not yet present at THIS moment. If there is no later text, score 5.>,
   "wrong_figures": ["<the NAME of any character -- foreground OR background -- drawn as the WRONG \
 person/creature or with a wrong core identity (use the reference-sheet label, or the book character name \
 for a background figure); empty list if every recognisable figure is correct>"],
@@ -230,10 +241,12 @@ def gen_scene(spread: dict, cast_index: dict, art_style: str, budget: gem.Budget
         crit = gem.critique_image(
             cand, SCENE_CRITIQUE.format(brief=spread["illustration_brief"],
                                         source=(spread.get("read_text") or "")[:1200] or "(not available)",
+                                        chapter_ahead="(not available)",
                                         chars=char_desc or "(none)", style=ART_STYLE, roster=roster),
             refs=ref_paths, ref_labels=[m["name"] for m in ref_members])
         score = min(crit.get("physical", 0), crit.get("consistency", 0), crit.get("accuracy", 0),
-                    crit.get("style_ok", 0), crit.get("no_stray_text", 5), crit.get("figure_match", 5))
+                    crit.get("style_ok", 0), crit.get("no_stray_text", 5), crit.get("figure_match", 5),
+                    crit.get("no_spoiler", 5))
         rec = {"path": cand, "score": score, "crit": crit, "attempt": attempt, "prompt": prompt}
         if best is None or score > best["score"]:
             best = rec

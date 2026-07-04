@@ -74,6 +74,9 @@ from pipeline.run import (resolve_cast, scene_members, build_scene_prompt,
 from . import db
 
 SCENE_TRIES = int(os.environ.get("STORY_SCENE_TRIES", "3"))  # max image attempts per scene
+# Critic sub-score weights in the averaged quality score: anatomical correctness
+# and not-spoiling-later-in-the-chapter matter twice as much as the rest.
+SCORE_WEIGHTS = {"physical": 2, "no_spoiler": 2}
 # revise a broadly-good near-miss (img2img edit) vs always regenerate from scratch
 SCENE_REVISE = os.environ.get("STORY_SCENE_REVISE", "1") != "0"
 REVISE_AVG = 3.5  # a failed candidate averaging this high gets revised (when SCENE_REVISE)
@@ -450,6 +453,20 @@ def _character_states(brief: str, source: str, members: list) -> dict:
         return {}
 
 
+def _chapter_ahead(book_id: int, page: dict) -> str:
+    """The text of the rest of THIS chapter after the current page, plus where in
+    the chapter we are -- given to the critic so it can flag an illustration that
+    spoils a not-yet-reached reveal. Capped for the token budget."""
+    chap = [p for p in db.get_pages(book_id) if p["chapter_idx"] == page["chapter_idx"]]
+    chap.sort(key=lambda p: p["idx"])
+    pos = next((k for k, p in enumerate(chap) if p["idx"] == page["idx"]), 0)
+    ahead = "\n\n".join(p["read_text"] for p in chap
+                        if p["idx"] > page["idx"] and p.get("read_text"))
+    if not ahead.strip():
+        return "(This is the final moment of the chapter -- there is nothing later to spoil.)"
+    return f"(This is moment {pos + 1} of {len(chap)} in the chapter.)\n\n{ahead}"[:3200]
+
+
 def _render_scene(book_id: int, idx: int) -> bytes:
     book = db.get_book(book_id)
     page = db.get_page(book_id, idx)
@@ -457,6 +474,7 @@ def _render_scene(book_id: int, idx: int) -> bytes:
         raise ValueError(f"no page {idx} for book {book_id}")
     registry = db.get_registry(book_id)
     chapter_cast = db.get_chapter_cast(book_id, page["chapter_idx"])
+    chapter_ahead = _chapter_ahead(book_id, page)   # spoiler context for the critic
     style_text = _style_text(book["style"])
 
     cast_index = resolve_cast({"cast": chapter_cast}, registry)
@@ -642,14 +660,18 @@ def _render_scene(book_id: int, idx: int) -> bytes:
             # figures that aren't referenced -- e.g. Reepicheep drawn as a cat).
             crit = gem.critique_image(cand, SCENE_CRITIQUE.format(
                 brief=page["brief"], chars=char_desc or "(none)", style=style_text,
-                roster=roster_digest(registry),
+                roster=roster_digest(registry), chapter_ahead=chapter_ahead,
                 source=(page["read_text"] or "")[:1200] or "(not available)"),
                 refs=ref_paths, ref_labels=[m["name"] for m in ref_members])
             keys = ("physical", "consistency", "accuracy", "style_ok",
-                    "no_stray_text", "figure_match")
-            scores = [crit.get(k, 5 if k in ("no_stray_text", "figure_match") else 0) for k in keys]
-            score = min(scores)
-            avg = sum(scores) / len(scores)
+                    "no_stray_text", "figure_match", "no_spoiler")
+            scores = [crit.get(k, 5 if k in ("no_stray_text", "figure_match", "no_spoiler") else 0)
+                      for k in keys]
+            score = min(scores)   # a bad anatomy OR spoiler can still veto the image
+            # anatomical correctness (`physical`) and spoiler-avoidance (`no_spoiler`) count
+            # DOUBLE the other attributes in the averaged quality score (revise/best-of).
+            weights = [SCORE_WEIGHTS.get(k, 1) for k in keys]
+            avg = sum(s * w for s, w in zip(scores, weights)) / sum(weights)
             # figures the critic flagged: replace the wrong ones (we fetch a sheet for
             # each, foreground OR background), drop the ones it says to remove. A name
             # in both -> drop wins (removing is the simpler fix).
