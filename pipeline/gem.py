@@ -163,31 +163,45 @@ def critique_image(image_path: Path, brief: str, refs: list[Path] | None = None,
     people -- catching a totally-wrong face -- rather than only matching them against
     a text description."""
     from PIL import Image
-    contents = [brief]
-    if refs:
-        contents.append("THE IMAGE TO JUDGE:")
-    contents.append(Image.open(image_path))
-    if refs:
-        contents.append(
-            "CANONICAL CHARACTER REFERENCE SHEETS follow -- each shows what one named "
-            "character is supposed to look like. Compare the figures in the image above "
-            "against them to judge `figure_match`:")
-        for i, r in enumerate(refs):
-            label = ref_labels[i] if ref_labels and i < len(ref_labels) else f"character {i + 1}"
-            contents.append(f"--- Reference: {label} ---")
-            contents.append(Image.open(r))
     cfg = types.GenerateContentConfig(
         response_mime_type="application/json",
         response_schema=schema,
         temperature=0.3,
     )
 
-    def _go():
+    def _build(use_refs: bool) -> list:
+        contents = [brief]
+        if use_refs and refs:
+            contents.append("THE IMAGE TO JUDGE:")
+        contents.append(Image.open(image_path))
+        if use_refs and refs:
+            contents.append(
+                "CANONICAL CHARACTER REFERENCE SHEETS follow -- each shows what one named "
+                "character is supposed to look like. Compare the figures in the image above "
+                "against them to judge `figure_match`:")
+            for i, r in enumerate(refs):
+                label = ref_labels[i] if ref_labels and i < len(ref_labels) else f"character {i + 1}"
+                contents.append(f"--- Reference: {label} ---")
+                contents.append(Image.open(r))
+        return contents
+
+    def _go(contents):
         resp = _client.models.generate_content(model=model, contents=contents, config=cfg)
         _record_usage(resp, model, "critique")
         return _coerce_json(resp.text)
 
-    return _retry(_go, what="critique")
+    try:
+        return _retry(lambda: _go(_build(True)), what="critique")
+    except Exception:
+        # A multi-image critique (judged image + several reference sheets) occasionally
+        # comes back empty/blocked where the single-image call succeeds. Rather than
+        # fail the page, fall back to judging the image alone -- we lose only the
+        # reference-based `figure_match` fidelity (it scores leniently without sheets).
+        if not refs:
+            raise
+        print(f"[gem] critique with {len(refs)} refs failed after retries; "
+              "retrying image-only", flush=True)
+        return _retry(lambda: _go(_build(False)), what="critique(image-only)")
 
 
 def judge_images(image_paths: list[Path], prompt: str, schema: dict | None = None,
