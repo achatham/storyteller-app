@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storyteller — reading history</title>
+<link rel="manifest" href="/static/manifest.webmanifest" crossorigin="use-credentials">
+<meta name="theme-color" content="#7a5c3e">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Storyteller">
+<style>
+  :root { --bg:#f4efe6; --ink:#2b2622; --muted:#9a8a70; --panel:#fffdf8; --line:#e0d4bd; --accent:#7a5c3e; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font-family:Georgia,'Times New Roman',serif; }
+  header { padding:28px 24px 8px; }
+  h1 { margin:0; font-size:2rem; }
+  .sub { color:var(--muted); font-family:system-ui,sans-serif; font-size:.9rem; }
+  main { max-width:760px; margin:0 auto; padding:16px 24px 60px; }
+  a.back { font-family:system-ui,sans-serif; font-size:.85rem; color:var(--accent); text-decoration:none; }
+  .day { font-family:system-ui,sans-serif; font-size:.72rem; letter-spacing:.5px; text-transform:uppercase;
+         color:var(--muted); margin:22px 0 8px; }
+  .sess { display:flex; align-items:baseline; gap:12px; background:var(--panel); border:1px solid var(--line);
+          border-radius:12px; padding:12px 16px; margin-bottom:8px; text-decoration:none; color:inherit; }
+  .sess:hover { border-color:var(--accent); }
+  .time { font-family:system-ui,sans-serif; font-size:.8rem; color:var(--muted); white-space:nowrap;
+          min-width:74px; }
+  .body { flex:1; min-width:0; }
+  .title { font-size:1.05rem; }
+  .detail { font-family:system-ui,sans-serif; font-size:.82rem; color:var(--muted); margin-top:2px; }
+  .barwrap { height:4px; background:var(--bg); border-radius:3px; overflow:hidden; margin-top:6px; }
+  .bar { height:100%; background:var(--accent); }
+  .empty { color:var(--muted); font-family:system-ui,sans-serif; padding:24px 0; }
+</style>
+</head><body>
+<header>
+  <h1>📖 Reading history</h1>
+  <div class="sub"><a class="back" href="/">← Library</a></div>
+</header>
+<main><div id="list"><div class="empty">Loading…</div></div></main>
+<script>
+const $ = s => document.querySelector(s);
+
+function fmtTime(t){
+  return new Date(t*1000).toLocaleTimeString([], {hour:"numeric", minute:"2-digit"});
+}
+function dayLabel(t){
+  const d = new Date(t*1000), now = new Date();
+  const midnight = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((midnight(now) - midnight(d)) / 86400000);
+  if (days === 0) return "Today";
+  if (days === 1) return "Yesterday";
+  return d.toLocaleDateString([], {weekday:"long", month:"long", day:"numeric"});
+}
+function dur(a, b){
+  const s = Math.round(b - a);
+  if (s < 90) return "";
+  const m = Math.round(s / 60);
+  return m < 60 ? `${m} min` : `${Math.floor(m/60)}h ${m%60}m`;
+}
+
+function sessionRow(s){
+  // positions are 0-based global page indexes; show them 1-based
+  const from = s.start_pos + 1, to = s.end_pos + 1;
+  const lo = Math.min(from, to), hi = Math.max(from, to);
+  const pages = lo === hi ? `page ${lo}` : `pages ${lo}–${hi}`;
+  const pct = s.num_pages ? Math.round(to / s.num_pages * 100) : 0;
+  const d = dur(s.started_at, s.updated_at);
+  const meta = [pages, s.num_pages ? `${pct}%` : "", d].filter(Boolean).join(" · ");
+  return `<a class="sess" href="/book/${s.book_id}">
+    <span class="time">${fmtTime(s.updated_at)}</span>
+    <span class="body">
+      <div class="title">${s.title || "Untitled"}</div>
+      <div class="detail">${meta}</div>
+      ${s.num_pages ? `<div class="barwrap"><div class="bar" style="width:${pct}%"></div></div>` : ""}
+    </span>
+  </a>`;
+}
+
+async function load(){
+  let rows;
+  try {
+    const r = await fetch("/api/history", {cache:"no-store"});
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    rows = await r.json();
+  } catch(e){
+    $("#list").innerHTML = `<div class="empty">⚠ Couldn't load history.</div>`;
+    return;
+  }
+  if (!rows.length){
+    $("#list").innerHTML = `<div class="empty">Nothing read yet — open a book to start tracking.</div>`;
+    return;
+  }
+  let html = "", curDay = null;
+  for (const s of rows){
+    const day = dayLabel(s.updated_at);
+    if (day !== curDay){ html += `<div class="day">${day}</div>`; curDay = day; }
+    html += sessionRow(s);
+  }
+  $("#list").innerHTML = html;
+}
+load();
+</script>
+</body></html>

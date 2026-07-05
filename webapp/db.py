@@ -146,6 +146,20 @@ CREATE TABLE IF NOT EXISTS progress (
     position   INTEGER,
     updated_at REAL
 );
+-- reading history: one row per reading *session* (a stretch of reading with no
+-- big gap). Progress reports arrive debounced every page turn; instead of a row
+-- per report we coalesce consecutive reports on the same book into one session
+-- (start/end position + first/last time + how many turns).
+CREATE TABLE IF NOT EXISTS reading_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id     INTEGER REFERENCES books(id) ON DELETE CASCADE,
+    started_at  REAL,
+    updated_at  REAL,
+    start_pos   INTEGER,
+    end_pos     INTEGER,
+    events      INTEGER DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS reading_log_book ON reading_log(book_id, updated_at);
 """
 
 
@@ -732,3 +746,43 @@ def get_progress(book_id) -> int:
         r = c.execute("SELECT position FROM progress WHERE book_id=?",
                       (book_id,)).fetchone()
         return r["position"] if r else 0
+
+
+# ---------------- reading history ----------------
+
+# A gap longer than this between reports starts a new reading session.
+SESSION_GAP = 30 * 60
+
+
+def log_reading(book_id, position):
+    """Record a reading report into the history log, coalescing it into the most
+    recent session for this book if that session is still recent (< SESSION_GAP)."""
+    now = time.time()
+    with conn() as c:
+        r = c.execute("SELECT id, updated_at, end_pos FROM reading_log "
+                      "WHERE book_id=? ORDER BY updated_at DESC LIMIT 1",
+                      (book_id,)).fetchone()
+        if r and now - r["updated_at"] <= SESSION_GAP:
+            # same session: advance its end position and last-seen time
+            if position == r["end_pos"]:
+                c.execute("UPDATE reading_log SET updated_at=? WHERE id=?",
+                          (now, r["id"]))
+            else:
+                c.execute("UPDATE reading_log SET end_pos=?, updated_at=?, "
+                          "events=events+1 WHERE id=?", (position, now, r["id"]))
+        else:
+            c.execute("INSERT INTO reading_log(book_id,started_at,updated_at,"
+                      "start_pos,end_pos,events) VALUES (?,?,?,?,?,1)",
+                      (book_id, now, now, position, position))
+
+
+def reading_history(limit=200) -> list[dict]:
+    """Recent reading sessions across all books, newest first, with book title +
+    page count for display. Sessions whose book was deleted are dropped (JOIN)."""
+    with conn() as c:
+        rows = c.execute(
+            "SELECT l.book_id, l.started_at, l.updated_at, l.start_pos, l.end_pos, "
+            "l.events, b.title AS title, b.num_pages AS num_pages "
+            "FROM reading_log l JOIN books b ON b.id=l.book_id "
+            "ORDER BY l.updated_at DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]

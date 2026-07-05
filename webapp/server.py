@@ -10,7 +10,9 @@
   GET  /api/books/{id}/pages      page text (no images)
   GET  /api/books/{id}/pages/{i}/image   scene image (generated lazily; prefetches ahead)
   GET  /api/books/{id}/pages/{i}/status  scene generation status
-  PUT  /api/books/{id}/progress   save reading position (server-side)
+  PUT  /api/books/{id}/progress   save reading position (server-side) + log a session
+  GET  /api/history               reading history (recent sessions across all books)
+  GET  /history                   reading-history viewer page
 
 Scene images are generated on demand and prefetched N pages ahead (PREFETCH).
 Concurrent generations are capped by a semaphore; duplicate work is coalesced by
@@ -170,6 +172,11 @@ def start_processing(book_id: int):
 @app.get("/", response_class=HTMLResponse)
 def hub():
     return (STATIC / "hub.html").read_text()
+
+
+@app.get("/history", response_class=HTMLResponse)
+def history_page():
+    return (STATIC / "history.html").read_text()
 
 
 @app.get("/read/{book_id}", response_class=HTMLResponse)
@@ -584,4 +591,12 @@ async def api_scene_image(book_id: int, idx: int, request: Request):
 async def api_set_progress(book_id: int, body: dict):
     pos = int(body.get("position", 0))
     db.set_progress(book_id, pos)
+    db.log_reading(book_id, pos)
     return {"ok": True}
+
+
+@app.get("/api/history")
+def api_history():
+    """Reading history: recent sessions (which book, which pages) across the
+    library, newest first."""
+    return db.reading_history()
