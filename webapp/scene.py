@@ -70,16 +70,17 @@ def recompress_book(book_id) -> dict:
     return {"changed": changed, "before_kb": before // 1024, "after_kb": after // 1024,
             "saved_kb": (before - after) // 1024}
 from pipeline.run import (resolve_cast, scene_members, build_scene_prompt,
-                          roster_digest, SCENE_CRITIQUE, PASS_THRESHOLD)
+                          roster_digest, SCENE_CRITIQUE, SCENE_CRITIQUE_SCHEMA,
+                          PASS_THRESHOLD)
 from . import db
 
 SCENE_TRIES = int(os.environ.get("STORY_SCENE_TRIES", "3"))  # max image attempts per scene
 # Critic sub-score weights in the averaged quality score: anatomical correctness
 # and not-spoiling-later-in-the-chapter matter twice as much as the rest.
 SCORE_WEIGHTS = {"physical": 2, "no_spoiler": 2}
-# revise a broadly-good near-miss (img2img edit) vs always regenerate from scratch
+# whether a failed candidate may be fixed in place (img2img revise) at all, or must
+# always be redrawn from scratch. When on, the critic chooses revise vs regenerate.
 SCENE_REVISE = os.environ.get("STORY_SCENE_REVISE", "1") != "0"
-REVISE_AVG = 3.5  # a failed candidate averaging this high gets revised (when SCENE_REVISE)
 
 # Carry-forward re-check: after a revise aimed at a specific defect, confirm that
 # EXACT defect is gone before trusting the (fresh, stochastic) holistic critique.
@@ -606,7 +607,9 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                           "mirrored or doubled copy.")
         best, best_key, fix, draft, cands = None, None, "", None, []
         pending_defect = ""   # the specific flaw the NEXT revise must eliminate
-        to_replace, drop = [], []   # figures to img2img-replace / remove on next revise
+        escalate = False      # next revise must push harder (prior one didn't land)
+        edit_instr = ""       # critic-authored img2img instruction for the next revise
+        ref_chars: list = []  # roster names the critic wants attached to the next revise
         gen_id = db.next_gen_id(book_id, idx)   # debug history: this generation run
         trace = {"states": states, "max_tries": SCENE_TRIES, "attempts": []}
 
@@ -644,12 +647,11 @@ def _render_scene(book_id: int, idx: int) -> bytes:
             mode = "revise" if draft is not None else "fresh"
             cand = Path(td) / f"cand{attempt}.webp"
             if draft is not None:
-                # REVISE (img2img): keep what worked, change only the flagged defects.
-                # Attach the draft as image 1, then labelled reference sheets -- the
-                # figures we must REPLACE first (incl. background characters, whose
-                # sheets are fetched/drawn on demand by _sheet_for_name), then the rest
-                # of the cast for consistency. Figures the critic asked to DROP are just
-                # removed (no sheet needed). Budget: MAX_REFS total incl. the draft.
+                # REVISE (img2img). The instruction itself -- what to KEEP and what to
+                # CHANGE -- is authored by the critic (edit_instr); the harness only
+                # supplies the draft (image 1) and the reference sheets the critic asked
+                # for (ref_chars, identity anchors for figures being corrected), topped
+                # up with this page's cast for consistency. Budget MAX_REFS incl. draft.
                 sheet_refs, seen_ent = [], set()
 
                 def _add(name, ent, path):
@@ -657,34 +659,28 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                         seen_ent.add(ent)
                         sheet_refs.append((name, path))
 
-                for name in to_replace:
+                for name in ref_chars:
                     got = _sheet_for_name(name)
                     if got:
                         _add(name, got[0], got[1])
                 for m, p in zip(ref_members, ref_paths):
                     _add(m["name"], m["entity_id"], p)
-                label = {nm: i + 2 for i, (nm, _) in enumerate(sheet_refs)}
-                ref_lbls = ", ".join(f"image {label[nm]} = {nm}" for nm, _ in sheet_refs)
-                notes = []
-                rep = [n for n in to_replace if n in label]
-                if rep:
-                    named = "; ".join(f"{n} (image {label[n]})" for n in rep)
-                    notes.append(f"The figure(s) for {named} in the draft are the WRONG person/creature "
-                                 "-- REPLACE each so it matches its reference image exactly (face, build, "
-                                 "species, clothing), keeping its position and pose in the scene.")
-                if drop:
-                    notes.append("REMOVE these figures from the picture entirely -- it is fine to simply "
-                                 f"leave them out: {', '.join(drop)}.")
-                used_prompt = (f"{style_text}\n\nImage 1 is a DRAFT illustration that is almost right. "
-                               f"Redraw it keeping its composition, characters, poses, setting and art "
-                               f"style the SAME, and change ONLY what is noted: {fix}"
-                               + (f"\n\nReference sheets are attached ({ref_lbls}); keep every character "
-                                  "consistent with their reference." if ref_lbls else "")
-                               + ("\n\n" + " ".join(notes) if notes else "")
+                ref_lbls = ", ".join(f"image {i + 2} = {nm}" for i, (nm, _) in enumerate(sheet_refs))
+                # When a prior revise FAILED to land we bump to the stronger image model
+                # and add a forceful note (img2img otherwise tends to return a near-copy).
+                esc_note = ("\n\nA PREVIOUS edit did NOT change the picture. You MUST actually redraw the "
+                            "affected area this time -- do not return a near-identical image."
+                            if escalate else "")
+                used_prompt = (f"{style_text}\n\nImage 1 is a DRAFT illustration to edit in place.\n\n"
+                               f"{edit_instr}"
+                               + (f"\n\nReference sheets are attached ({ref_lbls}); make each named "
+                                  "character match its sheet exactly (face, build, species, clothing)."
+                                  if ref_lbls else "")
+                               + esc_note
                                + f"\n\nThe people must still match:\n{char_desc}{place_note}")
                 refs = [draft] + [p for _, p in sheet_refs]
                 gem.generate_image(used_prompt, refs=refs, out_path=cand, aspect="3:2",
-                                   model=PAGE_IMAGE_MODEL)
+                                   model=SHEET_IMAGE_MODEL if escalate else PAGE_IMAGE_MODEL)
             else:
                 used_prompt = build_scene_prompt(spread, members, ref_members, style_text, fix=fix) + place_note
                 gem.generate_image(used_prompt, refs=ref_paths, out_path=cand, aspect="3:2",
@@ -697,40 +693,43 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                 brief=page["brief"], chars=char_desc or "(none)", style=style_text,
                 roster=roster_digest(registry), chapter_ahead=chapter_ahead,
                 source=(page["read_text"] or "")[:1200] or "(not available)"),
-                refs=ref_paths, ref_labels=[m["name"] for m in ref_members])
+                refs=ref_paths, ref_labels=[m["name"] for m in ref_members],
+                schema=SCENE_CRITIQUE_SCHEMA)
             keys = ("physical", "consistency", "accuracy", "style_ok",
                     "no_stray_text", "figure_match", "no_spoiler")
             scores = [crit.get(k, 5 if k in ("no_stray_text", "figure_match", "no_spoiler") else 0)
                       for k in keys]
             score = min(scores)   # a bad anatomy OR spoiler can still veto the image
             # anatomical correctness (`physical`) and spoiler-avoidance (`no_spoiler`) count
-            # DOUBLE the other attributes in the averaged quality score (revise/best-of).
+            # DOUBLE the other attributes in the averaged quality score (best-of tie-break).
             weights = [SCORE_WEIGHTS.get(k, 1) for k in keys]
             avg = sum(s * w for s, w in zip(scores, weights)) / sum(weights)
-            # figures the critic flagged: replace the wrong ones (we fetch a sheet for
-            # each, foreground OR background), drop the ones it says to remove. A name
-            # in both -> drop wins (removing is the simpler fix).
-            wrong_all = [w for w in crit.get("wrong_figures", []) if isinstance(w, str) and w.strip()]
-            drop = [d for d in crit.get("drop_figures", []) if isinstance(d, str) and d.strip()]
-            to_replace = [w for w in wrong_all if w not in drop]
+            # The critic decides the next move: accept / revise (with an authored
+            # edit_instruction + which reference sheets to attach) / regenerate.
+            verdict = (crit.get("verdict") or "revise").strip()
+            if not SCENE_REVISE and verdict == "revise":
+                verdict = "regenerate"     # global toggle: never img2img, always redraw
+            edit_next = (crit.get("edit_instruction") or "").strip()
+            refs_next = [r for r in crit.get("reference_characters", [])
+                         if isinstance(r, str) and r.strip()]
             data = cand.read_bytes()
-            # Carry-forward re-check: if this was a revise targeting a specific
-            # earlier defect, confirm that exact defect is gone before we trust the
-            # holistic score (which is a fresh, stochastic verdict that sometimes
-            # flips a hard veto to a pass on a near-identical img2img revise).
+            # Carry-forward re-check: if this was a revise targeting a specific earlier
+            # defect, confirm that exact defect is actually gone before trusting the
+            # (fresh, stochastic) verdict -- the critic sometimes flips a veto to accept
+            # on a near-identical img2img revise where the flaw in fact survived.
             fix_ok = True
             if mode == "revise" and pending_defect:
-                verdict = _verify_fix(cand, pending_defect)
-                fix_ok = bool(verdict.get("resolved", True))
+                v = _verify_fix(cand, pending_defect)
+                fix_ok = bool(v.get("resolved", True))
                 crit["fix_verified"] = {"defect": pending_defect, "resolved": fix_ok,
-                                        "still_present": verdict.get("still_present", "")}
+                                        "still_present": v.get("still_present", "")}
                 if not fix_ok:
                     print(f"[scene] revise did not clear defect ({pending_defect!r}); "
-                          f"still: {verdict.get('still_present','')!r}", flush=True)
+                          f"still: {v.get('still_present','')!r}", flush=True)
             trace["attempts"].append({
                 "n": attempt, "mode": mode, "scores": dict(zip(keys, scores)),
-                "min": score, "avg": round(avg, 2), "fix_ok": fix_ok,
-                "wrong_figures": wrong_all, "drop_figures": drop,
+                "min": score, "avg": round(avg, 2), "fix_ok": fix_ok, "verdict": verdict,
+                "edit_instruction": edit_next, "reference_characters": refs_next,
                 "issues": crit.get("issues", []), "fix_hint": crit.get("fix_hint", ""),
             })
             # debug history: keep EVERY candidate (even rejected) with its prompt + critique
@@ -738,32 +737,33 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                                  _compress(data, DEBUG_MAXW, DEBUG_QUALITY),
                                  json.dumps(crit), score, round(avg, 2))
             cands.append({"n": attempt, "path": cand, "data": data, "score": score})
-            # An image with a figure the critic named to replace/drop is not "done"
-            # even if its min-score clears the bar (the critic often docks a wrong
-            # BACKGROUND figure only to 4). Prefer a clean candidate over a flagged one,
-            # then higher score; and don't stop while something actionable remains.
-            # A candidate is not "done" if a figure still needs replacing/dropping,
-            # OR if a targeted revise failed to clear the very defect it was meant to
-            # fix (fix_ok=False) -- even when the holistic min-score clears the bar.
-            actionable = bool(to_replace or drop) or not fix_ok
+            # A candidate is "done" only when the critic accepts it, its hard sub-scores
+            # clear the bar, AND (for a revise) the targeted defect was verified gone.
+            actionable = verdict != "accept" or not fix_ok
             key = (0 if actionable else 1, score)
             if best is None or key > best_key:
                 best, best_key = (data, score, attempt), key
-            if score >= PASS_THRESHOLD and not actionable:
+            if verdict == "accept" and fix_ok and score >= PASS_THRESHOLD:
                 break
             fix = crit.get("fix_hint", "")
             # the specific flaw the next revise must eliminate (verified afterwards)
             pending_defect = "; ".join(crit.get("issues", []) or []) or fix
-            # "very close" (broadly good, one weak spot) -> revise this image next
-            # (img2img); otherwise (or if SCENE_REVISE is off) regenerate from scratch.
-            # A wrong figure to replace or drop also routes to revise, so we can resubmit
-            # the roster sheet and instruct an in-place replacement / removal. But if a
-            # revise just FAILED to remove its target defect, img2img is stuck copying the
-            # input -- regenerate fresh instead of re-revising the same near-identical draft.
             if mode == "revise" and not fix_ok:
-                draft = None
-            else:
-                draft = cand if (SCENE_REVISE and (avg >= REVISE_AVG or actionable)) else None
+                # the targeted edit didn't land. Don't reroll the whole composition to
+                # fix one spot -- keep this otherwise-good draft and escalate (stronger
+                # model + forceful note). If we ALREADY escalated and it still didn't
+                # move, img2img is stuck: fall back to a from-scratch redraw.
+                if escalate:
+                    draft, escalate = None, False
+                else:
+                    draft, escalate = cand, True
+                    edit_instr = edit_next or edit_instr
+                    ref_chars = refs_next or ref_chars
+            elif verdict == "revise" and edit_next:
+                draft, escalate = cand, False
+                edit_instr, ref_chars = edit_next, refs_next
+            else:   # regenerate (or accept-but-below-bar / missing instruction)
+                draft, escalate = None, False
 
         data, score, chosen = best
         # If nothing cleared the bar, don't just trust the min-score: let a vision

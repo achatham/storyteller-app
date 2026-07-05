@@ -98,16 +98,49 @@ story does not call for.>,
 nothing from the text that comes after it. Score 1-2 if it depicts, reveals or foreshadows a later event, \
 reveal, a character's fate, a hidden identity, a transformation, or the arrival/appearance of someone or \
 something not yet present at THIS moment. If there is no later text, score 5.>,
-  "wrong_figures": ["<the NAME of any character -- foreground OR background -- drawn as the WRONG \
-person/creature or with a wrong core identity (use the reference-sheet label, or the book character name \
-for a background figure); empty list if every recognisable figure is correct>"],
-  "drop_figures": ["<the NAME of any figure that is wrong or unwanted and would be EASIER to simply REMOVE \
-from the picture than to fix -- typically a background character NOT required by the brief or source text. \
-NEVER list anyone the brief or source actually calls for; leave empty unless removing the figure is clearly \
-the simpler fix>"],
-  "issues": ["<short concrete problems>"],
-  "fix_hint": "<one actionable sentence naming the single most important missing/wrong element to add or fix>"
+  "issues": ["<short concrete problems with THIS image>"],
+  "verdict": "<exactly one of: accept | revise | regenerate.
+    accept     = ship as-is: every check passes and nothing needs changing.
+    revise     = keep THIS image and fix a LOCALIZED flaw with an in-place edit -- a malformed/extra \
+limb, one wrong or unwanted figure, a missing held object, a small accuracy miss. Choose this ONLY when \
+most of the image is right and the fix is confined to part of it.
+    regenerate = redraw from scratch: the image is fundamentally wrong (wrong moment or composition, \
+several serious problems at once, or a defect an in-place edit is unlikely to remove), so revising is not \
+worthwhile.>",
+  "edit_instruction": "<REQUIRED when verdict is 'revise', else empty string. A complete instruction to an \
+artist doing an IMAGE-TO-IMAGE edit of the attached draft. FIRST name exactly what to KEEP UNCHANGED (the \
+overall composition, the specific characters and their poses, the setting, the art style -- whatever is \
+already correct), THEN state the single precise change to make. Insist that nothing else changes. If the \
+fix is a removal (e.g. an extra limb), say so plainly and do not describe keeping it.>",
+  "reference_characters": ["<when verdict is 'revise' AND identity matters: the NAMES (exactly as written \
+above) of characters whose canonical reference sheet should be attached to the edit -- e.g. a figure being \
+corrected to the right person/creature. Omit characters that are already correct; empty list if none needed>"],
+  "fix_hint": "<one actionable sentence naming the single most important thing to fix -- used to guide a \
+from-scratch redraw when verdict is 'regenerate'>"
 }}"""
+
+# Explicit response schema for the critique above (enforced by the API so the
+# structured fields the harness drives on -- verdict, edit_instruction,
+# reference_characters -- come back reliably).
+SCENE_CRITIQUE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "physical": {"type": "integer"},
+        "consistency": {"type": "integer"},
+        "figure_match": {"type": "integer"},
+        "accuracy": {"type": "integer"},
+        "style_ok": {"type": "integer"},
+        "no_stray_text": {"type": "integer"},
+        "no_spoiler": {"type": "integer"},
+        "issues": {"type": "array", "items": {"type": "string"}},
+        "verdict": {"type": "string", "enum": ["accept", "revise", "regenerate"]},
+        "edit_instruction": {"type": "string"},
+        "reference_characters": {"type": "array", "items": {"type": "string"}},
+        "fix_hint": {"type": "string"},
+    },
+    "required": ["physical", "consistency", "figure_match", "accuracy", "style_ok",
+                 "no_stray_text", "no_spoiler", "verdict", "issues"],
+}
 
 
 def roster_digest(registry: dict, max_each: int = 140) -> str:
