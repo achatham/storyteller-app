@@ -217,10 +217,11 @@ def set_num_pages(book_id, n):
         c.execute("UPDATE books SET num_pages=? WHERE id=?", (n, book_id))
 
 
-def fill_metadata(book_id, title=None, author=None) -> dict:
-    """Fill in a book's title/author from extracted metadata, but only for fields
-    the user left blank -- never overwrite a title/author they typed at upload.
-    Returns what changed."""
+def fill_metadata(book_id, title=None, author=None, force=False) -> dict:
+    """Fill in a book's title/author from extracted metadata. By default only
+    fills fields left blank (so a title/author the user typed at upload is never
+    overwritten); force=True overwrites even a non-blank field (used by the
+    one-off backfill to re-clean auto-derived values). Returns what changed."""
     changed = {}
     with conn() as c:
         r = c.execute("SELECT title, author FROM books WHERE id=?",
@@ -229,9 +230,9 @@ def fill_metadata(book_id, title=None, author=None) -> dict:
             return changed
         title = (title or "").strip()
         author = (author or "").strip()
-        if title and not (r["title"] or "").strip():
+        if title and (force or not (r["title"] or "").strip()) and title != r["title"]:
             changed["title"] = title
-        if author and not (r["author"] or "").strip():
+        if author and (force or not (r["author"] or "").strip()) and author != r["author"]:
             changed["author"] = author
         if changed:
             c.execute("UPDATE books SET title=COALESCE(?,title), "

@@ -436,6 +436,44 @@ def prewarm(book_id, k, workers: int = 2):
         list(ex.map(one, range(k)))
 
 
+def resolve_metadata(filename: str, raw: dict) -> dict:
+    """Clean {title, author} from the source filename plus whatever container
+    metadata we scraped, via a cheap text model. It reconciles the two: derives
+    a title/author from an 'Author - Title.epub' filename when the file carries
+    no metadata, and strips series / imprint / edition noise (e.g. the trailing
+    '(Puffin Modern Classics)') that the embedded fields often include. Falls
+    back to the raw metadata if the call fails."""
+    from pipeline import gem
+    from pipeline.config import META_MODEL
+    raw_title = (raw.get("title") or "").strip()
+    raw_author = (raw.get("author") or "").strip()
+    schema = {"type": "object", "properties": {
+        "title": {"type": "string"}, "author": {"type": "string"}},
+        "required": ["title", "author"]}
+    prompt = (
+        "Identify a book's real published title and author from the clues below.\n"
+        "Rules:\n"
+        "- Give the clean canonical title only. Drop series names, imprint/publisher "
+        "tags, edition/format notes, and trailing parentheticals like "
+        "'(Puffin Modern Classics)' or 'Unabridged'.\n"
+        "- Give the author as a normal person name (e.g. 'J.K. Rowling'); no roles, "
+        "dates, or 'by'.\n"
+        "- Prefer the embedded metadata when it is clean; use the filename to fill "
+        "gaps or when the metadata is missing/garbled.\n"
+        "- Use an empty string for anything you genuinely cannot determine. Never "
+        "invent a title or author.\n\n"
+        f"Source filename: {filename or '(none)'}\n"
+        f"Embedded title: {raw_title or '(none)'}\n"
+        f"Embedded author: {raw_author or '(none)'}\n")
+    try:
+        out = gem.text_json(prompt, schema=schema, model=META_MODEL)
+        return {"title": (out.get("title") or "").strip(),
+                "author": (out.get("author") or "").strip()}
+    except Exception as ex:  # noqa: BLE001 -- fall back to the scraped metadata
+        print(f"[process] metadata LLM failed ({ex}); using raw metadata", flush=True)
+        return {"title": raw_title, "author": raw_author}
+
+
 def run(book_id: int):
     """Process a book end to end. Safe to re-run after an interrupted import:
     the (expensive) registry is reused from the DB; segmentation is redone from
@@ -443,13 +481,15 @@ def run(book_id: int):
     from pipeline import registry as registry_mod
     from pipeline import extract
 
-    # 0. fill in the book's title/author from the source file's own metadata, for
-    # any field the user left blank at upload (best-effort, never clobbers typed
-    # values). Populates the library + reading-history labels.
-    meta = extract.book_metadata()
+    # 0. fill in the book's title/author, for any field the user left blank at
+    # upload (best-effort, never clobbers typed values). We scrape the source's
+    # container metadata, then let a cheap model reconcile it with the filename
+    # and strip noise. Populates the library + reading-history labels.
+    raw = extract.book_metadata()
+    meta = resolve_metadata((db.get_book(book_id) or {}).get("filename", ""), raw)
     changed = db.fill_metadata(book_id, meta.get("title"), meta.get("author"))
     if changed:
-        print(f"[process] filled book metadata from source: {changed}", flush=True)
+        print(f"[process] filled book metadata: {changed}", flush=True)
 
     # 1. registry -- reuse if a previous run already saved one
     registry = db.get_registry(book_id)
@@ -482,15 +522,17 @@ def run(book_id: int):
     print(f"[process] book {book_id} ready: {n} pages", flush=True)
 
 
-def backfill_metadata():
-    """One-off: fill title/author for already-processed books whose fields were
-    left blank at upload, reading each book's own source file (stored as a blob)
-    back out to a temp file to extract its container metadata."""
+def backfill_metadata(force=False):
+    """One-off: (re)derive title/author for existing books, reading each book's
+    own source file (stored as a blob) back out to a temp file to scrape its
+    container metadata, then LLM-cleaning it against the filename. force=True
+    overwrites values already stored (e.g. to strip imprint noise an earlier
+    raw-metadata pass left in)."""
     import tempfile
     from pathlib import Path
     from pipeline import extract
     for b in db.list_books():
-        if (b["title"] or "").strip() and (b["author"] or "").strip():
+        if not force and (b["title"] or "").strip() and (b["author"] or "").strip():
             continue
         f = db.get_book_file(b["id"])
         if not f:
@@ -500,15 +542,17 @@ def backfill_metadata():
         with tempfile.NamedTemporaryFile(suffix=suffix) as tmp:
             tmp.write(data)
             tmp.flush()
-            meta = extract.book_metadata(Path(tmp.name))
-        changed = db.fill_metadata(b["id"], meta.get("title"), meta.get("author"))
-        print(f"book {b['id']} ({b['filename']}): {changed or 'no metadata found'}",
-              flush=True)
+            raw = extract.book_metadata(Path(tmp.name))
+        meta = resolve_metadata(b["filename"] or "", raw)
+        changed = db.fill_metadata(b["id"], meta.get("title"), meta.get("author"),
+                                   force=force)
+        print(f"book {b['id']} ({b['filename']}): "
+              f"{changed or 'unchanged'}  [raw={raw}]", flush=True)
 
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--backfill-metadata":
-        backfill_metadata()
+        backfill_metadata(force="--force" in sys.argv[2:])
         return
     book_id = int(sys.argv[1])
     try:

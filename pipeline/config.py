@@ -201,6 +201,9 @@ CHAPTER_MODEL = os.environ.get("STORY_CHAPTER_MODEL", TEXT_MODEL)
 # Tagging which recurring settings/props appear on each page is a narrow,
 # low-stakes classification, so it defaults to the cheap model.
 PROP_MODEL = os.environ.get("STORY_PROP_MODEL", "gemini-3.1-flash-lite")
+# Cleaning a book's title/author out of its filename + container metadata is a
+# trivial normalization, so it defaults to the cheap model too.
+META_MODEL = os.environ.get("STORY_META_MODEL", "gemini-3.1-flash-lite")
 MAX_REFS = int(os.environ.get("STORY_MAX_REFS", "4"))
 # Gemini image_size is a discrete enum: "1K", "2K", "4K". Each step doubles
 # each dimension. "1K" (~1280px long edge) keeps files small for remote loading.
