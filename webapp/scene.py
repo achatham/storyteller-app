@@ -81,6 +81,40 @@ SCORE_WEIGHTS = {"physical": 2, "no_spoiler": 2}
 SCENE_REVISE = os.environ.get("STORY_SCENE_REVISE", "1") != "0"
 REVISE_AVG = 3.5  # a failed candidate averaging this high gets revised (when SCENE_REVISE)
 
+# Carry-forward re-check: after a revise aimed at a specific defect, confirm that
+# EXACT defect is gone before trusting the (fresh, stochastic) holistic critique.
+# The critic sometimes flips a hard veto to a pass on an img2img revise that barely
+# changed the picture, so the flagged flaw (e.g. an extra arm) survives unnoticed.
+FIX_VERIFY = """You are verifying ONE specific correction to a children's-book illustration.
+
+The illustration was just revised to fix this specific problem:
+"{defect}"
+
+Look ONLY at whether THAT specific problem is now completely gone. Ignore every other \
+aspect of the picture (style, mood, other characters). A common failure is an edit that \
+barely changed the image, so the problem is still present.
+
+Return JSON only:
+{{"resolved": <true only if the described problem is clearly and fully gone; false if any \
+trace of it remains -- e.g. an extra limb is still visible>,
+  "still_present": "<if false, one sentence on what still remains; else empty>"}}"""
+
+FIX_VERIFY_SCHEMA = {"type": "object", "properties": {
+    "resolved": {"type": "boolean"}, "still_present": {"type": "string"}},
+    "required": ["resolved"]}
+
+
+def _verify_fix(cand_path, defect: str) -> dict:
+    """Focused vision check: was `defect` actually removed from the revised image?
+    Best-effort -- on any failure assume resolved (don't block on the checker)."""
+    try:
+        return gem.critique_image(cand_path, FIX_VERIFY.format(defect=defect),
+                                  schema=FIX_VERIFY_SCHEMA)
+    except Exception as ex:  # noqa: BLE001
+        print(f"[scene] fix-verify failed: {ex}", flush=True)
+        return {"resolved": True}
+
+
 # When no attempt clears the bar, a vision critic picks the best of the candidates.
 JUDGE_BEST = """You are an art director choosing the BEST of several candidate illustrations for one \
 page of a children's picture book. None is perfect -- pick the single candidate that best depicts the \
@@ -571,6 +605,7 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                           "features anywhere -- not even through a window or doorway, and never a "
                           "mirrored or doubled copy.")
         best, best_key, fix, draft, cands = None, None, "", None, []
+        pending_defect = ""   # the specific flaw the NEXT revise must eliminate
         to_replace, drop = [], []   # figures to img2img-replace / remove on next revise
         gen_id = db.next_gen_id(book_id, idx)   # debug history: this generation run
         trace = {"states": states, "max_tries": SCENE_TRIES, "attempts": []}
@@ -679,9 +714,22 @@ def _render_scene(book_id: int, idx: int) -> bytes:
             drop = [d for d in crit.get("drop_figures", []) if isinstance(d, str) and d.strip()]
             to_replace = [w for w in wrong_all if w not in drop]
             data = cand.read_bytes()
+            # Carry-forward re-check: if this was a revise targeting a specific
+            # earlier defect, confirm that exact defect is gone before we trust the
+            # holistic score (which is a fresh, stochastic verdict that sometimes
+            # flips a hard veto to a pass on a near-identical img2img revise).
+            fix_ok = True
+            if mode == "revise" and pending_defect:
+                verdict = _verify_fix(cand, pending_defect)
+                fix_ok = bool(verdict.get("resolved", True))
+                crit["fix_verified"] = {"defect": pending_defect, "resolved": fix_ok,
+                                        "still_present": verdict.get("still_present", "")}
+                if not fix_ok:
+                    print(f"[scene] revise did not clear defect ({pending_defect!r}); "
+                          f"still: {verdict.get('still_present','')!r}", flush=True)
             trace["attempts"].append({
                 "n": attempt, "mode": mode, "scores": dict(zip(keys, scores)),
-                "min": score, "avg": round(avg, 2),
+                "min": score, "avg": round(avg, 2), "fix_ok": fix_ok,
                 "wrong_figures": wrong_all, "drop_figures": drop,
                 "issues": crit.get("issues", []), "fix_hint": crit.get("fix_hint", ""),
             })
@@ -694,18 +742,28 @@ def _render_scene(book_id: int, idx: int) -> bytes:
             # even if its min-score clears the bar (the critic often docks a wrong
             # BACKGROUND figure only to 4). Prefer a clean candidate over a flagged one,
             # then higher score; and don't stop while something actionable remains.
-            actionable = bool(to_replace or drop)
+            # A candidate is not "done" if a figure still needs replacing/dropping,
+            # OR if a targeted revise failed to clear the very defect it was meant to
+            # fix (fix_ok=False) -- even when the holistic min-score clears the bar.
+            actionable = bool(to_replace or drop) or not fix_ok
             key = (0 if actionable else 1, score)
             if best is None or key > best_key:
                 best, best_key = (data, score, attempt), key
             if score >= PASS_THRESHOLD and not actionable:
                 break
             fix = crit.get("fix_hint", "")
+            # the specific flaw the next revise must eliminate (verified afterwards)
+            pending_defect = "; ".join(crit.get("issues", []) or []) or fix
             # "very close" (broadly good, one weak spot) -> revise this image next
             # (img2img); otherwise (or if SCENE_REVISE is off) regenerate from scratch.
             # A wrong figure to replace or drop also routes to revise, so we can resubmit
-            # the roster sheet and instruct an in-place replacement / removal.
-            draft = cand if (SCENE_REVISE and (avg >= REVISE_AVG or actionable)) else None
+            # the roster sheet and instruct an in-place replacement / removal. But if a
+            # revise just FAILED to remove its target defect, img2img is stuck copying the
+            # input -- regenerate fresh instead of re-revising the same near-identical draft.
+            if mode == "revise" and not fix_ok:
+                draft = None
+            else:
+                draft = cand if (SCENE_REVISE and (avg >= REVISE_AVG or actionable)) else None
 
         data, score, chosen = best
         # If nothing cleared the bar, don't just trust the min-score: let a vision
