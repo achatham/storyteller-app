@@ -441,6 +441,15 @@ def run(book_id: int):
     the (expensive) registry is reused from the DB; segmentation is redone from
     scratch; roster sheets are drawn lazily as pages are rendered."""
     from pipeline import registry as registry_mod
+    from pipeline import extract
+
+    # 0. fill in the book's title/author from the source file's own metadata, for
+    # any field the user left blank at upload (best-effort, never clobbers typed
+    # values). Populates the library + reading-history labels.
+    meta = extract.book_metadata()
+    changed = db.fill_metadata(book_id, meta.get("title"), meta.get("author"))
+    if changed:
+        print(f"[process] filled book metadata from source: {changed}", flush=True)
 
     # 1. registry -- reuse if a previous run already saved one
     registry = db.get_registry(book_id)
@@ -473,7 +482,34 @@ def run(book_id: int):
     print(f"[process] book {book_id} ready: {n} pages", flush=True)
 
 
+def backfill_metadata():
+    """One-off: fill title/author for already-processed books whose fields were
+    left blank at upload, reading each book's own source file (stored as a blob)
+    back out to a temp file to extract its container metadata."""
+    import tempfile
+    from pathlib import Path
+    from pipeline import extract
+    for b in db.list_books():
+        if (b["title"] or "").strip() and (b["author"] or "").strip():
+            continue
+        f = db.get_book_file(b["id"])
+        if not f:
+            continue
+        _mime, data = f
+        suffix = Path(b["filename"] or "book.pdf").suffix or ".pdf"
+        with tempfile.NamedTemporaryFile(suffix=suffix) as tmp:
+            tmp.write(data)
+            tmp.flush()
+            meta = extract.book_metadata(Path(tmp.name))
+        changed = db.fill_metadata(b["id"], meta.get("title"), meta.get("author"))
+        print(f"book {b['id']} ({b['filename']}): {changed or 'no metadata found'}",
+              flush=True)
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--backfill-metadata":
+        backfill_metadata()
+        return
     book_id = int(sys.argv[1])
     try:
         run(book_id)

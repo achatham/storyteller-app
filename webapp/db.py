@@ -217,6 +217,29 @@ def set_num_pages(book_id, n):
         c.execute("UPDATE books SET num_pages=? WHERE id=?", (n, book_id))
 
 
+def fill_metadata(book_id, title=None, author=None) -> dict:
+    """Fill in a book's title/author from extracted metadata, but only for fields
+    the user left blank -- never overwrite a title/author they typed at upload.
+    Returns what changed."""
+    changed = {}
+    with conn() as c:
+        r = c.execute("SELECT title, author FROM books WHERE id=?",
+                      (book_id,)).fetchone()
+        if not r:
+            return changed
+        title = (title or "").strip()
+        author = (author or "").strip()
+        if title and not (r["title"] or "").strip():
+            changed["title"] = title
+        if author and not (r["author"] or "").strip():
+            changed["author"] = author
+        if changed:
+            c.execute("UPDATE books SET title=COALESCE(?,title), "
+                      "author=COALESCE(?,author) WHERE id=?",
+                      (changed.get("title"), changed.get("author"), book_id))
+    return changed
+
+
 def get_book(book_id) -> dict | None:
     with conn() as c:
         r = c.execute("SELECT * FROM books WHERE id=?", (book_id,)).fetchone()

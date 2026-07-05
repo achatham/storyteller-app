@@ -92,6 +92,40 @@ def _epub_toc_titles(path: Path) -> dict[str, str]:
     return titles
 
 
+def _epub_metadata(path: Path) -> dict:
+    """{title, author} from the epub's OPF Dublin-Core metadata."""
+    z = zipfile.ZipFile(str(path))
+    container = z.read("META-INF/container.xml").decode("utf-8", "ignore")
+    opf = re.search(r'full-path="([^"]+)"', container).group(1)
+    opf_txt = z.read(opf).decode("utf-8", "ignore")
+
+    def tag(name: str) -> str:
+        m = re.search(rf"<dc:{name}\b[^>]*>(.*?)</dc:{name}>", opf_txt, re.S | re.I)
+        return _clean_title(m.group(1)) if m else ""
+
+    return {"title": tag("title"), "author": tag("creator")}
+
+
+def _pdf_metadata(path: Path) -> dict:
+    """{title, author} from the PDF document-info dictionary (often empty)."""
+    meta = PdfReader(str(path)).metadata or {}
+    return {"title": _clean_title(meta.title or ""),
+            "author": _clean_title(meta.author or "")}
+
+
+def book_metadata(path: Path = PDF) -> dict:
+    """Best-effort book-level {title, author} from the source's own container
+    metadata. EPUBs are zips (OPF Dublin Core); PDFs carry a document-info dict.
+    Missing fields come back as "". Never raises."""
+    path = Path(path)
+    try:
+        if zipfile.is_zipfile(str(path)):
+            return _epub_metadata(path)
+        return _pdf_metadata(path)
+    except Exception:  # noqa: BLE001 -- metadata is a nicety, never fatal
+        return {"title": "", "author": ""}
+
+
 # Titles (or filenames) that mark non-story front/back matter to skip.
 _FRONT_MATTER = re.compile(
     r"\b(cover|praise|also by|title page|copyright|dedication|contents|"
