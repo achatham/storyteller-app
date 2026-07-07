@@ -502,26 +502,89 @@ def _chapter_ahead(book_id: int, page: dict) -> str:
     return f"(This is moment {pos + 1} of {len(chap)} in the chapter.)\n\n{ahead}"[:3200]
 
 
-def _render_scene(book_id: int, idx: int) -> bytes:
-    book = db.get_book(book_id)
-    page = db.get_page(book_id, idx)
-    if not page:
-        raise ValueError(f"no page {idx} for book {book_id}")
-    registry = db.get_registry(book_id)
-    chapter_cast = db.get_chapter_cast(book_id, page["chapter_idx"])
-    chapter_ahead = _chapter_ahead(book_id, page)   # spoiler context for the critic
-    style_text = _style_text(book["style"])
+# ---------------- shared scene logic (lazy + batch) ----------------
+# The per-page critique/decision machinery is factored out of _render_scene so the
+# batch "illustrate the whole book" bake (webapp/batch_bake.py) drives the SAME
+# accept/revise/regenerate + carry-forward bookkeeping across async rounds. Nothing
+# here touches the DB or the network except sheet drawing in build_scene_context.
 
+# Critic sub-scores that gate the image. The three lenient ones default to 5 when
+# the critic omits them (absence != failure); the rest default to 0 (must be earned).
+CRIT_KEYS = ("physical", "consistency", "accuracy", "style_ok",
+             "no_stray_text", "figure_match", "no_spoiler")
+CRIT_LENIENT = ("no_stray_text", "figure_match", "no_spoiler")
+
+
+def score_critique(crit: dict) -> tuple[int, float, list]:
+    """(min_score, weighted_avg, per-key scores) for a critique. min gates the
+    image (a bad anatomy OR spoiler vetoes it); the weighted avg is the best-of
+    tie-break (physical + no_spoiler count double, per SCORE_WEIGHTS)."""
+    scores = [crit.get(k, 5 if k in CRIT_LENIENT else 0) for k in CRIT_KEYS]
+    weights = [SCORE_WEIGHTS.get(k, 1) for k in CRIT_KEYS]
+    avg = sum(s * w for s, w in zip(scores, weights)) / sum(weights)
+    return min(scores), round(avg, 2), scores
+
+
+def new_scene_state() -> dict:
+    """Fresh per-page state for the attempt/round loop. `draft`/`best` hold image
+    BYTES (not paths) so the state survives across async batch rounds/processes."""
+    return {"mode": "fresh", "draft": None, "best": None, "best_key": None,
+            "fix": "", "pending_defect": "", "escalate": False,
+            "edit_instr": "", "ref_chars": [], "cands": []}
+
+
+def apply_verdict(state: dict, crit: dict, data: bytes, attempt: int,
+                  fix_ok: bool, revise_enabled: bool = SCENE_REVISE) -> dict:
+    """Fold one critique (+ carry-forward fix-verify) into `state`, mutating it in
+    place, and return {min, avg, scores, verdict, done}. `data` is the candidate's
+    webp bytes. Sets the plan for the NEXT round (draft/escalate/edit_instr/
+    ref_chars/pending_defect/fix) exactly as the interactive loop did."""
+    mn, avg, scores = score_critique(crit)
+    verdict = (crit.get("verdict") or "revise").strip()
+    if not revise_enabled and verdict == "revise":
+        verdict = "regenerate"     # global toggle: never img2img, always redraw
+    edit_next = (crit.get("edit_instruction") or "").strip()
+    refs_next = [r for r in crit.get("reference_characters", [])
+                 if isinstance(r, str) and r.strip()]
+    # A candidate is "done" only when accepted, its targeted defect (if any) verified
+    # gone, and hard sub-scores clear the bar. Rank best by (actionable?, min score).
+    actionable = verdict != "accept" or not fix_ok
+    key = (0 if actionable else 1, mn)
+    if state["best"] is None or key > state["best_key"]:
+        state["best"], state["best_key"] = (data, mn, attempt), key
+    state["cands"].append({"n": attempt, "data": data, "score": mn})
+    done = verdict == "accept" and fix_ok and mn >= PASS_THRESHOLD
+    if done:
+        return {"min": mn, "avg": avg, "scores": scores, "verdict": verdict, "done": True}
+    state["fix"] = crit.get("fix_hint", "")
+    state["pending_defect"] = "; ".join(crit.get("issues", []) or []) or state["fix"]
+    if state["mode"] == "revise" and not fix_ok:
+        # targeted edit didn't land: escalate once (stronger model + forceful note),
+        # keeping this otherwise-good draft; if already escalated, redraw from scratch.
+        if state["escalate"]:
+            state["draft"], state["escalate"] = None, False
+        else:
+            state["draft"], state["escalate"] = data, True
+            state["edit_instr"] = edit_next or state["edit_instr"]
+            state["ref_chars"] = refs_next or state["ref_chars"]
+    elif verdict == "revise" and edit_next:
+        state["draft"], state["escalate"] = data, False
+        state["edit_instr"], state["ref_chars"] = edit_next, refs_next
+    else:   # regenerate (or accept-but-below-bar / missing instruction)
+        state["draft"], state["escalate"] = None, False
+    state["mode"] = "revise" if state["draft"] is not None else "fresh"
+    return {"min": mn, "avg": avg, "scores": scores, "verdict": verdict, "done": False}
+
+
+def _resolved_members(book_id, page, registry, chapter_cast):
+    """The ordered, importance-ranked cast for a page, including registry variants a
+    page references that the chapter cast omits (e.g. a flashback age). Extracted
+    verbatim from the old _render_scene setup so lazy + batch resolve cast identically."""
     cast_index = resolve_cast({"cast": chapter_cast}, registry)
     page_cast = json.loads(page["cast_json"]) if page.get("cast_json") else []
-    spread = {"illustration_brief": page["brief"], "setting": page["setting"], "cast": page_cast,
-              "read_text": page["read_text"]}
+    spread = {"illustration_brief": page["brief"], "setting": page["setting"],
+              "cast": page_cast, "read_text": page["read_text"]}
     members = scene_members(spread, cast_index)
-    # A page can reference a registry VARIANT the chapter-level cast never listed --
-    # e.g. young/schoolboy Scrooge in a flashback while the chapter cast only has the
-    # present-day Scrooge. scene_members drops those (no reference sheet, ad-hoc look,
-    # missing from the roster). Resolve any such registry variant straight from the
-    # registry so it gets a proper sheet like everyone else.
     have = {(m["entity_id"], m["variant_id"]) for m in members}
     reg_by_id = {e["id"]: e for e in registry.get("entities", [])}
     for cc in page_cast:
@@ -539,185 +602,267 @@ def _render_scene(book_id: int, idx: int) -> bytes:
         if not (appearance or sheet_prompt):
             continue
         name = e.get("name", eid)
-        if var and var.get("label"):   # distinguish two ages/looks of one character in a scene
+        if var and var.get("label"):
             name = f"{name} ({var['label']})"
         members.append({"entity_id": eid, "variant_id": vid, "name": name,
                         "appearance": appearance, "sheet_prompt": sheet_prompt,
                         "type": e.get("type", "character"), "importance": e.get("importance", 3)})
         have.add((eid, vid))
     members.sort(key=lambda m: -m.get("importance", 3))
-    # view per setting (set by the prop pass): "" = the whole place from outside;
-    # else a short story label for the specific spot the scene is at ("lobby",
-    # "deck", "the cellar"). Props (a painting, a book) are never a place.
+    return spread, members, page_cast
+
+
+def build_scene_context(book_id: int, idx: int) -> dict:
+    """Everything needed to render page `idx`, computed once and shared by the lazy
+    path and the batch bake: resolved cast, per-character states, the reference
+    sheets (as BYTES, drawn/cached on demand), and the derived prompt text. This is
+    the setup half of the old _render_scene, lifted out so both paths are identical."""
+    book = db.get_book(book_id)
+    page = db.get_page(book_id, idx)
+    if not page:
+        raise ValueError(f"no page {idx} for book {book_id}")
+    registry = db.get_registry(book_id)
+    chapter_cast = db.get_chapter_cast(book_id, page["chapter_idx"])
+    style_text = _style_text(book["style"])
+    spread, members, page_cast = _resolved_members(book_id, page, registry, chapter_cast)
+
     views_by_id = {}
     for c in page_cast:
         v = (c.get("view") or "").strip()
-        if not v and c.get("aspect") in ("surface", "interior"):   # books segmented pre-`view`
+        if not v and c.get("aspect") in ("surface", "interior"):
             v = "deck" if c.get("aspect") == "surface" else "interior"
         if v:
             views_by_id[c.get("entity_id")] = v
 
-    def _view(m):   # the named place this setting is shown at, or None (whole/exterior)
+    def _view(m):
         return views_by_id.get(m["entity_id"]) if m.get("type") == "setting" else None
 
-    # per-character state for THIS moment, so e.g. one person is bound and another
-    # freed in the same picture (attached to the member -> build_scene_prompt renders it)
     states = _character_states(page["brief"], page["read_text"] or "", members)
     for m in members:
         m["state"] = states.get(m.get("name", ""), "")
 
+    # reference sheets (bytes), location prioritised into the capped ref set
     with tempfile.TemporaryDirectory() as td:
-        style_ref = _style_anchor_path(book, td)   # one concrete look for every sheet
-        ref_members, ref_paths = [], []
-        # the location (a surface/interior setting/prop the scene is in) is prioritized
-        # into the reference set -- it matters as much as the cast for coherence
-        ordered = sorted(members, key=lambda m: 0 if _view(m) else 1)
-        for m in ordered:
+        style_ref = _style_anchor_path(book, td)
+        style_ref_bytes = style_ref.read_bytes() if style_ref and style_ref.exists() else None
+        ref_members, ref_bytes = [], []
+        for m in sorted(members, key=lambda m: 0 if _view(m) else 1):
             if len(ref_members) >= MAX_REFS:
                 break
             view = _view(m)
-            if view:   # use the surface/interior reference, not the whole-exterior sheet
-                data = _ensure_view_sheet(book_id, m, style_text, view, style_ref=style_ref)
-            else:
-                data = _ensure_sheet(book_id, m, style_text, style_ref=style_ref)
+            data = (_ensure_view_sheet(book_id, m, style_text, view, style_ref=style_ref)
+                    if view else _ensure_sheet(book_id, m, style_text, style_ref=style_ref))
             if data:
-                p = Path(td) / f"{m['entity_id']}__{m['variant_id']}.webp"
-                p.write_bytes(data)
                 ref_members.append(m)
-                ref_paths.append(p)
+                ref_bytes.append(data)
 
-        # now (after each view reference was drawn from the real appearance) rewrite
-        # the view-settings' descriptions for the SCENE prompt so it focuses on that
-        # spot, not the whole exterior.
-        view_members = [m for m in members if _view(m)]
-        for m in view_members:
-            nm = m.get("name", m["entity_id"])
-            m["appearance"] = (f"the {_view(m)} of {nm} -- show ONLY what is visible at that spot; do "
-                               f"NOT depict the whole exterior of {nm} or its exterior-only features, "
-                               "even through a window")
-        char_desc = "\n".join(
-            f"- {m['name']}" + (f" (RIGHT NOW: {m['state']})" if m.get("state") else "")
-            + f": {m['appearance']}" for m in members)
-        place_note = ""
-        if view_members:
-            spots = "; ".join(f"the {_view(m)} of {m.get('name', m['entity_id'])}" for m in view_members)
-            place_note = (f"\n\nThe scene takes place at {spots}: show only that location. Do NOT depict "
-                          "the whole exterior of those place(s) or their exterior-only identifying "
-                          "features anywhere -- not even through a window or doorway, and never a "
-                          "mirrored or doubled copy.")
-        best, best_key, fix, draft, cands = None, None, "", None, []
-        pending_defect = ""   # the specific flaw the NEXT revise must eliminate
-        escalate = False      # next revise must push harder (prior one didn't land)
-        edit_instr = ""       # critic-authored img2img instruction for the next revise
-        ref_chars: list = []  # roster names the critic wants attached to the next revise
-        gen_id = db.next_gen_id(book_id, idx)   # debug history: this generation run
-        trace = {"states": states, "max_tries": SCENE_TRIES, "attempts": []}
+    # rewrite view-settings' descriptions to focus on the named spot (not exterior)
+    view_members = [m for m in members if _view(m)]
+    for m in view_members:
+        nm = m.get("name", m["entity_id"])
+        m["appearance"] = (f"the {_view(m)} of {nm} -- show ONLY what is visible at that spot; do "
+                           f"NOT depict the whole exterior of {nm} or its exterior-only features, "
+                           "even through a window")
+    char_desc = "\n".join(
+        f"- {m['name']}" + (f" (RIGHT NOW: {m['state']})" if m.get("state") else "")
+        + f": {m['appearance']}" for m in members)
+    place_note = ""
+    if view_members:
+        spots = "; ".join(f"the {_view(m)} of {m.get('name', m['entity_id'])}" for m in view_members)
+        place_note = (f"\n\nThe scene takes place at {spots}: show only that location. Do NOT depict "
+                      "the whole exterior of those place(s) or their exterior-only identifying "
+                      "features anywhere -- not even through a window or doorway, and never a "
+                      "mirrored or doubled copy.")
+    return {
+        "book_id": book_id, "idx": idx, "book": book, "page": page, "registry": registry,
+        "reg_by_name": {(e.get("name") or e.get("id")): e for e in registry.get("entities", [])},
+        "spread": spread, "members": members, "states": states,
+        "ref_members": ref_members, "ref_bytes": ref_bytes,
+        "ref_labels": [m["name"] for m in ref_members],
+        "char_desc": char_desc, "place_note": place_note,
+        "chapter_ahead": _chapter_ahead(book_id, page), "roster": roster_digest(registry),
+        "style_text": style_text, "style_ref_bytes": style_ref_bytes,
+    }
 
-        # Resolve a character NAME (as the critic names it) -> a labelled reference
-        # sheet path, drawing/fetching the sheet on demand. Lets a wrong BACKGROUND
-        # figure (not in this page's ref set) still be submitted for replacement.
-        reg_by_name = {(e.get("name") or e.get("id")): e for e in registry.get("entities", [])}
-        _name_sheet: dict = {}
 
-        def _sheet_for_name(name):
-            if name in _name_sheet:
-                return _name_sheet[name]
-            res = None
-            for mm, pp in zip(ref_members, ref_paths):   # already an attached cast reference?
-                if mm["name"] == name:
-                    res = (mm["entity_id"], pp)
-                    break
-            if res is None:
-                e = reg_by_name.get(name)
-                if e:
-                    eid = e["id"]
-                    data = db.get_any_sheet(book_id, eid)   # reuse any already-drawn variant
-                    if not data:                            # else draw the default once
-                        vid = (e.get("variants") or [{}])[0].get("id", "default")
-                        member = _member_for(registry, eid, vid)
-                        data = _ensure_sheet(book_id, member, style_text, style_ref=style_ref) if member else None
-                    if data:
-                        sp = Path(td) / f"fix_{eid}.webp"
-                        sp.write_bytes(data)
-                        res = (eid, sp)
-            _name_sheet[name] = res
-            return res
+def draw_all_sheets(book_id, workers: int = 6, log=print) -> int:
+    """Draw + cache every roster sheet the book's pages will reference (the union
+    across all pages), so the full roster can be reviewed before a batch bake.
+    Reuses build_scene_context per page (sheets are cached, so a later bake/read
+    reuses them for free). Returns the page count processed."""
+    from concurrent.futures import ThreadPoolExecutor
+    idxs = [p["idx"] for p in db.get_pages(book_id)]
+
+    def one(idx):
+        try:
+            build_scene_context(book_id, idx)   # draws any missing sheets as a side effect
+        except Exception as ex:  # noqa: BLE001 -- a bad page shouldn't block the roster
+            log(f"[sheets] page {idx} failed: {ex}")
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        list(ex.map(one, idxs))
+    return len(idxs)
+
+
+def resolve_name_sheet(ctx: dict, name: str, cache: dict):
+    """(entity_id, sheet_bytes) for a character the critic named for a revise, drawing
+    the default sheet on demand if needed. Lets a wrong BACKGROUND figure (not in the
+    page's ref set) still be corrected. Mirrors the old _sheet_for_name, but bytes."""
+    if name in cache:
+        return cache[name]
+    res = None
+    for mm, data in zip(ctx["ref_members"], ctx["ref_bytes"]):
+        if mm["name"] == name:
+            res = (mm["entity_id"], data)
+            break
+    if res is None:
+        e = ctx["reg_by_name"].get(name)
+        if e:
+            eid = e["id"]
+            data = db.get_any_sheet(ctx["book_id"], eid)
+            if not data:
+                vid = (e.get("variants") or [{}])[0].get("id", "default")
+                member = _member_for(ctx["registry"], eid, vid)
+                if member:
+                    with tempfile.TemporaryDirectory() as td:
+                        sref = None
+                        if ctx.get("style_ref_bytes"):
+                            sref = Path(td) / "styleref.webp"
+                            sref.write_bytes(ctx["style_ref_bytes"])
+                        data = _ensure_sheet(ctx["book_id"], member, ctx["style_text"], style_ref=sref)
+            if data:
+                res = (eid, data)
+    cache[name] = res
+    return res
+
+
+def build_round_request(ctx: dict, state: dict, name_cache: dict) -> dict:
+    """The image-generation request for this round of one page. Returns
+    {prompt, ref_bytes, model, mode}: `ref_bytes` are the ordered reference images
+    (draft first for a revise), `model` the image model to use. Shared verbatim by
+    the lazy loop and the batch bake so both build identical prompts."""
+    style_text, char_desc, place_note = ctx["style_text"], ctx["char_desc"], ctx["place_note"]
+    if state.get("draft") is not None:
+        # REVISE (img2img): critic-authored edit_instruction; attach the sheets the
+        # critic asked for + this page's cast, budgeted to MAX_REFS incl. the draft.
+        sheet_refs, seen_ent = [], set()
+
+        def _add(ent, path_bytes):
+            if ent not in seen_ent and len(sheet_refs) < MAX_REFS - 1:
+                seen_ent.add(ent)
+                sheet_refs.append((ent, path_bytes))
+
+        labels = []
+        for nm in state.get("ref_chars", []):
+            got = resolve_name_sheet(ctx, nm, name_cache)
+            if got and got[0] not in seen_ent and len(sheet_refs) < MAX_REFS - 1:
+                _add(got[0], got[1])
+                labels.append(nm)
+        for m, data in zip(ctx["ref_members"], ctx["ref_bytes"]):
+            if m["entity_id"] not in seen_ent and len(sheet_refs) < MAX_REFS - 1:
+                _add(m["entity_id"], data)
+                labels.append(m["name"])
+        ref_lbls = ", ".join(f"image {i + 2} = {nm}" for i, nm in enumerate(labels))
+        esc_note = ("\n\nA PREVIOUS edit did NOT change the picture. You MUST actually redraw the "
+                    "affected area this time -- do not return a near-identical image."
+                    if state.get("escalate") else "")
+        prompt = (f"{style_text}\n\nImage 1 is a DRAFT illustration to edit in place.\n\n"
+                  f"{state.get('edit_instr','')}"
+                  + (f"\n\nReference sheets are attached ({ref_lbls}); make each named "
+                     "character match its sheet exactly (face, build, species, clothing)."
+                     if ref_lbls else "")
+                  + esc_note
+                  + f"\n\nThe people must still match:\n{char_desc}{place_note}")
+        ref_bytes = [state["draft"]] + [b for _, b in sheet_refs]
+        model = SHEET_IMAGE_MODEL if state.get("escalate") else PAGE_IMAGE_MODEL
+        return {"prompt": prompt, "ref_bytes": ref_bytes, "model": model, "mode": "revise"}
+    prompt = build_scene_prompt(ctx["spread"], ctx["members"], ctx["ref_members"],
+                                style_text, fix=state.get("fix", "")) + place_note
+    return {"prompt": prompt, "ref_bytes": list(ctx["ref_bytes"]),
+            "model": PAGE_IMAGE_MODEL, "mode": "fresh"}
+
+
+def critique_prompt(ctx: dict) -> str:
+    """The scene-critique prompt for a page (same inputs the lazy path used)."""
+    page = ctx["page"]
+    return SCENE_CRITIQUE.format(
+        brief=page["brief"], chars=ctx["char_desc"] or "(none)", style=ctx["style_text"],
+        roster=ctx["roster"], chapter_ahead=ctx["chapter_ahead"],
+        source=(page["read_text"] or "")[:1200] or "(not available)")
+
+
+def _judge_best(cands: list, brief: str, td: Path) -> dict | None:
+    """Vision critic picks the best of several candidates (bytes) when none cleared
+    the bar. Returns {"best": idx0based, "why": str} or None. Shared with the bake."""
+    if len(cands) <= 1:
+        return None
+    paths = []
+    for c in cands:
+        cp = Path(td) / f"judge{c['n']}.webp"
+        cp.write_bytes(c["data"])
+        paths.append(cp)
+    try:
+        verdict = gem.judge_images(paths, JUDGE_BEST.format(brief=brief),
+                                   schema={"type": "object", "properties": {
+                                       "best": {"type": "integer"}, "why": {"type": "string"}},
+                                       "required": ["best"]})
+        pick = int(verdict.get("best", 0)) - 1
+        if 0 <= pick < len(cands):
+            return {"best": pick, "why": verdict.get("why", "")}
+    except Exception as ex:  # noqa: BLE001 -- fall back to the best-min-score
+        print(f"[scene] best-of judge failed: {ex}", flush=True)
+    return None
+
+
+def _attempt_trace(attempt: int, mode: str, res: dict, crit: dict, fix_ok: bool) -> dict:
+    """One attempt's row for the debug trace (shared by lazy + batch)."""
+    return {
+        "n": attempt, "mode": mode, "scores": dict(zip(CRIT_KEYS, res["scores"])),
+        "min": res["min"], "avg": res["avg"], "fix_ok": fix_ok, "verdict": res["verdict"],
+        "edit_instruction": (crit.get("edit_instruction") or "").strip(),
+        "reference_characters": [r for r in crit.get("reference_characters", [])
+                                 if isinstance(r, str) and r.strip()],
+        "issues": crit.get("issues", []), "fix_hint": crit.get("fix_hint", ""),
+    }
+
+
+def _render_scene(book_id: int, idx: int) -> bytes:
+    """Render page `idx`'s illustration synchronously (the lazy read path), on top
+    of the shared build_scene_context / build_round_request / apply_verdict helpers
+    so it stays in lock-step with the batch bake."""
+    ctx = build_scene_context(book_id, idx)
+    page = ctx["page"]
+    state = new_scene_state()
+    name_cache: dict = {}
+    gen_id = db.next_gen_id(book_id, idx)   # debug history: this generation run
+    trace = {"states": ctx["states"], "max_tries": SCENE_TRIES, "attempts": []}
+
+    with tempfile.TemporaryDirectory() as td:
+        # critique always sees this page's cast sheets (to catch a wrong figure)
+        crit_ref_paths = []
+        for m, blob in zip(ctx["ref_members"], ctx["ref_bytes"]):
+            p = Path(td) / f"ref_{m['entity_id']}__{m['variant_id']}.webp"
+            p.write_bytes(blob)
+            crit_ref_paths.append(p)
 
         for attempt in range(1, SCENE_TRIES + 1):
-            mode = "revise" if draft is not None else "fresh"
+            req = build_round_request(ctx, state, name_cache)
+            mode = req["mode"]
+            gen_ref_paths = []
+            for i, b in enumerate(req["ref_bytes"]):
+                gp = Path(td) / f"gen{attempt}_{i}.webp"
+                gp.write_bytes(b)
+                gen_ref_paths.append(gp)
             cand = Path(td) / f"cand{attempt}.webp"
-            if draft is not None:
-                # REVISE (img2img). The instruction itself -- what to KEEP and what to
-                # CHANGE -- is authored by the critic (edit_instr); the harness only
-                # supplies the draft (image 1) and the reference sheets the critic asked
-                # for (ref_chars, identity anchors for figures being corrected), topped
-                # up with this page's cast for consistency. Budget MAX_REFS incl. draft.
-                sheet_refs, seen_ent = [], set()
-
-                def _add(name, ent, path):
-                    if ent not in seen_ent and len(sheet_refs) < MAX_REFS - 1:
-                        seen_ent.add(ent)
-                        sheet_refs.append((name, path))
-
-                for name in ref_chars:
-                    got = _sheet_for_name(name)
-                    if got:
-                        _add(name, got[0], got[1])
-                for m, p in zip(ref_members, ref_paths):
-                    _add(m["name"], m["entity_id"], p)
-                ref_lbls = ", ".join(f"image {i + 2} = {nm}" for i, (nm, _) in enumerate(sheet_refs))
-                # When a prior revise FAILED to land we bump to the stronger image model
-                # and add a forceful note (img2img otherwise tends to return a near-copy).
-                esc_note = ("\n\nA PREVIOUS edit did NOT change the picture. You MUST actually redraw the "
-                            "affected area this time -- do not return a near-identical image."
-                            if escalate else "")
-                used_prompt = (f"{style_text}\n\nImage 1 is a DRAFT illustration to edit in place.\n\n"
-                               f"{edit_instr}"
-                               + (f"\n\nReference sheets are attached ({ref_lbls}); make each named "
-                                  "character match its sheet exactly (face, build, species, clothing)."
-                                  if ref_lbls else "")
-                               + esc_note
-                               + f"\n\nThe people must still match:\n{char_desc}{place_note}")
-                refs = [draft] + [p for _, p in sheet_refs]
-                gem.generate_image(used_prompt, refs=refs, out_path=cand, aspect="3:2",
-                                   model=SHEET_IMAGE_MODEL if escalate else PAGE_IMAGE_MODEL)
-            else:
-                used_prompt = build_scene_prompt(spread, members, ref_members, style_text, fix=fix) + place_note
-                gem.generate_image(used_prompt, refs=ref_paths, out_path=cand, aspect="3:2",
-                                   model=PAGE_IMAGE_MODEL)
-            # give the critic the SAME roster sheets that were selected as references
-            # for this scene (to flag a foreground figure drawn as the wrong person),
-            # plus the full character roster as text (to flag background/secondary
-            # figures that aren't referenced -- e.g. Reepicheep drawn as a cat).
-            crit = gem.critique_image(cand, SCENE_CRITIQUE.format(
-                brief=page["brief"], chars=char_desc or "(none)", style=style_text,
-                roster=roster_digest(registry), chapter_ahead=chapter_ahead,
-                source=(page["read_text"] or "")[:1200] or "(not available)"),
-                refs=ref_paths, ref_labels=[m["name"] for m in ref_members],
-                schema=SCENE_CRITIQUE_SCHEMA)
-            keys = ("physical", "consistency", "accuracy", "style_ok",
-                    "no_stray_text", "figure_match", "no_spoiler")
-            scores = [crit.get(k, 5 if k in ("no_stray_text", "figure_match", "no_spoiler") else 0)
-                      for k in keys]
-            score = min(scores)   # a bad anatomy OR spoiler can still veto the image
-            # anatomical correctness (`physical`) and spoiler-avoidance (`no_spoiler`) count
-            # DOUBLE the other attributes in the averaged quality score (best-of tie-break).
-            weights = [SCORE_WEIGHTS.get(k, 1) for k in keys]
-            avg = sum(s * w for s, w in zip(scores, weights)) / sum(weights)
-            # The critic decides the next move: accept / revise (with an authored
-            # edit_instruction + which reference sheets to attach) / regenerate.
-            verdict = (crit.get("verdict") or "revise").strip()
-            if not SCENE_REVISE and verdict == "revise":
-                verdict = "regenerate"     # global toggle: never img2img, always redraw
-            edit_next = (crit.get("edit_instruction") or "").strip()
-            refs_next = [r for r in crit.get("reference_characters", [])
-                         if isinstance(r, str) and r.strip()]
+            gem.generate_image(req["prompt"], refs=gen_ref_paths, out_path=cand,
+                               aspect="3:2", model=req["model"])
+            crit = gem.critique_image(cand, critique_prompt(ctx), refs=crit_ref_paths,
+                                      ref_labels=ctx["ref_labels"], schema=SCENE_CRITIQUE_SCHEMA)
             data = cand.read_bytes()
-            # Carry-forward re-check: if this was a revise targeting a specific earlier
-            # defect, confirm that exact defect is actually gone before trusting the
-            # (fresh, stochastic) verdict -- the critic sometimes flips a veto to accept
-            # on a near-identical img2img revise where the flaw in fact survived.
+            # carry-forward re-check: a revise targeting a specific defect must actually
+            # clear it before we trust the (fresh, stochastic) verdict
             fix_ok = True
+            pending_defect = state["pending_defect"]
             if mode == "revise" and pending_defect:
                 v = _verify_fix(cand, pending_defect)
                 fix_ok = bool(v.get("resolved", True))
@@ -726,64 +871,25 @@ def _render_scene(book_id: int, idx: int) -> bytes:
                 if not fix_ok:
                     print(f"[scene] revise did not clear defect ({pending_defect!r}); "
                           f"still: {v.get('still_present','')!r}", flush=True)
-            trace["attempts"].append({
-                "n": attempt, "mode": mode, "scores": dict(zip(keys, scores)),
-                "min": score, "avg": round(avg, 2), "fix_ok": fix_ok, "verdict": verdict,
-                "edit_instruction": edit_next, "reference_characters": refs_next,
-                "issues": crit.get("issues", []), "fix_hint": crit.get("fix_hint", ""),
-            })
-            # debug history: keep EVERY candidate (even rejected) with its prompt + critique
-            db.scene_attempt_add(book_id, idx, gen_id, attempt, mode, used_prompt,
+            res = apply_verdict(state, crit, data, attempt, fix_ok)
+            trace["attempts"].append(_attempt_trace(attempt, mode, res, crit, fix_ok))
+            db.scene_attempt_add(book_id, idx, gen_id, attempt, mode, req["prompt"],
                                  _compress(data, DEBUG_MAXW, DEBUG_QUALITY),
-                                 json.dumps(crit), score, round(avg, 2))
-            cands.append({"n": attempt, "path": cand, "data": data, "score": score})
-            # A candidate is "done" only when the critic accepts it, its hard sub-scores
-            # clear the bar, AND (for a revise) the targeted defect was verified gone.
-            actionable = verdict != "accept" or not fix_ok
-            key = (0 if actionable else 1, score)
-            if best is None or key > best_key:
-                best, best_key = (data, score, attempt), key
-            if verdict == "accept" and fix_ok and score >= PASS_THRESHOLD:
+                                 json.dumps(crit), res["min"], res["avg"])
+            if res["done"]:
                 break
-            fix = crit.get("fix_hint", "")
-            # the specific flaw the next revise must eliminate (verified afterwards)
-            pending_defect = "; ".join(crit.get("issues", []) or []) or fix
-            if mode == "revise" and not fix_ok:
-                # the targeted edit didn't land. Don't reroll the whole composition to
-                # fix one spot -- keep this otherwise-good draft and escalate (stronger
-                # model + forceful note). If we ALREADY escalated and it still didn't
-                # move, img2img is stuck: fall back to a from-scratch redraw.
-                if escalate:
-                    draft, escalate = None, False
-                else:
-                    draft, escalate = cand, True
-                    edit_instr = edit_next or edit_instr
-                    ref_chars = refs_next or ref_chars
-            elif verdict == "revise" and edit_next:
-                draft, escalate = cand, False
-                edit_instr, ref_chars = edit_next, refs_next
-            else:   # regenerate (or accept-but-below-bar / missing instruction)
-                draft, escalate = None, False
 
-        data, score, chosen = best
-        # If nothing cleared the bar, don't just trust the min-score: let a vision
-        # critic look at all the candidates and pick the best one.
-        if score < PASS_THRESHOLD and len(cands) > 1:
-            try:
-                verdict = gem.judge_images(
-                    [c["path"] for c in cands], JUDGE_BEST.format(brief=page["brief"]),
-                    schema={"type": "object", "properties": {
-                        "best": {"type": "integer"}, "why": {"type": "string"}}, "required": ["best"]})
-                pick = int(verdict.get("best", 0)) - 1
-                if 0 <= pick < len(cands):
-                    c = cands[pick]
-                    data, score, chosen = c["data"], c["score"], c["n"]
-                    trace["judge_pick"] = {"attempt": chosen, "why": verdict.get("why", "")}
-            except Exception as ex:  # noqa: BLE001 -- fall back to the best-min-score
-                print(f"[scene] best-of judge failed: {ex}", flush=True)
+        data, score, chosen = state["best"]
+        # If nothing cleared the bar, let a vision critic pick the best candidate.
+        if score < PASS_THRESHOLD:
+            pick = _judge_best(state["cands"], page["brief"], Path(td))
+            if pick:
+                c = state["cands"][pick["best"]]
+                data, score, chosen = c["data"], c["score"], c["n"]
+                trace["judge_pick"] = {"attempt": chosen, "why": pick["why"]}
         data = _compress(data, SCENE_MAXW, WEBP_QUALITY)   # downscale for display storage
 
     trace["chosen"] = chosen
     db.scene_store(book_id, idx, data, score, trace=json.dumps(trace))
-    db.scene_gen_add(book_id, idx, gen_id, page["brief"], json.dumps(states), chosen, score)
+    db.scene_gen_add(book_id, idx, gen_id, page["brief"], json.dumps(ctx["states"]), chosen, score)
     return data

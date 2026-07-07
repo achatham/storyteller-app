@@ -141,6 +141,49 @@ CREATE TABLE IF NOT EXISTS style_samples (
     mime       TEXT,
     data       BLOB
 );
+-- ===== batch "illustrate the whole book" bake =====
+-- One row per book bake: the overall state machine + progress for the hub/roster UI.
+CREATE TABLE IF NOT EXISTS batch_bake (
+    book_id     INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+    status      TEXT,        -- roster_review|baking|done|failed|cancelled
+    round       INTEGER DEFAULT 0,
+    total_pages INTEGER DEFAULT 0,
+    done_pages  INTEGER DEFAULT 0,
+    detail      TEXT,
+    created_at  REAL,
+    updated_at  REAL
+);
+-- Live per-page state carried ACROSS async batch rounds (the persisted form of the
+-- interactive loop's carry-forward). Image bytes: draft_blob = current img2img seed
+-- for a revise (full display quality); best_blob = best candidate so far. Scalar
+-- carry-forward (mode/pending_defect/escalate/edit_instr/ref_chars) rides in carry_json.
+CREATE TABLE IF NOT EXISTS batch_page_state (
+    book_id      INTEGER REFERENCES books(id) ON DELETE CASCADE,
+    idx          INTEGER,
+    status       TEXT,       -- pending|drafting|critiquing|verifying|revising|done|failed
+    round        INTEGER DEFAULT 0,
+    attempt      INTEGER DEFAULT 0,   -- attempts used so far (also the scene_attempts counter)
+    gen_id       INTEGER,             -- the scene_gens gen_id for this bake
+    done         INTEGER DEFAULT 0,
+    best_score   REAL,
+    best_attempt INTEGER,
+    best_blob    BLOB,
+    draft_blob   BLOB,
+    carry_json   TEXT,
+    updated_at   REAL,
+    PRIMARY KEY (book_id, idx)
+);
+-- Submitted Batch API jobs, so a restarted bake reattaches instead of resubmitting.
+CREATE TABLE IF NOT EXISTS batch_jobs (
+    book_id    INTEGER REFERENCES books(id) ON DELETE CASCADE,
+    round      INTEGER,
+    kind       TEXT,         -- generate|critique|verify|judge
+    job_name   TEXT,
+    state      TEXT,         -- last-seen JOB_STATE_*
+    created_at REAL,
+    updated_at REAL,
+    PRIMARY KEY (book_id, round, kind)
+);
 CREATE TABLE IF NOT EXISTS progress (
     book_id    INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
     position   INTEGER,
@@ -180,6 +223,8 @@ def init():
         cols = {r["name"] for r in c.execute("PRAGMA table_info(books)")}
         if "seg_ver" not in cols:
             c.execute("ALTER TABLE books ADD COLUMN seg_ver INTEGER DEFAULT 0")
+        if "illustration_mode" not in cols:   # 'lazy' (default) | 'batch'
+            c.execute("ALTER TABLE books ADD COLUMN illustration_mode TEXT DEFAULT 'lazy'")
         pcols = {r["name"] for r in c.execute("PRAGMA table_info(pages)")}
         if "image_anchor" not in pcols:
             c.execute("ALTER TABLE pages ADD COLUMN image_anchor TEXT")
@@ -755,6 +800,134 @@ def styles_with_samples() -> set:
         return {r["style_key"] for r in c.execute("SELECT style_key FROM style_samples")}
 
 
+# ---------------- batch bake ----------------
+
+def set_illustration_mode(book_id, mode):
+    with conn() as c:
+        c.execute("UPDATE books SET illustration_mode=? WHERE id=?", (mode, book_id))
+
+
+def bake_upsert(book_id, status, round=None, total_pages=None, done_pages=None, detail=None):
+    """Create/update a book's bake row. Only the fields passed (non-None) are changed."""
+    now = time.time()
+    with conn() as c:
+        c.execute("INSERT INTO batch_bake(book_id,status,round,total_pages,done_pages,"
+                  "detail,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?) "
+                  "ON CONFLICT(book_id) DO UPDATE SET status=excluded.status, "
+                  "round=COALESCE(?,batch_bake.round), "
+                  "total_pages=COALESCE(?,batch_bake.total_pages), "
+                  "done_pages=COALESCE(?,batch_bake.done_pages), "
+                  "detail=COALESCE(?,batch_bake.detail), updated_at=excluded.updated_at",
+                  (book_id, status, round or 0, total_pages or 0, done_pages or 0, detail,
+                   now, now, round, total_pages, done_pages, detail))
+
+
+def bake_get(book_id) -> dict | None:
+    with conn() as c:
+        r = c.execute("SELECT * FROM batch_bake WHERE book_id=?", (book_id,)).fetchone()
+        return dict(r) if r else None
+
+
+def books_baking() -> list[int]:
+    """Books whose bake was interrupted (status 'baking') -- relaunched on restart."""
+    with conn() as c:
+        return [r["book_id"] for r in
+                c.execute("SELECT book_id FROM batch_bake WHERE status='baking'")]
+
+
+def bps_init(book_id, idxs: list[int]):
+    """Seed per-page bake state for every page (idempotent: keeps existing rows so a
+    resume doesn't wipe progress)."""
+    now = time.time()
+    with conn() as c:
+        for idx in idxs:
+            c.execute("INSERT OR IGNORE INTO batch_page_state(book_id,idx,status,round,"
+                      "attempt,done,updated_at) VALUES (?,?,'pending',0,0,0,?)",
+                      (book_id, idx, now))
+
+
+def bps_get(book_id, idx) -> dict | None:
+    with conn() as c:
+        r = c.execute("SELECT * FROM batch_page_state WHERE book_id=? AND idx=?",
+                      (book_id, idx)).fetchone()
+        return dict(r) if r else None
+
+
+def bps_all(book_id) -> list[dict]:
+    with conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM batch_page_state WHERE book_id=? ORDER BY idx", (book_id,))]
+
+
+def bps_actionable(book_id) -> list[int]:
+    """Page indices still needing work (not done and not permanently failed)."""
+    with conn() as c:
+        return [r["idx"] for r in c.execute(
+            "SELECT idx FROM batch_page_state WHERE book_id=? AND done=0 AND status!='failed' "
+            "ORDER BY idx", (book_id,))]
+
+
+def bps_counts(book_id) -> dict:
+    with conn() as c:
+        rows = c.execute("SELECT status, COUNT(*) n FROM batch_page_state WHERE book_id=? "
+                         "GROUP BY status", (book_id,)).fetchall()
+        done = c.execute("SELECT COUNT(*) n FROM batch_page_state WHERE book_id=? AND done=1",
+                         (book_id,)).fetchone()["n"]
+    out = {r["status"]: r["n"] for r in rows}
+    out["done"] = done
+    return out
+
+
+def bps_save(book_id, idx, **f):
+    """Update per-page bake state. Accepts any of: status, round, attempt, gen_id,
+    done, best_score, best_attempt, best_blob, draft_blob, carry_json."""
+    cols = ("status", "round", "attempt", "gen_id", "done", "best_score",
+            "best_attempt", "best_blob", "draft_blob", "carry_json")
+    sets, vals = [], []
+    for k in cols:
+        if k in f:
+            sets.append(f"{k}=?")
+            vals.append(f[k])
+    if not sets:
+        return
+    sets.append("updated_at=?")
+    vals.append(time.time())
+    vals += [book_id, idx]
+    with conn() as c:
+        c.execute(f"UPDATE batch_page_state SET {', '.join(sets)} WHERE book_id=? AND idx=?", vals)
+
+
+def bjob_upsert(book_id, round, kind, job_name, state):
+    now = time.time()
+    with conn() as c:
+        c.execute("INSERT INTO batch_jobs(book_id,round,kind,job_name,state,created_at,"
+                  "updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(book_id,round,kind) "
+                  "DO UPDATE SET job_name=excluded.job_name, state=excluded.state, "
+                  "updated_at=excluded.updated_at",
+                  (book_id, round, kind, job_name, state, now, now))
+
+
+def bjob_get(book_id, round, kind) -> dict | None:
+    with conn() as c:
+        r = c.execute("SELECT * FROM batch_jobs WHERE book_id=? AND round=? AND kind=?",
+                      (book_id, round, kind)).fetchone()
+        return dict(r) if r else None
+
+
+def bjob_set_state(book_id, round, kind, state):
+    with conn() as c:
+        c.execute("UPDATE batch_jobs SET state=?, updated_at=? WHERE book_id=? AND round=? "
+                  "AND kind=?", (state, time.time(), book_id, round, kind))
+
+
+def bake_clear(book_id):
+    """Drop all bake bookkeeping for a book (e.g. before a fresh re-bake)."""
+    with conn() as c:
+        c.execute("DELETE FROM batch_page_state WHERE book_id=?", (book_id,))
+        c.execute("DELETE FROM batch_jobs WHERE book_id=?", (book_id,))
+        c.execute("DELETE FROM batch_bake WHERE book_id=?", (book_id,))
+
+
 # ---------------- progress ----------------
 
 def set_progress(book_id, position):
@@ -770,6 +943,16 @@ def get_progress(book_id) -> int:
         r = c.execute("SELECT position FROM progress WHERE book_id=?",
                       (book_id,)).fetchone()
         return r["position"] if r else 0
+
+
+def get_progress_at(book_id) -> float:
+    """When the server-side position was last written (epoch seconds), or 0.
+    Lets a reader decide whether the server copy is newer than its local one and
+    resume from wherever the book was most recently read, on any device."""
+    with conn() as c:
+        r = c.execute("SELECT updated_at FROM progress WHERE book_id=?",
+                      (book_id,)).fetchone()
+        return (r["updated_at"] or 0.0) if r else 0.0
 
 
 # ---------------- reading history ----------------

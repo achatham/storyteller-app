@@ -86,6 +86,11 @@ def _startup():
         db.set_status(bid, "queued", "resuming after restart…")
         start_processing(bid)
         print(f"[server] resumed interrupted processing for book {bid}", flush=True)
+    # resume any whole-book batch bake interrupted by a restart. batch_bake reattaches
+    # to in-flight Batch API jobs (batch_jobs table) instead of resubmitting.
+    for bid in db.books_baking():
+        start_bake(bid)
+        print(f"[server] resumed interrupted bake for book {bid}", flush=True)
 
 
 # ---------------- lazy scene generation ----------------
@@ -164,6 +169,18 @@ def start_processing(book_id: int):
     })
     logf = open(LOGS / f"book_{book_id}.log", "ab")
     subprocess.Popen([sys.executable, "-m", "webapp.process", str(book_id)],
+                     cwd=str(ROOT), env=env, stdout=logf, stderr=logf)
+
+
+def start_bake(book_id: int):
+    """Launch the whole-book Batch-API bake as a detached subprocess (long-running,
+    polls batch jobs). It reads book/style/pages/roster straight from the DB, so it
+    only needs the app DB path in its env."""
+    env = dict(os.environ)
+    env["STORY_APP_DB"] = str(db.DB)
+    env["STORY_RUN"] = f"book:{book_id}"
+    logf = open(LOGS / f"bake_{book_id}.log", "ab")
+    subprocess.Popen([sys.executable, "-m", "webapp.batch_bake", str(book_id)],
                      cwd=str(ROOT), env=env, stdout=logf, stderr=logf)
 
 
@@ -270,15 +287,20 @@ def api_books():
 @app.post("/api/books")
 async def api_upload(file: UploadFile = File(...), title: str = Form(""),
                      author: str = Form(""), style: str = Form("watercolor"),
-                     words_per_page: int = Form(200), age: str = Form("5")):
+                     words_per_page: int = Form(200), age: str = Form("5"),
+                     illustration_mode: str = Form("lazy")):
     if style not in STYLES:
         raise HTTPException(400, f"unknown style {style!r}")
+    if illustration_mode not in ("lazy", "batch"):
+        raise HTTPException(400, f"unknown illustration_mode {illustration_mode!r}")
     data = await file.read()
     if not data:
         raise HTTPException(400, "empty file")
     book_id = db.create_book(title.strip(), author.strip(), file.filename, style,
                              words_per_page, age, file.content_type or "application/octet-stream",
                              data)
+    if illustration_mode != "lazy":
+        db.set_illustration_mode(book_id, illustration_mode)
     await asyncio.to_thread(start_processing, book_id)
     return {"id": book_id}
 
@@ -295,8 +317,14 @@ def api_book(book_id: int):
         "seg_ver": b["seg_ver"] if "seg_ver" in b.keys() else 0,
         "words_per_page": b["words_per_page"], "age": b["age"],
         "position": db.get_progress(book_id),
+        "position_at": db.get_progress_at(book_id),
         "chapters": db.get_chapters(book_id),
         "scenes_done": db.scene_progress(book_id).get("done", 0),
+        "illustration_mode": b["illustration_mode"] if "illustration_mode" in b.keys() else "lazy",
+        "bake": (lambda bk: {"status": bk["status"], "round": bk["round"],
+                             "total_pages": bk["total_pages"],
+                             "done_pages": db.bps_counts(book_id).get("done", 0)}
+                 if bk else None)(db.bake_get(book_id)),
     }
 
 
@@ -318,6 +346,63 @@ async def api_reprocess(book_id: int, fresh: bool = False):
     db.set_status(book_id, "queued", "reprocessing…" + (" (fresh)" if fresh else ""))
     await asyncio.to_thread(start_processing, book_id)
     return {"ok": True, "fresh": fresh}
+
+
+@app.post("/api/books/{book_id}/bake")
+async def api_bake(book_id: int, fresh: bool = False):
+    """Illustrate the whole book via the Batch API (~50% cheaper). Kicks off the
+    background bake subprocess. Valid once the roster is ready (roster_review) or on
+    a ready book you want to (re)bake. ?fresh=1 discards prior bake bookkeeping."""
+    b = db.get_book(book_id)
+    if not b:
+        raise HTTPException(404, "no such book")
+    if b["num_pages"] < 1:
+        raise HTTPException(409, "book not segmented yet")
+    if fresh:
+        await asyncio.to_thread(db.bake_clear, book_id)
+    await asyncio.to_thread(db.set_illustration_mode, book_id, "batch")
+    # round=0: a user-initiated (re)start runs the round loop from the top. Crash
+    # resume (server startup -> start_bake) leaves the pointer untouched instead.
+    await asyncio.to_thread(db.bake_upsert, book_id, "baking", round=0,
+                            total_pages=b["num_pages"])
+    await asyncio.to_thread(db.set_status, book_id, "baking", "illustrating the whole book…")
+    await asyncio.to_thread(start_bake, book_id)
+    return {"ok": True}
+
+
+@app.post("/api/books/{book_id}/bake/cancel")
+async def api_bake_cancel(book_id: int):
+    """Ask a running bake to stop. The orchestrator checks this flag between steps;
+    in-flight Batch API jobs are also cancelled best-effort."""
+    if not db.bake_get(book_id):
+        raise HTTPException(404, "no bake for this book")
+    await asyncio.to_thread(db.bake_upsert, book_id, "cancelled")
+    # best-effort: cancel any still-open Batch API jobs so we stop paying for them
+    def _cancel_jobs():
+        from pipeline import gem
+        with db.conn() as c:
+            rows = c.execute("SELECT job_name, state FROM batch_jobs WHERE book_id=?",
+                             (book_id,)).fetchall()
+        for r in rows:
+            if r["job_name"] and r["state"] not in gem.BATCH_TERMINAL:
+                try:
+                    gem._client.batches.cancel(name=r["job_name"])
+                except Exception:  # noqa: BLE001
+                    pass
+    await asyncio.to_thread(_cancel_jobs)
+    return {"ok": True}
+
+
+@app.get("/api/books/{book_id}/bake")
+def api_bake_status(book_id: int):
+    """Bake progress for the roster/hub UI: overall state + per-status page counts."""
+    bake = db.bake_get(book_id)
+    if not bake:
+        return {"status": None}
+    counts = db.bps_counts(book_id)
+    return {"status": bake["status"], "round": bake["round"],
+            "total_pages": bake["total_pages"], "done_pages": counts.get("done", 0),
+            "detail": bake["detail"], "counts": counts}
 
 
 @app.post("/api/books/{book_id}/recompress")

@@ -71,6 +71,11 @@
   <a class="back" id="back" href="#">&#8592; Book settings</a>
   <h1 id="title">Roster</h1>
   <div class="sub" id="sub"></div>
+  <div id="bakebar" hidden style="margin-top:12px;padding:12px 14px;border:1px solid #d8d2c4;border-radius:10px;background:#faf7ef;display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+    <div id="bakemsg" style="flex:1 1 240px;font-size:14px"></div>
+    <button id="bakego" style="padding:9px 16px;border:0;border-radius:8px;background:#7a5c2e;color:#fff;font-weight:600;cursor:pointer">Illustrate whole book</button>
+    <button id="bakecancel" hidden style="padding:9px 16px;border:1px solid #b9532e;border-radius:8px;background:#fff;color:#b9532e;cursor:pointer">Cancel bake</button>
+  </div>
 </header>
 <main id="main"></main>
 <div id="ov" hidden><div class="dlg">
@@ -96,10 +101,29 @@ const ID = __BOOK_ID__;
 const $ = s => document.querySelector(s);
 $("#back").href = "/settings/" + ID;
 
+// Fetch JSON, treating an auth-proxy bounce (redirect / non-OK / login HTML) as
+// "not signed in" rather than letting it render as blank or stale content.
+async function getJSON(url, opts){
+  const r = await fetch(url, Object.assign({cache:"no-store"}, opts));
+  if (!r.ok || r.redirected) throw new Error("not signed in (HTTP " + r.status + ")");
+  return r.json();   // login pages are HTML -> this throws, caught the same way
+}
+function signInPrompt(msg){
+  $("#main").innerHTML = `<div style="font-family:system-ui,sans-serif;color:var(--muted);padding:28px 0">`
+    + `⚠ ${msg} — your session may have expired. `
+    + `<a href="#" onclick="location.reload();return false" style="color:var(--accent)">Sign in again</a>.</div>`;
+}
+
 (async () => {
-  const b = await (await fetch("/api/books/"+ID)).json();
+  let b, roster;
+  try {
+    b = await getJSON("/api/books/"+ID);
+    roster = await getJSON("/api/books/"+ID+"/roster");
+  } catch (e) {
+    signInPrompt("Couldn't load this roster");
+    return;
+  }
   $("#title").textContent = b.title + " — roster";
-  const roster = await (await fetch("/api/books/"+ID+"/roster")).json();
   const drawn = roster.reduce((n,e)=>n+e.variants.filter(v=>v.drawn).length,0);
   const total = roster.reduce((n,e)=>n+e.variants.length,0);
   $("#sub").textContent = `${roster.length} entities · ${drawn}/${total} reference sheets drawn (the rest draw as you read those scenes)`;
@@ -175,5 +199,55 @@ document.addEventListener("click", e => {
 $("#ovcancel").onclick = closeEditor;
 $("#ovgo").onclick = submitEdit;
 document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#ov").hidden) closeEditor(); });
+
+// ---- whole-book batch bake ----
+let bakeTimer = null;
+function renderBake(bake){
+  const bar = $("#bakebar"), go = $("#bakego"), cancel = $("#bakecancel"), msg = $("#bakemsg");
+  const st = bake && bake.status;
+  if (!st){ bar.hidden = true; return; }
+  bar.hidden = false;
+  if (st === "baking"){
+    go.hidden = true; cancel.hidden = false;
+    msg.innerHTML = `<b>Illustrating…</b> ${bake.done_pages}/${bake.total_pages} pages `
+      + `(round ${(bake.round||0)+1}). Runs in the background — you can leave this page.`;
+  } else if (st === "done"){
+    go.hidden = false; go.textContent = "Re-illustrate whole book"; cancel.hidden = true;
+    msg.innerHTML = `<b>Done.</b> All ${bake.total_pages} pages illustrated at the batch (~50%-off) rate.`;
+  } else if (st === "cancelled" || st === "failed"){
+    go.hidden = false; go.textContent = "Illustrate whole book"; cancel.hidden = true;
+    msg.innerHTML = st === "failed"
+      ? `<b>Bake failed.</b> ${esc(bake.detail||"")} — you can retry.`
+      : `Bake cancelled. Press to start again.`;
+  } else { // roster_review or other pre-bake
+    go.hidden = false; go.textContent = "Illustrate whole book"; cancel.hidden = true;
+    msg.innerHTML = `Review & edit the roster above, then illustrate all `
+      + `${bake.total_pages||""} pages in one batch (~50% cheaper, runs in the background).`;
+  }
+}
+async function pollBake(){
+  try {
+    const bake = await (await fetch("/api/books/"+ID+"/bake")).json();
+    renderBake(bake);
+    if (bake && bake.status === "baking" && !bakeTimer) bakeTimer = setInterval(pollBake, 5000);
+    if (bake && bake.status !== "baking" && bakeTimer){ clearInterval(bakeTimer); bakeTimer = null; }
+  } catch (ex) { /* ignore transient */ }
+}
+$("#bakego").onclick = async () => {
+  $("#bakego").disabled = true;
+  const fresh = $("#bakego").textContent.startsWith("Re-");
+  try {
+    const r = await fetch("/api/books/"+ID+"/bake" + (fresh?"?fresh=1":""), {method:"POST"});
+    if (!r.ok){ const e = await r.json().catch(()=>({})); throw new Error(e.detail||("HTTP "+r.status)); }
+    await pollBake();
+  } catch (ex){ $("#bakemsg").textContent = "Failed to start: " + ex.message; }
+  finally { $("#bakego").disabled = false; }
+};
+$("#bakecancel").onclick = async () => {
+  $("#bakecancel").disabled = true;
+  try { await fetch("/api/books/"+ID+"/bake/cancel", {method:"POST"}); await pollBake(); }
+  finally { $("#bakecancel").disabled = false; }
+};
+pollBake();
 </script>
 </body></html>

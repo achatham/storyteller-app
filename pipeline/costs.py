@@ -65,20 +65,31 @@ def _conn() -> sqlite3.Connection:
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ts REAL, run TEXT, model TEXT, kind TEXT,
         input_tokens INTEGER, output_tokens INTEGER, total_tokens INTEGER,
-        images INTEGER, cost_usd REAL)""")
+        images INTEGER, cost_usd REAL, batch INTEGER DEFAULT 0)""")
+    # migrate older DBs that predate the batch column
+    cols = {r[1] for r in c.execute("PRAGMA table_info(usage)")}
+    if "batch" not in cols:
+        c.execute("ALTER TABLE usage ADD COLUMN batch INTEGER DEFAULT 0")
     return c
 
 
-def cost_for(model: str, input_tokens: int, output_tokens: int) -> float:
+# The Batch API charges a flat 50% of interactive pricing for the same models.
+BATCH_DISCOUNT = 0.5
+
+
+def cost_for(model: str, input_tokens: int, output_tokens: int,
+             batch: bool = False) -> float:
     p = PRICING.get(model, DEFAULT_PRICE)
-    return input_tokens / 1e6 * p["in"] + output_tokens / 1e6 * p["out"]
+    cost = input_tokens / 1e6 * p["in"] + output_tokens / 1e6 * p["out"]
+    return cost * BATCH_DISCOUNT if batch else cost
 
 
 def record(model: str, kind: str, input_tokens: int, output_tokens: int,
            total_tokens: int | None = None, images: int = 0,
-           run: str | None = None) -> float:
-    """Record one API call. Returns its USD cost. Thread- and process-safe."""
-    cost = cost_for(model, input_tokens, output_tokens)
+           run: str | None = None, batch: bool = False) -> float:
+    """Record one API call. Returns its USD cost. Thread- and process-safe.
+    batch=True prices the call at the 50% Batch-API discount."""
+    cost = cost_for(model, input_tokens, output_tokens, batch=batch)
     total = total_tokens if total_tokens is not None else input_tokens + output_tokens
     # key each row by its run (per-book tag / output dir / label) so per-book and
     # per-run reports can be sliced out of the shared usage table
@@ -88,9 +99,9 @@ def record(model: str, kind: str, input_tokens: int, output_tokens: int,
         with _conn() as c:
             c.execute(
                 "INSERT INTO usage(ts,run,model,kind,input_tokens,output_tokens,"
-                "total_tokens,images,cost_usd) VALUES (?,?,?,?,?,?,?,?,?)",
+                "total_tokens,images,cost_usd,batch) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (time.time(), run, model, kind, input_tokens, output_tokens,
-                 total, images, cost))
+                 total, images, cost, 1 if batch else 0))
     return cost
 
 
@@ -100,8 +111,8 @@ def _rows(where: str = "", params: tuple = ()):
     with _conn() as c:
         return c.execute(
             "SELECT model, kind, COUNT(*), SUM(input_tokens), SUM(output_tokens), "
-            "SUM(images), SUM(cost_usd) FROM usage " + where +
-            " GROUP BY model, kind ORDER BY model, kind", params).fetchall()
+            "SUM(images), SUM(cost_usd), batch FROM usage " + where +
+            " GROUP BY model, kind, batch ORDER BY model, kind, batch", params).fetchall()
 
 
 def report(run: str | None = None) -> str:
@@ -118,12 +129,14 @@ def report(run: str | None = None) -> str:
     text_in = text_out = img_in = img_out = img_n = calls = 0
     lines = [f"=== Gemini cost report — {scope} ===", f"db: {DB}", ""]
     lines.append(f"{'model':<30} {'kind':<9} {'calls':>5} {'in_tok':>10} {'out_tok':>10} {'imgs':>5} {'USD':>9}")
-    for model, kind, n, sin, sout, simg, _stored in rows:
+    for model, kind, n, sin, sout, simg, _stored, batch in rows:
         sin, sout, simg = sin or 0, sout or 0, simg or 0
-        # recompute from current PRICING (retroactive) rather than stored cost
-        scost = cost_for(model, sin, sout)
+        # recompute from current PRICING (retroactive) rather than stored cost;
+        # batch rows get the 50% discount applied by cost_for
+        scost = cost_for(model, sin, sout, batch=bool(batch))
         calls += n
-        lines.append(f"{model:<30} {kind:<9} {n:>5} {sin:>10,} {sout:>10,} {simg:>5} {scost:>9.4f}")
+        tag = f"{kind} (batch)" if batch else kind
+        lines.append(f"{model:<30} {tag:<9} {n:>5} {sin:>10,} {sout:>10,} {simg:>5} {scost:>9.4f}")
         # split on what the call actually was (kind=image for every image model,
         # pro or flash), not on a model allow-list that drifts as models change
         if kind == "image":
@@ -146,17 +159,17 @@ def book_report(book_id) -> dict:
     processing rows keyed by its work dir (.../work/<id>). Recomputed from tokens."""
     with _conn() as c:
         rows = c.execute(
-            "SELECT model, kind, SUM(input_tokens), SUM(output_tokens), SUM(images) "
-            "FROM usage WHERE run = ? OR run LIKE ? GROUP BY model, kind",
+            "SELECT model, kind, SUM(input_tokens), SUM(output_tokens), SUM(images), batch "
+            "FROM usage WHERE run = ? OR run LIKE ? GROUP BY model, kind, batch",
             (f"book:{book_id}", f"%/work/{book_id}")).fetchall()
     text = img = 0.0
     n_img = 0
     by_model = []
-    for model, kind, sin, sout, simg in rows:
+    for model, kind, sin, sout, simg, batch in rows:
         sin, sout, simg = sin or 0, sout or 0, simg or 0
-        cost = cost_for(model, sin, sout)
-        by_model.append({"model": model, "kind": kind, "in": sin, "out": sout,
-                         "images": simg, "usd": round(cost, 4)})
+        cost = cost_for(model, sin, sout, batch=bool(batch))
+        by_model.append({"model": model, "kind": kind, "batch": bool(batch),
+                         "in": sin, "out": sout, "images": simg, "usd": round(cost, 4)})
     for m in by_model:
         if m["kind"] == "image":
             img += m["usd"]; n_img += m["images"]

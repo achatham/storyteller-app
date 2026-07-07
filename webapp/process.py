@@ -511,8 +511,22 @@ def run(book_id: int):
                 workers=int(os.environ.get("STORY_SEGMENT_WORKERS", "4")))
     db.set_num_pages(book_id, n)
 
-    # 3. warm the first few page images (drawing just the roster sheets they need)
-    # so the book opens instantly.
+    # 3. batch mode: draw the whole roster up front and STOP at the review gate --
+    # the user edits the roster, then presses "Illustrate whole book" to bake every
+    # scene via the Batch API (~50% cheaper). No lazy warm; scenes come from the bake.
+    mode = (db.get_book(book_id) or {}).get("illustration_mode") or "lazy"
+    if mode == "batch":
+        from . import scene
+        db.set_status(book_id, "roster", "drawing the full roster")
+        scene.draw_all_sheets(book_id)
+        db.bake_upsert(book_id, "roster_review", total_pages=n)
+        db.set_status(book_id, "roster_review",
+                      f"roster ready ({n} pages) — review it, then illustrate the book")
+        print(f"[process] book {book_id} roster ready: {n} pages (awaiting bake)", flush=True)
+        return
+
+    # 3'. lazy mode: warm the first few page images (drawing just the roster sheets
+    # they need) so the book opens instantly.
     warm = min(int(os.environ.get("STORY_WARM_PAGES", "2")), n)
     if warm > 0:
         db.set_status(book_id, "warming", f"drawing first {warm} pages")

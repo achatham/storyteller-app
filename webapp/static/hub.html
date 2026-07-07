@@ -88,9 +88,15 @@
         <option value="500">~500 words</option>
       </select></label>
       <label>Audience age <input name="age" value="5"></label>
+      <label class="full">Illustrations <select name="illustration_mode">
+        <option value="lazy" selected>Draw as you read (instant open)</option>
+        <option value="batch">Pre-illustrate whole book (~50% cheaper, review roster first)</option>
+      </select></label>
       <div class="full hint">Uploading runs the initial pass: it reads the whole book, builds the
-        character roster, and splits it into read-aloud pages. Character art and page pictures are
-        then drawn as you read (the first pages are drawn during upload so it opens instantly).</div>
+        character roster, and splits it into read-aloud pages. In <b>draw-as-you-read</b> mode, page
+        pictures are drawn on demand (the first pages during upload, so it opens instantly). In
+        <b>pre-illustrate</b> mode it stops after the roster so you can review it, then illustrates
+        every page in one background batch at the Batch-API discount (~50% off).</div>
       <button class="full" type="submit">Upload &amp; process</button>
     </form>
   </details>
@@ -122,19 +128,27 @@ function card(b){
   const pct = b.num_pages ? Math.round((b.position+1)/b.num_pages*100) : 0;
   const ready = b.status === "ready";
   const failed = b.status === "failed";
+  const rosterReview = b.status === "roster_review";
+  const baking = b.status === "baking";
+  const bakePct = b.num_pages ? Math.round((b.scenes_done||0)/b.num_pages*100) : 0;
   return `<div class="card" data-id="${b.id}">
     <span class="pill">${(b.style||"").replace(/_/g,' ')}</span>
     <h3>${b.title}</h3>
     ${b.author ? `<div class="auth">${b.author}</div>` : ""}
     <div class="status">${
       failed ? "⚠ " + (b.detail||"failed")
+      : rosterReview ? "🎨 Roster ready — review & illustrate"
+      : baking ? `🎨 Illustrating… ${b.scenes_done||0}/${b.num_pages} pages`
       : processing ? "⏳ " + (b.detail||b.status)
       : ready ? `${b.num_pages} pages · ${b.scenes_done} drawn`
       : b.status}</div>
     ${ready ? `<div class="barwrap"><div class="bar" style="width:${pct}%"></div></div>` : ""}
+    ${baking ? `<div class="barwrap"><div class="bar" style="width:${bakePct}%"></div></div>` : ""}
     <div class="row">
-      <a class="btn go" href="/book/${b.id}" aria-disabled="${ready?'false':'true'}">
-        ${b.position>0 && ready ? "Continue" : "Read"}</a>
+      ${rosterReview || baking
+        ? `<a class="btn go" href="/roster/${b.id}">${rosterReview ? "Review roster" : "View progress"}</a>`
+        : `<a class="btn go" href="/book/${b.id}" aria-disabled="${ready?'false':'true'}">
+             ${b.position>0 && ready ? "Continue" : "Read"}</a>`}
       <a class="btn" href="/settings/${b.id}" title="Settings & cost">&#9881;</a>
       <button class="del" onclick="del(${b.id},event)">✕</button>
     </div>
@@ -158,7 +172,7 @@ async function refresh(){
   }
   el.innerHTML = books.length ? books.map(card).join("")
     : `<div class="empty">No books yet — add one below.</div>`;
-  if (books.some(b => PROCESSING.includes(b.status))) setTimeout(refresh, 2500);
+  if (books.some(b => PROCESSING.includes(b.status) || b.status === "baking")) setTimeout(refresh, 2500);
 }
 
 async function del(id, e){
