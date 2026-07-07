@@ -12,11 +12,12 @@ self.addEventListener("activate", (e) => e.waitUntil((async () => {
   await self.clients.claim();
 })()));
 
-// Cache only successful, same-origin responses (never a 202 "generating" or a
-// cross-origin auth-redirect login page).
+// Cache only successful, same-origin, non-redirected responses (never a 202
+// "generating", never a login page the auth proxy redirected us to -- caching
+// that under an /api/* key is what makes a re-login show a stale library).
 function maybeCache(req, res) {
   try {
-    if (res && res.ok && new URL(res.url).origin === location.origin) {
+    if (res && res.ok && !res.redirected && new URL(res.url).origin === location.origin) {
       const copy = res.clone();
       caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
     }

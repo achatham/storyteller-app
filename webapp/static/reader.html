@@ -129,8 +129,15 @@ const LKEY = "reader:" + BOOK_ID;
 
 async function boot(){
   let meta;
-  try { meta = await (await fetch(API)).json(); }
-  catch(e) { $("#splashmsg").textContent = "Could not load book."; return; }
+  try {
+    const r = await fetch(API);
+    if (!r.ok || r.redirected) throw new Error("auth");
+    meta = await r.json();   // a login page is HTML -> throws, handled below
+  } catch(e) {
+    $("#splashmsg").innerHTML = `Couldn't load — check your connection or `
+      + `<a href="#" onclick="location.reload();return false" style="color:inherit;text-decoration:underline">sign in again</a>.`;
+    return;
+  }
   if (meta.status !== "ready") {
     $("#splashmsg").innerHTML = `<b>${meta.title||"This book"}</b> is still processing…<br>` +
       `<span style="font-size:.85rem">${meta.detail||meta.status}</span>`;
@@ -141,8 +148,16 @@ async function boot(){
   DATA.segVer = meta.seg_ver || 0;
   DATA.chapters = meta.chapters || [];
   DATA.pages = await (await fetch(API + "/pages")).json();
+  // Reading position syncs across devices through the server; localStorage is a
+  // per-device cache. Resume from whichever was written most recently, so opening
+  // the book on another device picks up where you actually left off (while an
+  // offline local read still wins until it manages to sync back).
   state.i = Math.min(meta.position || 0, DATA.pages.length - 1);
-  try { const s = JSON.parse(localStorage.getItem(LKEY)); if (s && s.i!=null) state.i = Math.min(s.i, DATA.pages.length-1); } catch(e){}
+  try {
+    const s = JSON.parse(localStorage.getItem(LKEY));
+    if (s && s.i != null && (s.t || 0) >= (meta.position_at || 0))
+      state.i = Math.min(s.i, DATA.pages.length - 1);
+  } catch(e){}
 
   $("#bk").textContent = DATA.title;
   $("#chap").innerHTML = DATA.chapters.map(c =>
@@ -153,7 +168,7 @@ async function boot(){
 
 let saveTimer = null;
 function save(){
-  try { localStorage.setItem(LKEY, JSON.stringify({i:state.i})); } catch(e){}
+  try { localStorage.setItem(LKEY, JSON.stringify({i:state.i, t:Date.now()/1000})); } catch(e){}
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     fetch(API + "/progress", {method:"PUT", headers:{"Content-Type":"application/json"},

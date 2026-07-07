@@ -87,8 +87,25 @@ const ID = __BOOK_ID__;
 const $ = s => document.querySelector(s);
 const usd = n => "$" + (n||0).toFixed(n>=1?2:3);
 
+// Fetch JSON, treating an auth-proxy bounce (redirect / non-OK / login HTML) as
+// "not signed in" rather than letting it render as blank or stale content.
+async function getJSON(url){
+  const r = await fetch(url, {cache:"no-store"});
+  if (!r.ok || r.redirected) throw new Error("not signed in (HTTP " + r.status + ")");
+  return r.json();   // login pages are HTML -> this throws, caught the same way
+}
+
 (async () => {
-  const b = await (await fetch("/api/books/"+ID)).json();
+  let b;
+  try {
+    b = await getJSON("/api/books/"+ID);
+  } catch (e) {
+    $("#title").textContent = "Couldn't load";
+    document.querySelector("main").innerHTML = `<div class="panel" style="color:var(--muted);`
+      + `font-family:system-ui,sans-serif">⚠ Couldn't load this book — your session may have expired. `
+      + `<a href="#" onclick="location.reload();return false" style="color:var(--accent)">Sign in again</a>.</div>`;
+    return;
+  }
   $("#title").textContent = b.title;
   $("#auth").textContent = b.author || "";
   $("#read").href = "/book/"+ID;     // paginated book view is the default reading mode
