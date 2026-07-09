@@ -41,12 +41,16 @@ STATIC = Path(__file__).resolve().parent / "static"
 
 
 def _compute_version() -> str:
-    """A build id that changes whenever the front-end (static files) changes, so the
-    installed PWA can tell when a newer version is available."""
+    """A build id that changes whenever the user-visible front end changes, so the
+    installed PWA can tell when a newer version is available. This covers the static
+    files AND backend-defined UI surfaces that a static-only hash would miss -- e.g.
+    the art-style list, which lives in pipeline/config.py, so adding a style still
+    invalidates the cached app."""
     h = hashlib.md5()
     for p in sorted(STATIC.glob("*")):
         if p.is_file():
             h.update(p.read_bytes())
+    h.update(repr(sorted(STYLES.items())).encode())
     return h.hexdigest()[:10]
 
 
