@@ -166,6 +166,14 @@ STYLES = {
         "game or feature film (Pixar / Overwatch-like). Vibrant and friendly. NOT pixel "
         "art, NOT flat 2D, NOT photorealistic live-action."
     ),
+    "photorealistic": (
+        "Photorealistic cinematic illustration: lifelike characters and environments "
+        "rendered like a high-end feature film still or professional photograph -- true-to-"
+        "life skin, hair, fabric and materials, natural volumetric lighting, real depth of "
+        "field and atmospheric haze, crisp fine detail and believable textures. Warm, "
+        "inviting and gently storybook in mood, never harsh or uncanny. Photoreal, NOT "
+        "cartoon, NOT flat illustration."
+    ),
 }
 STYLE = os.environ.get("STORY_STYLE", "watercolor")
 if STYLE not in STYLES:
