@@ -4,7 +4,7 @@
 //              instantly so reloads are fast even on a slow/flaky connection, and
 //              refresh the cache in the background for next time. (Use the in-app
 //              "Check for updates" to jump straight to a new build.)
-const CACHE = "storyteller-v3";
+const CACHE = "storyteller-v4";
 
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) => e.waitUntil((async () => {

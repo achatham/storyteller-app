@@ -23,9 +23,10 @@
                  color:var(--muted); border:1px solid var(--line); border-radius:20px; padding:2px 8px; }
   .vgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:14px; margin-top:12px; }
   .vcard { display:flex; flex-direction:column; gap:6px; }
-  .frame { aspect-ratio:3/4; border:1px solid var(--line); border-radius:10px; overflow:hidden;
+  .frame { aspect-ratio:2/3; border:1px solid var(--line); border-radius:10px; overflow:hidden;
            background:var(--panel); display:flex; align-items:center; justify-content:center; }
-  .frame img { width:100%; height:100%; object-fit:cover; display:block; }
+  .frame.land { aspect-ratio:3/2; }   /* settings & props are drawn landscape (3:2) */
+  .frame img { width:100%; height:100%; object-fit:contain; display:block; }
   .placeholder { flex-direction:column; gap:6px; color:var(--muted); font-family:system-ui,sans-serif;
                  text-align:center; padding:10px;
                  background:repeating-linear-gradient(45deg,#f3ecdd,#f3ecdd 9px,#ece3d1 9px,#ece3d1 18px); }
@@ -46,9 +47,10 @@
          box-shadow:0 14px 44px rgba(0,0,0,.34); }
   .dlg h3 { margin:0; font-family:Georgia,serif; font-size:1.15rem; }
   .dlg .who { color:var(--muted); font-size:.8rem; margin-top:-8px; }
-  .dlg .prev { aspect-ratio:3/4; max-height:220px; align-self:center; border:1px solid var(--line);
-               border-radius:10px; overflow:hidden; background:var(--bg); }
-  .dlg .prev img { height:100%; width:auto; display:block; }
+  .dlg .prev { max-height:240px; align-self:center; border:1px solid var(--line);
+               border-radius:10px; overflow:hidden; background:var(--bg);
+               display:flex; align-items:center; justify-content:center; }
+  .dlg .prev img { max-width:100%; max-height:240px; width:auto; height:auto; display:block; }
   .dlg textarea { font:inherit; font-size:.95rem; padding:10px; border-radius:9px; border:1px solid var(--line);
                   background:var(--bg); color:var(--ink); resize:vertical; min-height:74px; }
   .dlg .flabel { font-size:.68rem; letter-spacing:1px; text-transform:uppercase; color:var(--muted); }
@@ -133,12 +135,12 @@ function signInPrompt(msg){
       <div class="vgrid">
         ${e.variants.map(v => v.drawn ? `
           <div class="vcard">
-            <div class="frame"><img loading="lazy" id="sheet-${esc(e.entity_id)}-${esc(v.variant_id)}" src="/api/books/${ID}/sheet/${enc(e.entity_id)}/${enc(v.variant_id)}?v=${b.seg_ver}" alt="${esc(v.label)}"></div>
+            <div class="frame${e.type!=="character"?" land":""}"><img loading="lazy" id="sheet-${esc(e.entity_id)}-${esc(v.variant_id)}" src="/api/books/${ID}/sheet/${enc(e.entity_id)}/${enc(v.variant_id)}?v=${b.seg_ver}" alt="${esc(v.label)}"></div>
             <div class="vlabel">${esc(v.label)}</div>${v.when?`<div class="vwhen">${esc(v.when)}</div>`:""}
             <button class="editbtn" data-eid="${esc(e.entity_id)}" data-vid="${esc(v.variant_id)}" data-name="${esc(e.name)} — ${esc(v.label)}">&#9998; Suggest edit</button>
           </div>` : `
           <div class="vcard">
-            <div class="frame placeholder">
+            <div class="frame placeholder${e.type!=="character"?" land":""}">
               <span class="ph-name">${esc(e.name)}</span>
               <span class="ph-tag">${esc(v.label)}</span>
               <span class="ph-tag">— not drawn yet —</span>

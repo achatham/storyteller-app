@@ -429,14 +429,21 @@ def edit_sheet(book_id, entity_id, variant_id, instruction, model_key="pro") -> 
     registry = db.get_registry(book_id)
     member = _member_for(registry, entity_id, variant_id) if registry else None
     style_text = _style_text(book["style"])
-    aspect = "2:3" if (member or {}).get("type", "character") == "character" else "3:2"
+    is_char = (member or {}).get("type", "character") == "character"
+    aspect = "2:3" if is_char else "3:2"
     appearance = (member or {}).get("appearance", "")
+    # What to hold constant depends on the subject: a character must keep its facial
+    # identity, but a prop/setting only needs the same art style & framing -- otherwise
+    # a transformative request ("make it like a space rover") gets suppressed.
+    keep = ("the SAME character and facial identity, art style, framing and plain "
+            "neutral background") if is_char else \
+           "the SAME art style, framing and plain neutral background"
     with costs.run_as(f"book:{book_id}"), tempfile.TemporaryDirectory() as td:
         ref = Path(td) / "current.webp"
         ref.write_bytes(current)
         prompt = (f"{style_text}\n\nImage 1 is the CURRENT reference sheet for this subject. "
-                  f"Redraw it keeping the SAME subject, facial identity, art style, framing and "
-                  f"plain neutral background, and change ONLY this, as requested: {instruction}"
+                  f"Redraw it keeping {keep}. Apply this requested change fully and clearly, "
+                  f"even if it is substantial: {instruction}"
                   + (f"\n\nFor reference, the subject is: {appearance}" if appearance else "")
                   + "\nKeep EXACTLY ONE subject, drawn once, even lighting, no text labels.")
         try:
