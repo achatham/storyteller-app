@@ -52,7 +52,15 @@
                display:flex; align-items:center; justify-content:center; }
   .dlg .prev img { max-width:100%; max-height:240px; width:auto; height:auto; display:block; }
   .dlg textarea { font:inherit; font-size:.95rem; padding:10px; border-radius:9px; border:1px solid var(--line);
-                  background:var(--bg); color:var(--ink); resize:vertical; min-height:74px; }
+                  background:var(--bg); color:var(--ink); resize:vertical; min-height:74px; width:100%; }
+  .tabs { display:flex; gap:6px; }
+  .tab { flex:1; font:inherit; font-size:.85rem; padding:7px; border:1px solid var(--line); border-radius:9px;
+         background:var(--bg); color:var(--muted); cursor:pointer; }
+  .tab.active { border-color:var(--accent); background:#fbf6ee; color:var(--accent); font-weight:600; }
+  #mode-tweak, #mode-scratch { display:flex; flex-direction:column; gap:14px; }
+  #mode-tweak[hidden], #mode-scratch[hidden] { display:none; }
+  #mode-scratch textarea { min-height:96px; }
+  .scratch-note { font-size:.72rem; color:var(--muted); line-height:1.4; }
   .dlg .flabel { font-size:.68rem; letter-spacing:1px; text-transform:uppercase; color:var(--muted); }
   .models { display:flex; flex-wrap:wrap; gap:8px; }
   .models label { display:flex; align-items:center; gap:6px; border:1px solid var(--line); border-radius:9px;
@@ -81,17 +89,33 @@
 </header>
 <main id="main"></main>
 <div id="ov" hidden><div class="dlg">
-  <h3>Suggest an edit</h3>
+  <h3 id="ovtitle">Suggest an edit</h3>
   <div class="who" id="ovwho"></div>
   <div class="prev"><img id="ovimg" alt=""></div>
-  <div class="flabel">What should change?</div>
-  <textarea id="ovtext" placeholder="e.g. make her hair red, not blonde; remove the second sword; give him a green cloak"></textarea>
-  <div class="flabel">Model</div>
-  <div class="models">
-    <label><input type="radio" name="ovmodel" value="pro" checked> Pro <small>Nano Banana Pro · best</small></label>
-    <label><input type="radio" name="ovmodel" value="flash"> Flash <small>faster</small></label>
-    <label><input type="radio" name="ovmodel" value="lite"> Lite <small>Nano Banana Lite · fastest</small></label>
+  <div class="tabs">
+    <button class="tab active" id="tabtweak" data-mode="tweak">Tweak</button>
+    <button class="tab" id="tabscratch" data-mode="scratch">Start over</button>
   </div>
+
+  <div id="mode-tweak">
+    <div class="flabel">What should change?</div>
+    <textarea id="ovtext" placeholder="e.g. make her hair red, not blonde; remove the second sword; give him a green cloak"></textarea>
+    <div class="flabel">Model</div>
+    <div class="models">
+      <label><input type="radio" name="ovmodel" value="pro" checked> Pro <small>Nano Banana Pro · best</small></label>
+      <label><input type="radio" name="ovmodel" value="flash"> Flash <small>faster</small></label>
+      <label><input type="radio" name="ovmodel" value="lite"> Lite <small>Nano Banana Lite · fastest</small></label>
+    </div>
+  </div>
+
+  <div id="mode-scratch" hidden>
+    <div class="flabel">Appearance — canonical look</div>
+    <textarea id="ovapp" placeholder="Describe exactly what it looks like…"></textarea>
+    <div class="flabel">Sheet prompt — reference framing</div>
+    <textarea id="ovsheet" placeholder="How the reference sheet is composed…"></textarea>
+    <div class="scratch-note">Redraws from scratch with the Pro sheet model (single-subject critic + retry) and saves this prompt back to the roster. Iterate until it looks right.</div>
+  </div>
+
   <div class="status" id="ovstatus"></div>
   <div class="row">
     <button class="cancel" id="ovcancel">Cancel</button>
@@ -154,14 +178,21 @@ function esc(s){ return (s||"").replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>'
 function enc(s){ return encodeURIComponent(s); }
 
 // --- sheet correction editor ---
-let cur = null;   // { eid, vid } being edited
+let cur = null;    // { eid, vid } being edited
+let mode = "tweak";      // "tweak" (img2img) | "scratch" (redraw from an edited prompt)
+let promptLoaded = false; // whether the scratch prompt has been fetched for `cur`
 function sheetUrl(eid, vid){ return `/api/books/${ID}/sheet/${enc(eid)}/${enc(vid)}`; }
 function openEditor(eid, vid, name){
   cur = { eid, vid };
+  promptLoaded = false;
   $("#ovwho").textContent = name;
   $("#ovtext").value = "";
+  $("#ovapp").value = ""; $("#ovsheet").value = "";
   $("#ovimg").src = sheetUrl(eid, vid) + "?t=" + Date.now();
+  // "Start over" edits the registry prompt, which only exists for real variants.
+  $("#tabscratch").hidden = vid.startsWith("__");
   setStatus("");
+  setMode("tweak");
   $("#ovgo").disabled = false;
   $("#ov").hidden = false;
   $("#ovtext").focus();
@@ -169,8 +200,34 @@ function openEditor(eid, vid, name){
 function closeEditor(){ $("#ov").hidden = true; cur = null; }
 function setStatus(msg, err){ const s = $("#ovstatus"); s.textContent = msg || ""; s.classList.toggle("err", !!err); }
 
+function setMode(m){
+  mode = m;
+  $("#tabtweak").classList.toggle("active", m === "tweak");
+  $("#tabscratch").classList.toggle("active", m === "scratch");
+  $("#mode-tweak").hidden = m !== "tweak";
+  $("#mode-scratch").hidden = m !== "scratch";
+  $("#ovtitle").textContent = m === "scratch" ? "Regenerate from scratch" : "Suggest an edit";
+  $("#ovgo").textContent = m === "scratch" ? "Regenerate from scratch" : "Render fix";
+  if (m === "scratch") loadPrompt();
+}
+
+async function loadPrompt(){
+  if (!cur || promptLoaded) return;
+  setStatus("Loading current prompt…");
+  try {
+    const p = await getJSON(sheetUrl(cur.eid, cur.vid) + "/prompt");
+    $("#ovapp").value = p.appearance || "";
+    $("#ovsheet").value = p.sheet_prompt || "";
+    promptLoaded = true;
+    setStatus("");
+  } catch (ex) {
+    setStatus("Couldn't load the prompt: " + ex.message, true);
+  }
+}
+
 async function submitEdit(){
   if (!cur) return;
+  if (mode === "scratch") return submitScratch();
   const instruction = $("#ovtext").value.trim();
   if (!instruction){ setStatus("Describe what to change first.", true); return; }
   const model = document.querySelector('input[name="ovmodel"]:checked').value;
@@ -181,10 +238,7 @@ async function submitEdit(){
       method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify({ instruction, model }) });
     if (!r.ok){ const e = await r.json().catch(()=>({})); throw new Error(e.detail || ("HTTP "+r.status)); }
-    const bust = "?t=" + Date.now();
-    $("#ovimg").src = sheetUrl(cur.eid, cur.vid) + bust;   // refresh preview
-    const card = document.getElementById(`sheet-${cur.eid}-${cur.vid}`);
-    if (card) card.src = sheetUrl(cur.eid, cur.vid) + bust; // refresh the roster thumbnail
+    refreshSheet();
     setStatus("Done — updated. Edit again or close.");
   } catch (ex) {
     setStatus("Failed: " + ex.message, true);
@@ -193,9 +247,38 @@ async function submitEdit(){
   }
 }
 
+async function submitScratch(){
+  const appearance = $("#ovapp").value.trim();
+  const sheet_prompt = $("#ovsheet").value.trim();
+  if (!appearance && !sheet_prompt){ setStatus("The prompt can't be empty.", true); return; }
+  $("#ovgo").disabled = true;
+  setStatus("Regenerating from scratch… this can take a minute or two.");
+  try {
+    const r = await fetch(sheetUrl(cur.eid, cur.vid) + "/redraw", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({ appearance, sheet_prompt }) });
+    if (!r.ok){ const e = await r.json().catch(()=>({})); throw new Error(e.detail || ("HTTP "+r.status)); }
+    refreshSheet();
+    setStatus("Done — regenerated & saved. Tweak the prompt and go again if needed.");
+  } catch (ex) {
+    setStatus("Failed: " + ex.message, true);
+  } finally {
+    $("#ovgo").disabled = false;
+  }
+}
+
+function refreshSheet(){
+  const bust = "?t=" + Date.now();
+  $("#ovimg").src = sheetUrl(cur.eid, cur.vid) + bust;      // refresh dialog preview
+  const card = document.getElementById(`sheet-${cur.eid}-${cur.vid}`);
+  if (card) card.src = sheetUrl(cur.eid, cur.vid) + bust;   // refresh the roster thumbnail
+}
+
 document.addEventListener("click", e => {
   const b = e.target.closest(".editbtn");
   if (b){ openEditor(b.dataset.eid, b.dataset.vid, b.dataset.name); return; }
+  const t = e.target.closest(".tab");
+  if (t){ setMode(t.dataset.mode); return; }
   if (e.target === $("#ov")) closeEditor();
 });
 $("#ovcancel").onclick = closeEditor;

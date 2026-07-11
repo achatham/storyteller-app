@@ -29,7 +29,7 @@ from pathlib import Path
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -598,11 +598,34 @@ async def api_redraw_flagged(book_id: int, threshold: float = 4.0):
     return {"ok": True, "redrawing": [p["idx"] for p in flagged]}
 
 
-@app.post("/api/books/{book_id}/sheet/{entity_id}/{variant_id}/redraw")
-async def api_sheet_redraw(book_id: int, entity_id: str, variant_id: str):
-    """Force-redraw one roster sheet so it regenerates with a fresh debug trace."""
+@app.get("/api/books/{book_id}/sheet/{entity_id}/{variant_id}/prompt")
+def api_sheet_prompt(book_id: int, entity_id: str, variant_id: str):
+    """The editable roster prompt (sheet_prompt + appearance) behind this sheet, so the
+    roster UI can show it for a from-scratch regeneration."""
     if not db.get_book(book_id):
         raise HTTPException(404, "no such book")
+    res = scene.get_sheet_prompt(book_id, entity_id, variant_id)
+    if not res.get("ok"):
+        raise HTTPException(404, res.get("error", "no prompt"))
+    return res
+
+
+@app.post("/api/books/{book_id}/sheet/{entity_id}/{variant_id}/redraw")
+async def api_sheet_redraw(book_id: int, entity_id: str, variant_id: str,
+                           body: dict | None = Body(None)):
+    """Force-redraw one roster sheet. With a body of {sheet_prompt, appearance} it
+    redraws FROM SCRATCH using that user-edited prompt (and saves it back to the
+    registry); with no body it just regenerates from the existing registry prompt."""
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    if body and (body.get("sheet_prompt") or body.get("appearance")):
+        async with _sem:
+            res = await asyncio.to_thread(
+                scene.redraw_sheet_from_prompt, book_id, entity_id, variant_id,
+                body.get("sheet_prompt", ""), body.get("appearance", ""))
+        if not res.get("ok"):
+            raise HTTPException(400, res.get("error", "redraw failed"))
+        return res
     async with _sem:
         res = await asyncio.to_thread(scene.regenerate_sheet, book_id, entity_id, variant_id)
     return res

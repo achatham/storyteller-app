@@ -267,6 +267,21 @@ def _style_anchor_path(book, td) -> "Path | None":
     return p
 
 
+def _sheet_base_prompt(style_text, sheet_prompt, appearance) -> str:
+    """The shared 'draw one reference sheet from a text description' prompt, used both
+    by the automatic first-draw and by a manual from-scratch redraw so the two stay
+    identical apart from the (editable) subject text."""
+    return (f"{style_text}\n\n{sheet_prompt}\n\nCanonical look (match exactly): "
+            f"{appearance}\nEXACTLY ONE figure / a single subject -- never two people, "
+            "and never the same character shown at two ages or in two outfits. Plain soft "
+            "neutral background, even lighting, no text labels.")
+
+
+_STYLE_REF_NOTE = ("Image {n} is a STYLE REFERENCE: match its artistic style, medium, "
+                   "brush/line work and colour palette EXACTLY -- but do NOT copy its "
+                   "subject or scene.")
+
+
 def _ensure_sheet(book_id, member, style_text, style_ref=None) -> bytes | None:
     """A reference sheet for one cast member: from the roster if present, else
     drawn now (in this book's style) and cached. `style_ref` is a style-anchor
@@ -280,10 +295,7 @@ def _ensure_sheet(book_id, member, style_text, style_ref=None) -> bytes | None:
     if not (appearance or sheet_prompt):
         return None
     img_aspect = "2:3" if member.get("type") == "character" else "3:2"
-    base = (f"{style_text}\n\n{sheet_prompt}\n\nCanonical look (match exactly): "
-            f"{appearance}\nEXACTLY ONE figure / a single subject -- never two people, "
-            "and never the same character shown at two ages or in two outfits. Plain soft "
-            "neutral background, even lighting, no text labels.")
+    base = _sheet_base_prompt(style_text, sheet_prompt, appearance)
     with _entity_lock(book_id, eid):
         data = db.get_sheet(book_id, eid, vid)   # another thread may have just drawn it
         if data:
@@ -294,9 +306,7 @@ def _ensure_sheet(book_id, member, style_text, style_ref=None) -> bytes | None:
                 # 1) a STYLE reference so this sheet matches the book's one look
                 if style_ref and style_ref.exists():
                     refs.append(style_ref)
-                    notes.append(f"Image {len(refs)} is a STYLE REFERENCE: match its artistic "
-                                 "style, medium, brush/line work and colour palette EXACTLY -- "
-                                 "but do NOT copy its subject or scene.")
+                    notes.append(_STYLE_REF_NOTE.format(n=len(refs)))
                 # 2) identity: another variant of THIS entity, to keep the same face/build
                 sib = db.get_any_sheet(book_id, eid, exclude_variant_id=vid)
                 if sib:
@@ -408,6 +418,78 @@ def regenerate_sheet(book_id, entity_id, variant_id) -> dict:
         else:
             data = _ensure_sheet(book_id, member, style_text, style_ref=style_ref)
     return {"ok": bool(data)}
+
+
+def get_sheet_prompt(book_id, entity_id, variant_id) -> dict:
+    """The editable text that produced (or would produce) this sheet: the roster's
+    `sheet_prompt` (reference framing) and `appearance` (canonical look). Powers the
+    roster UI's 'regenerate from scratch' editor."""
+    registry = db.get_registry(book_id)
+    member = _member_for(registry, entity_id, variant_id) if registry else None
+    if not member:
+        return {"ok": False, "error": "no such entity in registry"}
+    return {"ok": True, "name": member.get("name", entity_id),
+            "type": member.get("type", "character"),
+            "sheet_prompt": member.get("sheet_prompt", ""),
+            "appearance": member.get("appearance", ""),
+            "editable": not variant_id.startswith("__")}
+
+
+def _persist_sheet_prompt(registry, entity_id, variant_id, sheet_prompt, appearance) -> bool:
+    """Write an edited prompt back onto the registry variant so future redraws/bakes
+    use it too. Synthetic view variants (__...) have no variant object -> skip."""
+    if variant_id.startswith("__"):
+        return False
+    e = next((x for x in registry.get("entities", []) if x.get("id") == entity_id), None)
+    if not e:
+        return False
+    v = next((x for x in e.get("variants", []) if x.get("id") == variant_id), None)
+    if not v:
+        return False
+    v["sheet_prompt"] = sheet_prompt
+    v["appearance"] = appearance
+    return True
+
+
+def redraw_sheet_from_prompt(book_id, entity_id, variant_id, sheet_prompt,
+                             appearance="", persist=True) -> dict:
+    """Draw one roster sheet FROM SCRATCH using a user-edited prompt (not an img2img
+    tweak of the current image), replacing the cached sheet. Uses the same style
+    anchoring + single-subject critic/retry as the automatic first draw, but does NOT
+    seed from a sibling sheet -- the point is to honour the new description. When
+    `persist`, the edited text is saved back onto the registry variant."""
+    sheet_prompt = (sheet_prompt or "").strip()
+    appearance = (appearance or "").strip()
+    if not (sheet_prompt or appearance):
+        return {"ok": False, "error": "prompt required"}
+    book = db.get_book(book_id)
+    registry = db.get_registry(book_id)
+    if not book or not registry:
+        return {"ok": False, "error": "no book or registry"}
+    member = _member_for(registry, entity_id, variant_id)
+    if not member:
+        return {"ok": False, "error": "no such entity in registry"}
+    style_text = _style_text(book["style"])
+    img_aspect = "2:3" if member.get("type") == "character" else "3:2"
+    base = _sheet_base_prompt(style_text, sheet_prompt, appearance)
+    with costs.run_as(f"book:{book_id}"), tempfile.TemporaryDirectory() as td:
+        refs = []
+        style_ref = _style_anchor_path(book, td)
+        if style_ref and style_ref.exists():
+            refs.append(style_ref)
+            base += "\n\n" + _STYLE_REF_NOTE.format(n=len(refs))
+        try:
+            data, trace = _draw_sheet(base, refs or None, img_aspect, appearance or sheet_prompt)
+        except Exception as ex:  # noqa: BLE001
+            print(f"[scene] sheet redraw {entity_id}/{variant_id} failed: {ex}", flush=True)
+            return {"ok": False, "error": str(ex)}
+    data = _compress(data, 0, WEBP_QUALITY)   # sheets feed generation -> keep resolution
+    db.save_sheet(book_id, entity_id, variant_id, data)
+    _save_sheet_history(book_id, entity_id, variant_id,
+                        f"REDRAW: {appearance or sheet_prompt}", trace)
+    if persist and _persist_sheet_prompt(registry, entity_id, variant_id, sheet_prompt, appearance):
+        db.save_registry(book_id, registry)
+    return {"ok": True}
 
 
 def edit_sheet(book_id, entity_id, variant_id, instruction, model_key="pro") -> dict:
