@@ -186,6 +186,9 @@ def resolve_cast(bible: dict, registry: dict) -> dict:
                 "base": ASSETS, "source": "registry",
             }
         else:  # section-local
+            if m.get("from_registry"):
+                print(f"[run] cast entry '{key}' claims from_registry but id '{eid}' is "
+                      "not in the registry -- resolving with an empty local look", flush=True)
             out[key] = {
                 "entity_id": eid, "variant_id": vid, "name": m.get("name", eid),
                 "appearance": m.get("appearance", ""), "sheet_prompt": m.get("sheet_prompt", ""),

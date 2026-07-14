@@ -16,7 +16,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from pipeline import gem, costs
+from pipeline import gem, costs, analyze
 from pipeline.config import (STYLES, SHEET_IMAGE_MODEL, PAGE_IMAGE_MODEL, LITE_IMAGE_MODEL, MAX_REFS,
                              ANALYZE_MODEL, WEBP_QUALITY, SCENE_MAXW)
 
@@ -669,8 +669,15 @@ def _resolved_members(book_id, page, registry, chapter_cast):
     """The ordered, importance-ranked cast for a page, including registry variants a
     page references that the chapter cast omits (e.g. a flashback age). Extracted
     verbatim from the old _render_scene setup so lazy + batch resolve cast identically."""
+    # Repair invented per-variant ids (e.g. angela_wexler_injured -> angela_wexler)
+    # at render time, so already-segmented books resolve the right variant + sheet
+    # without re-running analyze. The remap also fixes the page cast below.
+    remap = analyze.reconcile_cast_ids(chapter_cast, registry)
     cast_index = resolve_cast({"cast": chapter_cast}, registry)
     page_cast = json.loads(page["cast_json"]) if page.get("cast_json") else []
+    for cc in page_cast:
+        if cc.get("entity_id") in remap:
+            cc["entity_id"] = remap[cc["entity_id"]]
     spread = {"illustration_brief": page["brief"], "setting": page["setting"],
               "cast": page_cast, "read_text": page["read_text"]}
     members = scene_members(spread, cast_index)
@@ -682,6 +689,8 @@ def _resolved_members(book_id, page, registry, chapter_cast):
             continue
         e = reg_by_id.get(eid)
         if not e:
+            print(f"[scene] book {book_id} page {page['idx']}: cast id '{eid}' not in "
+                  "registry -- character omitted from the illustration", flush=True)
             continue
         var = next((v for v in e.get("variants", []) if v.get("id") == vid), None)
         if var is None and vid != "default":

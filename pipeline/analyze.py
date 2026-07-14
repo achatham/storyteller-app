@@ -144,6 +144,54 @@ def apply_anchors(chapter_text: str, bible: dict) -> dict:
     return bible
 
 
+def reconcile_cast_ids(cast: list[dict], registry: dict) -> dict:
+    """Repair cast entries that claim `from_registry` but whose `entity_id` isn't a
+    real registry id. The analyze model sometimes invents a per-variant id (e.g.
+    "angela_wexler_injured") instead of reusing the base entity id ("angela_wexler")
+    with the matching variant -- which then resolves to an empty look and no
+    reference sheet, silently dropping the character from the illustration.
+
+    Mutates the reconciled entries' `entity_id` in place and returns a
+    {invented_id: real_id} remap so the caller can apply the same fix to the spread
+    casts (which carry no `from_registry` flag). Genuine section-local characters
+    (from_registry=false) are never touched."""
+    reg_ids = {e["id"] for e in registry.get("entities", [])}
+    variant_owner: dict[str, set] = {}
+    for e in registry.get("entities", []):
+        for v in e.get("variants", []):
+            variant_owner.setdefault(v.get("id"), set()).add(e["id"])
+    remap: dict[str, str] = {}
+    for m in cast:
+        eid = m.get("entity_id")
+        if not eid or eid in reg_ids or not m.get("from_registry"):
+            continue
+        # (a) the invented id extends a real one: angela_wexler_injured -> angela_wexler
+        prefix = [rid for rid in reg_ids if eid.startswith(rid + "_")]
+        cand = max(prefix, key=len) if prefix else None
+        # (b) else adopt the entity that uniquely owns the chosen variant
+        if not cand:
+            owners = variant_owner.get(m.get("variant_id") or "default") or set()
+            if len(owners) == 1:
+                cand = next(iter(owners))
+        if cand:
+            remap[eid] = cand
+            m["entity_id"] = cand
+    return remap
+
+
+def _reconcile_bible(bible: dict, registry: dict) -> None:
+    """Apply reconcile_cast_ids to the section cast, then propagate the remap to
+    every spread's cast so page-level references point at real registry ids too."""
+    remap = reconcile_cast_ids(bible.get("cast", []), registry)
+    if not remap:
+        return
+    for s in bible.get("spreads", []):
+        for c in s.get("cast", []):
+            if c.get("entity_id") in remap:
+                c["entity_id"] = remap[c["entity_id"]]
+    print(f"[analyze] reconciled invented registry ids: {remap}", flush=True)
+
+
 def build_bible(chapter_text: str, registry: dict, model: str = ANALYZE_MODEL) -> dict:
     words = len(chapter_text.split())
     target_pages = max(1, round(words / WORDS_PER_PAGE))
@@ -160,6 +208,7 @@ def build_bible(chapter_text: str, registry: dict, model: str = ANALYZE_MODEL) -
         chapter=chapter_text,
     )
     bible = gem.text_json(prompt, model=model)
+    _reconcile_bible(bible, registry)
     return apply_anchors(chapter_text, bible)
 
 
