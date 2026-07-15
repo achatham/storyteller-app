@@ -150,7 +150,7 @@ def _draw_wave(book_id, wave, style_text, style_ref_bytes, use_anchor, log) -> i
                         continue
                     gem.record_batch_usage(resp, CRITIQUE_MODEL, "critique")
                     try:
-                        crits[k] = gem._coerce_json(resp.text)
+                        crits[k] = gem._coerce_json(resp.text, gem._block_reason(resp))
                     except Exception as ex:  # noqa: BLE001 -- blocked/empty: keep sheet unscored
                         log(f"[roster] critique parse failed for {k}: {ex}")
 

@@ -92,11 +92,44 @@ def _retry(fn, tries=4, base=4.0, what="call"):
     raise last
 
 
-def _coerce_json(raw: str | None) -> dict:
+def _block_reason(resp) -> str:
+    """A short human tag for WHY a response carried no usable text -- the safety
+    block reason (input rejected) or a non-STOP candidate finish reason -- so an
+    empty critique/text result reports e.g. 'blocked: PROHIBITED_CONTENT' rather
+    than a bare 'empty response'. Works for both an SDK response and our
+    BatchResponse shim (which exposes block_reason/finish_reason as strings).
+    Returns '' if nothing informative is found."""
+    if resp is None:
+        return ""
+    br = getattr(resp, "block_reason", None)
+    if br is None:
+        pf = getattr(resp, "prompt_feedback", None)
+        br = getattr(pf, "block_reason", None) if pf else None
+    fr = getattr(resp, "finish_reason", None)
+    if fr is None:
+        cands = getattr(resp, "candidates", None) or []
+        fr = getattr(cands[0], "finish_reason", None) if cands else None
+
+    def _name(x):
+        return getattr(x, "name", None) or (str(x) if x is not None else None)
+
+    br, fr = _name(br), _name(fr)
+    parts = []
+    if br:
+        parts.append(f"blocked: {br}")
+    if fr and fr not in ("STOP", "FinishReason.STOP"):
+        parts.append(f"finish={fr}")
+    return "; ".join(parts)
+
+
+def _coerce_json(raw: str | None, reason: str = "") -> dict:
     """Parse a JSON object from a model response, raising (so the caller's
-    retry kicks in) when the response is empty/blocked/truncated."""
+    retry kicks in) when the response is empty/blocked/truncated. `reason` (from
+    _block_reason) is appended to the error so an empty result names WHY -- e.g.
+    'blocked: PROHIBITED_CONTENT' -- instead of a bare 'empty response'."""
     if not raw or not raw.strip():
-        raise ValueError("empty model response (no text — blocked or truncated?)")
+        extra = f" [{reason}]" if reason else ""
+        raise ValueError(f"empty model response (no text — blocked or truncated?){extra}")
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -122,7 +155,7 @@ def text_json(prompt: str, schema: dict | None = None, model: str = TEXT_MODEL,
     def _go():
         resp = _client.models.generate_content(model=model, contents=prompt, config=cfg)
         _record_usage(resp, model, "text")
-        return _coerce_json(resp.text)
+        return _coerce_json(resp.text, _block_reason(resp))
 
     return _retry(_go, what="text_json")
 
@@ -197,7 +230,7 @@ def critique_image(image_path: Path, brief: str, refs: list[Path] | None = None,
     def _go(contents):
         resp = _client.models.generate_content(model=model, contents=contents, config=cfg)
         _record_usage(resp, model, "critique")
-        return _coerce_json(resp.text)
+        return _coerce_json(resp.text, _block_reason(resp))
 
     try:
         return _retry(lambda: _go(_build(True)), tries=tries, what="critique")
@@ -340,9 +373,13 @@ class BatchResponse:
     def __init__(self, obj: dict):
         cands = obj.get("candidates") or []
         self.parts = []
+        self.finish_reason = None
         if cands:
             content = cands[0].get("content") or {}
             self.parts = [_Part(p) for p in (content.get("parts") or [])]
+            self.finish_reason = cands[0].get("finishReason") or cands[0].get("finish_reason")
+        pf = obj.get("promptFeedback") or obj.get("prompt_feedback") or {}
+        self.block_reason = pf.get("blockReason") or pf.get("block_reason")
         self.usage_metadata = _Usage(obj.get("usageMetadata") or obj.get("usage_metadata"))
 
     @property

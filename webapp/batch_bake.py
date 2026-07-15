@@ -246,7 +246,7 @@ def _run_critique(book_id, r, runs, open_idxs) -> dict:
             continue
         gem.record_batch_usage(resp, CRITIQUE_MODEL, "critique")
         try:
-            out[int(idx)] = gem._coerce_json(resp.text)
+            out[int(idx)] = gem._coerce_json(resp.text, gem._block_reason(resp))
         except Exception as ex:  # noqa: BLE001
             log(f"r{r} critique parse failed for page {idx}: {ex}")
     return out
@@ -278,7 +278,7 @@ def _run_verify(book_id, r, runs, open_idxs, crits) -> dict:
             continue
         gem.record_batch_usage(resp, CRITIQUE_MODEL, "critique")
         try:
-            v = gem._coerce_json(resp.text)
+            v = gem._coerce_json(resp.text, gem._block_reason(resp))
             out[int(idx)] = bool(v.get("resolved", True))
             runs[int(idx)]._verify = v
         except Exception:  # noqa: BLE001
@@ -436,7 +436,7 @@ def finalise(book_id, runs):
                     continue
                 gem.record_batch_usage(resp, CRITIQUE_MODEL, "critique")
                 try:
-                    v = gem._coerce_json(resp.text)
+                    v = gem._coerce_json(resp.text, gem._block_reason(resp))
                     pick = int(v.get("best", 0)) - 1
                     cands = runs[int(idx)].state["cands"]
                     if 0 <= pick < len(cands):
