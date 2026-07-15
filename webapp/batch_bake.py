@@ -39,6 +39,13 @@ from pipeline.config import WEBP_QUALITY
 
 POLL_SECONDS = int(os.environ.get("STORY_BATCH_POLL", "20"))
 PREPARE_WORKERS = int(os.environ.get("STORY_BATCH_PREPARE_WORKERS", "6"))
+# Stragglers the batch critic never scored can be escalated to the interactive
+# render. OFF by default: measured on Harry Potter, the critique block is a hard,
+# persistent refusal (batch AND interactive), so escalation recovers ~1-2 of a
+# dozen pages while paying ~3 full-price regenerations each -- the unscored fallback
+# already gives every page an image. Enable per-book with STORY_BAKE_ESCALATE=1.
+ESCALATE_INTERACTIVE = os.environ.get("STORY_BAKE_ESCALATE", "0") == "1"
+INTERACTIVE_WORKERS = int(os.environ.get("STORY_BAKE_INTERACTIVE_WORKERS", "4"))
 MAX_ROUNDS = SCENE_TRIES
 
 JUDGE_SCHEMA = {"type": "object", "properties": {
@@ -373,17 +380,46 @@ def _finalise_page(book_id, pr, judged=None):
                 best_attempt=chosen)
 
 
-def finalise(book_id, runs):
-    """For every page that never passed: a best-of judge picks its strongest candidate
-    (one batch), then store it. A page the batch critic never scored (its generated
-    images kept coming back blocked/empty from the critic every round) has no candidate
-    list to judge, so _finalise_page keeps its last drawn image unscored -- an
-    illustration beats a blank. Passed pages were already stored during the rounds.
+def _escalate_interactive(book_id, stragglers, runs):
+    """Pages the batch critic never scored (every round's image came back blocked/empty
+    from the critic) are escalated to the INTERACTIVE render: it regenerates fresh
+    images -- the actual recovery path, since a different image usually isn't blocked --
+    and critiques them with robust per-call retries, so a page that never scored in the
+    batch usually converges to a properly-scored one here. If it still can't be scored,
+    _render_scene keeps its best candidate, so the page ends up illustrated either way.
+    Interactive calls are full price (not batched); this runs only for the stragglers."""
+    targets = [i for i in stragglers if runs[i].state["best"] is None]
+    if not targets:
+        return
+    log(f"escalating {len(targets)} un-scored page(s) to interactive render")
 
-    Note: recovering these pages is done by REGENERATION across rounds (a different
-    image often isn't blocked), not by re-critiquing the same image -- the critic's
-    refusal is persistent per image, so an interactive re-critique just burns retries."""
+    def one(idx):
+        try:
+            # fast_critique: single no-backoff critique per attempt -- these pages'
+            # critiques are likely blocked, and regeneration (not retrying) is what
+            # recovers them; the unscored fallback catches the rest.
+            scene.generate_scene(book_id, idx, fast_critique=True)
+            db.bps_save(book_id, idx, status="done", done=1)
+            return True
+        except Exception as ex:  # noqa: BLE001 -- leave it a straggler for the fallback
+            log(f"interactive render failed for page {idx}: {ex}")
+            return False
+
+    with ThreadPoolExecutor(max_workers=INTERACTIVE_WORKERS) as ex:
+        n = sum(1 for ok in ex.map(one, targets) if ok)
+    log(f"interactive render resolved {n}/{len(targets)} page(s)")
+
+
+def finalise(book_id, runs):
+    """Finish every page that never passed. First escalate pages the batch critic never
+    scored to the interactive render (fresh regeneration usually unblocks them); then a
+    best-of judge picks the strongest candidate of each remaining scored straggler and
+    stores it. Anything still un-scored falls back to its last drawn image in
+    _finalise_page -- an illustration beats a blank. Passed pages were stored in-round."""
     stragglers = [i for i in db.bps_actionable(book_id) if i in runs]
+    if ESCALATE_INTERACTIVE:
+        _escalate_interactive(book_id, stragglers, runs)
+        stragglers = [i for i in db.bps_actionable(book_id) if i in runs]   # drop the resolved
     judgeable = [i for i in stragglers if len(runs[i].state["cands"]) > 1]
     picks = {}
     if judgeable:

@@ -581,12 +581,15 @@ def edit_sheet(book_id, entity_id, variant_id, instruction, model_key="pro") -> 
     return {"ok": True, "model": model}
 
 
-def generate_scene(book_id: int, idx: int) -> bytes:
+def generate_scene(book_id: int, idx: int, fast_critique: bool = False) -> bytes:
     """Render page `idx`'s illustration, store it, and return the image bytes.
     Synchronous/blocking (the server runs it in a worker thread). All API usage
-    is tagged to this book for the per-book cost view."""
+    is tagged to this book for the per-book cost view. `fast_critique` makes each
+    critique a single no-backoff attempt (used by the bake's straggler escalation,
+    where the critic is likely blocking and we have a fallback -- don't burn minutes
+    of retry backoff per page)."""
     with costs.run_as(f"book:{book_id}"):
-        return _render_scene(book_id, idx)
+        return _render_scene(book_id, idx, fast_critique=fast_critique)
 
 
 def _character_states(brief: str, source: str, members: list) -> dict:
@@ -1010,10 +1013,11 @@ def _attempt_trace(attempt: int, mode: str, res: dict, crit: dict, fix_ok: bool)
     }
 
 
-def _render_scene(book_id: int, idx: int) -> bytes:
+def _render_scene(book_id: int, idx: int, fast_critique: bool = False) -> bytes:
     """Render page `idx`'s illustration synchronously (the lazy read path), on top
     of the shared build_scene_context / build_round_request / apply_verdict helpers
     so it stays in lock-step with the batch bake."""
+    crit_tries = 1 if fast_critique else 4
     ctx = build_scene_context(book_id, idx)
     page = ctx["page"]
     state = new_scene_state()
@@ -1029,6 +1033,7 @@ def _render_scene(book_id: int, idx: int) -> bytes:
             p.write_bytes(blob)
             crit_ref_paths.append(p)
 
+        last_cand = None   # newest drawn image, kept as an unscored fallback
         for attempt in range(1, SCENE_TRIES + 1):
             req = build_round_request(ctx, state, name_cache)
             mode = req["mode"]
@@ -1040,9 +1045,18 @@ def _render_scene(book_id: int, idx: int) -> bytes:
             cand = Path(td) / f"cand{attempt}.webp"
             gem.generate_image(req["prompt"], refs=gen_ref_paths, out_path=cand,
                                aspect="3:2", model=req["model"])
-            crit = gem.critique_image(cand, critique_prompt(ctx), refs=crit_ref_paths,
-                                      ref_labels=ctx["ref_labels"], schema=SCENE_CRITIQUE_SCHEMA)
             data = cand.read_bytes()
+            last_cand = data
+            try:
+                crit = gem.critique_image(cand, critique_prompt(ctx), refs=crit_ref_paths,
+                                          ref_labels=ctx["ref_labels"], schema=SCENE_CRITIQUE_SCHEMA,
+                                          tries=crit_tries)
+            except Exception as ex:  # noqa: BLE001 -- a blocked/empty critique must not sink
+                # the page: keep this candidate as an unscored fallback and REGENERATE a
+                # fresh image next attempt (a different image often isn't blocked).
+                print(f"[scene] critique failed for page {idx} attempt {attempt}: {ex}", flush=True)
+                state["mode"], state["draft"] = "fresh", None
+                continue
             # carry-forward re-check: a revise targeting a specific defect must actually
             # clear it before we trust the (fresh, stochastic) verdict
             fix_ok = True
@@ -1063,14 +1077,20 @@ def _render_scene(book_id: int, idx: int) -> bytes:
             if res["done"]:
                 break
 
-        data, score, chosen = state["best"]
-        # If nothing cleared the bar, let a vision critic pick the best candidate.
-        if score < PASS_THRESHOLD:
-            pick = _judge_best(state["cands"], page["brief"], Path(td))
-            if pick:
-                c = state["cands"][pick["best"]]
-                data, score, chosen = c["data"], c["score"], c["n"]
-                trace["judge_pick"] = {"attempt": chosen, "why": pick["why"]}
+        if state["best"] is not None:
+            data, score, chosen = state["best"]
+            # If nothing cleared the bar, let a vision critic pick the best candidate.
+            if score < PASS_THRESHOLD:
+                pick = _judge_best(state["cands"], page["brief"], Path(td))
+                if pick:
+                    c = state["cands"][pick["best"]]
+                    data, score, chosen = c["data"], c["score"], c["n"]
+                    trace["judge_pick"] = {"attempt": chosen, "why": pick["why"]}
+        else:
+            # every attempt's critique was blocked -> store the last drawn image unscored
+            # (an illustration beats a blank; the reader can redraw it if it looks off).
+            data, score, chosen = last_cand, None, SCENE_TRIES
+            trace["fallback"] = "kept last candidate (critique blocked every attempt)"
         data = _compress(data, SCENE_MAXW, WEBP_QUALITY)   # downscale for display storage
 
     trace["chosen"] = chosen

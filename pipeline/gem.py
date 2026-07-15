@@ -83,6 +83,8 @@ def _retry(fn, tries=4, base=4.0, what="call"):
         except Exception as e:  # noqa: BLE001
             last = e
             msg = str(e)
+            if attempt == tries - 1:      # last attempt -> give up now, don't sleep first
+                break
             wait = base * (2 ** attempt)
             print(f"  [retry] {what} failed ({type(e).__name__}: {msg[:120]}); "
                   f"sleeping {wait:.0f}s")
@@ -161,7 +163,7 @@ def generate_image(prompt: str, refs: list[Path] | None = None, out_path: Path |
 
 def critique_image(image_path: Path, brief: str, refs: list[Path] | None = None,
                    ref_labels: list[str] | None = None, schema: dict | None = None,
-                   model: str = CRITIQUE_MODEL) -> dict:
+                   model: str = CRITIQUE_MODEL, tries: int = 4) -> dict:
     """Vision-model critique of a generated image against its brief.
 
     If `refs` are given they are attached AFTER the judged image as the canonical
@@ -198,7 +200,7 @@ def critique_image(image_path: Path, brief: str, refs: list[Path] | None = None,
         return _coerce_json(resp.text)
 
     try:
-        return _retry(lambda: _go(_build(True)), what="critique")
+        return _retry(lambda: _go(_build(True)), tries=tries, what="critique")
     except Exception:
         # A multi-image critique (judged image + several reference sheets) occasionally
         # comes back empty/blocked where the single-image call succeeds. Rather than
@@ -208,7 +210,7 @@ def critique_image(image_path: Path, brief: str, refs: list[Path] | None = None,
             raise
         print(f"[gem] critique with {len(refs)} refs failed after retries; "
               "retrying image-only", flush=True)
-        return _retry(lambda: _go(_build(False)), what="critique(image-only)")
+        return _retry(lambda: _go(_build(False)), tries=tries, what="critique(image-only)")
 
 
 def judge_images(image_paths: list[Path], prompt: str, schema: dict | None = None,
