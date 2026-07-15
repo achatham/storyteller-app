@@ -111,8 +111,11 @@ def prepare(book_id) -> dict:
     """Build a PageRun (with scene context + gen_id + trace) for every page, drawing
     any missing roster sheets on the way. Runs page contexts in parallel (each is an
     independent text pass + cached sheet draws). Restores state for a resumed bake."""
-    idxs = [p["idx"] for p in db.get_pages(book_id)]
-    db.bps_init(book_id, idxs)
+    db.bps_init(book_id, [p["idx"] for p in db.get_pages(book_id)])
+    # Only build contexts for pages that still need work: a fresh bake seeds every
+    # page 'pending' (so this is all of them), while a resume or a retry-failed run
+    # reopens just the handful still open -- no point re-preparing finished pages.
+    idxs = db.bps_actionable(book_id)
     runs: dict = {}
 
     def one(idx):
@@ -336,6 +339,20 @@ def _finalise_page(book_id, pr, judged=None):
     a best-of judge overrode the min-score pick."""
     s = pr.state
     if s["best"] is None:
+        # No critique ever scored this page. If generation nonetheless produced an
+        # image (the failure mode that stranded 46 HP pages: the batch critic returned
+        # empty/blocked responses every round), keep the last drawn candidate unscored
+        # rather than dropping the page -- an unscored illustration beats a blank.
+        if pr.cand is not None:
+            data = _compress(pr.cand, SCENE_MAXW, WEBP_QUALITY)
+            pr.trace["chosen"] = pr.attempt
+            pr.trace["fallback"] = "kept last candidate (critique never scored this page)"
+            db.scene_store(book_id, pr.idx, data, None, trace=json.dumps(pr.trace))
+            db.scene_gen_add(book_id, pr.idx, pr.gen_id, pr.ctx["page"]["brief"],
+                             json.dumps(pr.ctx["states"]), pr.attempt, None)
+            db.bps_save(book_id, pr.idx, status="done", done=1, best_score=None,
+                        best_attempt=pr.attempt)
+            return
         db.bps_save(book_id, pr.idx, status="failed")
         return
     data, score, chosen = s["best"]
@@ -357,8 +374,15 @@ def _finalise_page(book_id, pr, judged=None):
 
 
 def finalise(book_id, runs):
-    """For every page that never passed: a best-of judge picks its strongest
-    candidate (one batch), then store it. Pages already stored on pass are skipped."""
+    """For every page that never passed: a best-of judge picks its strongest candidate
+    (one batch), then store it. A page the batch critic never scored (its generated
+    images kept coming back blocked/empty from the critic every round) has no candidate
+    list to judge, so _finalise_page keeps its last drawn image unscored -- an
+    illustration beats a blank. Passed pages were already stored during the rounds.
+
+    Note: recovering these pages is done by REGENERATION across rounds (a different
+    image often isn't blocked), not by re-critiquing the same image -- the critic's
+    refusal is persistent per image, so an interactive re-critique just burns retries."""
     stragglers = [i for i in db.bps_actionable(book_id) if i in runs]
     judgeable = [i for i in stragglers if len(runs[i].state["cands"]) > 1]
     picks = {}

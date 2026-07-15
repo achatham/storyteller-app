@@ -164,10 +164,13 @@ def book_report(book_id) -> dict:
             (f"book:{book_id}", f"%/work/{book_id}")).fetchall()
     text = img = 0.0
     n_img = 0
+    saved = 0.0            # what the batch rows would have cost at the interactive rate
     by_model = []
     for model, kind, sin, sout, simg, batch in rows:
         sin, sout, simg = sin or 0, sout or 0, simg or 0
         cost = cost_for(model, sin, sout, batch=bool(batch))
+        if batch:
+            saved += cost_for(model, sin, sout, batch=False) - cost
         by_model.append({"model": model, "kind": kind, "batch": bool(batch),
                          "in": sin, "out": sout, "images": simg, "usd": round(cost, 4)})
     for m in by_model:
@@ -176,7 +179,8 @@ def book_report(book_id) -> dict:
         else:
             text += m["usd"]
     return {"text_usd": round(text, 4), "image_usd": round(img, 4),
-            "total_usd": round(text + img, 4), "images": n_img, "by_model": by_model}
+            "total_usd": round(text + img, 4), "images": n_img, "by_model": by_model,
+            "batch_saved_usd": round(saved, 4)}
 
 
 def main():

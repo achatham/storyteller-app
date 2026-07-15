@@ -928,6 +928,22 @@ def bake_clear(book_id):
         c.execute("DELETE FROM batch_bake WHERE book_id=?", (book_id,))
 
 
+def bake_retry_failed(book_id) -> int:
+    """Reopen every page that ended 'failed' so a relaunched bake regenerates ONLY
+    those pages -- the pages that finished stay done and are never redrawn. Their
+    per-page state is reset to a clean pending slate, and the batch_jobs bookkeeping
+    is dropped so the retry submits FRESH jobs instead of reattaching the old ones
+    (which produced the failure). Returns how many pages were reopened."""
+    with conn() as c:
+        n = c.execute(
+            "UPDATE batch_page_state SET status='pending', done=0, round=0, attempt=0, "
+            "gen_id=NULL, best_blob=NULL, best_score=NULL, best_attempt=NULL, "
+            "draft_blob=NULL, carry_json=NULL, updated_at=? "
+            "WHERE book_id=? AND status='failed'", (time.time(), book_id)).rowcount
+        c.execute("DELETE FROM batch_jobs WHERE book_id=?", (book_id,))
+    return n
+
+
 # ---------------- progress ----------------
 
 def set_progress(book_id, position):

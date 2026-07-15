@@ -17,7 +17,8 @@ from pathlib import Path
 from PIL import Image
 
 from pipeline import gem, costs, analyze
-from pipeline.config import (STYLES, SHEET_IMAGE_MODEL, PAGE_IMAGE_MODEL, LITE_IMAGE_MODEL, MAX_REFS,
+from pipeline.config import (STYLES, SHEET_IMAGE_MODEL, PAGE_IMAGE_MODEL, ROSTER_IMAGE_MODEL,
+                             LITE_IMAGE_MODEL, MAX_REFS,
                              ANALYZE_MODEL, WEBP_QUALITY, SCENE_MAXW)
 
 # The image models offered for a manual roster-sheet correction, keyed by the short
@@ -153,7 +154,7 @@ def _draw_sheet(prompt, refs, aspect, desc):
         for attempt in range(1, SHEET_TRIES + 1):
             p = prompt + (f"\n\nIMPORTANT FIX FROM LAST ATTEMPT: {fix}" if fix else "")
             cand = Path(td) / f"cand{attempt}.webp"
-            gem.generate_image(p, refs=refs, out_path=cand, aspect=aspect, model=SHEET_IMAGE_MODEL)
+            gem.generate_image(p, refs=refs, out_path=cand, aspect=aspect, model=ROSTER_IMAGE_MODEL)
             data = cand.read_bytes()
             try:
                 crit = gem.critique_image(cand, SHEET_CRITIQUE.format(desc=desc or "(the subject)"))
@@ -280,6 +281,45 @@ def _sheet_base_prompt(style_text, sheet_prompt, appearance) -> str:
 _STYLE_REF_NOTE = ("Image {n} is a STYLE REFERENCE: match its artistic style, medium, "
                    "brush/line work and colour palette EXACTLY -- but do NOT copy its "
                    "subject or scene.")
+
+
+def sheet_gen_request(member, style_text, style_ref_bytes=None, sibling_bytes=None) -> dict | None:
+    """Build the image-generation request for ONE roster sheet from bytes (no temp
+    files, no DB) so the batch roster draw can assemble a JSONL batch. Mirrors the
+    prompt/refs _ensure_sheet builds: a style anchor first, then (for a non-anchor
+    variant) a sibling sheet of the same entity to hold identity. Returns
+    {prompt, ref_bytes, aspect, desc} or None if the member has no describable look."""
+    appearance = member.get("appearance", "")
+    sheet_prompt = member.get("sheet_prompt", "")
+    if not (appearance or sheet_prompt):
+        return None
+    aspect = "2:3" if member.get("type") == "character" else "3:2"
+    base = _sheet_base_prompt(style_text, sheet_prompt, appearance)
+    refs, notes = [], []
+    if style_ref_bytes:
+        refs.append(style_ref_bytes)
+        notes.append(_STYLE_REF_NOTE.format(n=len(refs)))
+    if sibling_bytes:
+        refs.append(sibling_bytes)
+        notes.append(f"Image {len(refs)} shows THIS SAME character in a different outfit/moment: "
+                     "keep the SAME facial identity, hair and build; change only the "
+                     "clothing/age/form described above.")
+    prompt = base + ("\n\n" + " ".join(notes) if notes else "")
+    return {"prompt": prompt, "ref_bytes": refs, "aspect": aspect,
+            "desc": appearance or sheet_prompt}
+
+
+def style_anchor_bytes(book) -> bytes | None:
+    """The book's style-sample image bytes (generating it if needed), used as a
+    shared STYLE reference when drawing every roster sheet. None if unavailable."""
+    key = book.get("style")
+    data = db.get_style_sample(key)
+    if data:
+        return data
+    try:
+        return generate_style_sample(key)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _ensure_sheet(book_id, member, style_text, style_ref=None) -> bytes | None:
@@ -710,6 +750,45 @@ def _resolved_members(book_id, page, registry, chapter_cast):
     return spread, members, page_cast
 
 
+def _members_with_views(book_id, page, registry, chapter_cast):
+    """Resolve a page's ordered, importance-ranked cast and tag each member with its
+    `view` -- a named spot inside/on a setting the story references (e.g. 'deck',
+    'lobby', or the legacy surface/interior aspects), else None. Shared by
+    build_scene_context (which then draws the sheets) and plan_page_sheets (which
+    only enumerates them for the batch roster), so the two never disagree about
+    which sheets a page needs."""
+    spread, members, page_cast = _resolved_members(book_id, page, registry, chapter_cast)
+    views_by_id = {}
+    for c in page_cast:
+        v = (c.get("view") or "").strip()
+        if not v and c.get("aspect") in ("surface", "interior"):
+            v = "deck" if c.get("aspect") == "surface" else "interior"
+        if v:
+            views_by_id[c.get("entity_id")] = v
+    for m in members:
+        m["view"] = views_by_id.get(m["entity_id"]) if m.get("type") == "setting" else None
+    return spread, members, page_cast
+
+
+def plan_page_sheets(book_id: int, idx: int) -> list[dict]:
+    """The roster sheets page `idx` will reference: the same ordered, MAX_REFS-capped
+    member set build_scene_context would draw, each annotated with `view`, but WITHOUT
+    drawing anything. The batch roster unions this across all pages to know the full
+    set of sheets to generate up front. Returns [] for a missing/bad page."""
+    page = db.get_page(book_id, idx)
+    if not page:
+        return []
+    registry = db.get_registry(book_id)
+    chapter_cast = db.get_chapter_cast(book_id, page["chapter_idx"])
+    _, members, _ = _members_with_views(book_id, page, registry, chapter_cast)
+    plan = []
+    for m in sorted(members, key=lambda m: 0 if m.get("view") else 1):
+        if len(plan) >= MAX_REFS:
+            break
+        plan.append(m)
+    return plan
+
+
 def build_scene_context(book_id: int, idx: int) -> dict:
     """Everything needed to render page `idx`, computed once and shared by the lazy
     path and the batch bake: resolved cast, per-character states, the reference
@@ -722,18 +801,10 @@ def build_scene_context(book_id: int, idx: int) -> dict:
     registry = db.get_registry(book_id)
     chapter_cast = db.get_chapter_cast(book_id, page["chapter_idx"])
     style_text = _style_text(book["style"])
-    spread, members, page_cast = _resolved_members(book_id, page, registry, chapter_cast)
-
-    views_by_id = {}
-    for c in page_cast:
-        v = (c.get("view") or "").strip()
-        if not v and c.get("aspect") in ("surface", "interior"):
-            v = "deck" if c.get("aspect") == "surface" else "interior"
-        if v:
-            views_by_id[c.get("entity_id")] = v
+    spread, members, page_cast = _members_with_views(book_id, page, registry, chapter_cast)
 
     def _view(m):
-        return views_by_id.get(m["entity_id"]) if m.get("type") == "setting" else None
+        return m.get("view")
 
     states = _character_states(page["brief"], page["read_text"] or "", members)
     for m in members:
@@ -783,12 +854,27 @@ def build_scene_context(book_id: int, idx: int) -> dict:
     }
 
 
+ROSTER_BATCH = os.environ.get("STORY_ROSTER_BATCH", "1") != "0"
+
+
 def draw_all_sheets(book_id, workers: int = 6, log=print) -> int:
     """Draw + cache every roster sheet the book's pages will reference (the union
     across all pages), so the full roster can be reviewed before a batch bake.
-    Reuses build_scene_context per page (sheets are cached, so a later bake/read
-    reuses them for free). Returns the page count processed."""
+
+    Two-stage: first (when STORY_ROSTER_BATCH is on) the bulk of the real
+    character/prop/setting sheets are drawn via the Batch API (~50% cheaper) in
+    webapp/batch_roster; then an interactive pass over every page draws whatever is
+    still missing -- the few 'view' sheets and any sheet the batch couldn't produce
+    (build_scene_context skips sheets already cached, so nothing is redrawn).
+    Returns the page count processed by the interactive pass."""
     from concurrent.futures import ThreadPoolExecutor
+    if ROSTER_BATCH:
+        try:
+            from . import batch_roster
+            n = batch_roster.draw_roster(book_id, log=log)
+            log(f"[sheets] batch roster drew {n} sheets; interactive pass for the rest")
+        except Exception as ex:  # noqa: BLE001 -- fall back to the all-interactive path
+            log(f"[sheets] batch roster failed ({type(ex).__name__}: {ex}); drawing interactively")
     idxs = [p["idx"] for p in db.get_pages(book_id)]
 
     def one(idx):

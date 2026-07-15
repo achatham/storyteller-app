@@ -54,6 +54,7 @@
     <div class="split">
       <div>text&nbsp; <b id="textc"></b></div>
       <div>images&nbsp; <b id="imgc"></b> <span class="pill" id="nimg"></span></div>
+      <div id="savedrow" style="display:none">batch saved&nbsp; <b id="saved"></b></div>
     </div>
     <table><thead><tr><th>model</th><th>kind</th><th>in tok</th><th>out tok</th><th>imgs</th><th>USD</th></tr></thead>
       <tbody id="rows"></tbody></table>
@@ -140,8 +141,13 @@ async function getJSON(url){
   $("#textc").textContent = usd(c.text_usd);
   $("#imgc").textContent = usd(c.image_usd);
   $("#nimg").textContent = c.images + " imgs";
+  if (c.batch_saved_usd > 0) {
+    $("#saved").textContent = usd(c.batch_saved_usd);
+    $("#savedrow").style.display = "";
+  }
   $("#rows").innerHTML = c.by_model.sort((a,b)=>b.usd-a.usd).map(r =>
-    `<tr><td>${r.model}</td><td>${r.kind}</td><td>${r.in.toLocaleString()}</td>
+    `<tr><td>${r.model}</td><td>${r.kind}${r.batch?' <span class="pill">batch −50%</span>':''}</td>
+     <td>${r.in.toLocaleString()}</td>
      <td>${r.out.toLocaleString()}</td><td>${r.images||""}</td><td>${usd(r.usd)}</td></tr>`).join("")
     || `<tr><td colspan="6" style="color:var(--muted)">no usage recorded</td></tr>`;
 

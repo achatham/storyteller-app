@@ -182,11 +182,16 @@ if STYLE not in STYLES:
 ART_STYLE = STYLES[STYLE]
 
 # ---- image models + output resolution ----
-# Two image models by role: the roster/character reference SHEETS use the
-# higher-fidelity "pro" model (canonical consistency matters most there), while
-# the many per-page SCENE illustrations use the cheaper "flash" model.
+# Image models by role. SHEET_IMAGE_MODEL is the higher-fidelity "pro" model,
+# now reserved for the high-stakes cases: a manual roster-sheet edit and the
+# revise ESCALATION (when a flash img2img fix fails to land). ROSTER_IMAGE_MODEL
+# is what the automatic roster reference-sheet draws use; it defaults to the same
+# cheap "flash" model as the per-page SCENE illustrations, since the batch roster
+# draw + single-subject critic/reroll keeps sheet consistency good enough without
+# paying pro prices on every sheet. Override any of them via env.
 SHEET_IMAGE_MODEL = os.environ.get("STORY_SHEET_IMAGE_MODEL", "gemini-3-pro-image-preview")
 PAGE_IMAGE_MODEL = os.environ.get("STORY_PAGE_IMAGE_MODEL", "gemini-3.1-flash-image")
+ROSTER_IMAGE_MODEL = os.environ.get("STORY_ROSTER_IMAGE_MODEL", PAGE_IMAGE_MODEL)
 # "Nano Banana Lite": the cheapest/fastest image model, offered as a manual
 # choice for roster-sheet correction edits (not used in the automatic pipeline).
 LITE_IMAGE_MODEL = os.environ.get("STORY_LITE_IMAGE_MODEL", "gemini-3.1-flash-lite-image")

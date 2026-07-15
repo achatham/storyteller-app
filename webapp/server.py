@@ -353,10 +353,12 @@ async def api_reprocess(book_id: int, fresh: bool = False):
 
 
 @app.post("/api/books/{book_id}/bake")
-async def api_bake(book_id: int, fresh: bool = False):
+async def api_bake(book_id: int, fresh: bool = False, retry_failed: bool = False):
     """Illustrate the whole book via the Batch API (~50% cheaper). Kicks off the
     background bake subprocess. Valid once the roster is ready (roster_review) or on
-    a ready book you want to (re)bake. ?fresh=1 discards prior bake bookkeeping."""
+    a ready book you want to (re)bake. ?fresh=1 discards prior bake bookkeeping and
+    redraws every page; ?retry_failed=1 regenerates ONLY the pages that ended failed
+    (finished pages are left untouched) -- cheap way to mop up a bake's stragglers."""
     b = db.get_book(book_id)
     if not b:
         raise HTTPException(404, "no such book")
@@ -364,6 +366,10 @@ async def api_bake(book_id: int, fresh: bool = False):
         raise HTTPException(409, "book not segmented yet")
     if fresh:
         await asyncio.to_thread(db.bake_clear, book_id)
+    elif retry_failed:
+        n = await asyncio.to_thread(db.bake_retry_failed, book_id)
+        if not n:
+            return {"ok": True, "reopened": 0, "detail": "no failed pages to retry"}
     await asyncio.to_thread(db.set_illustration_mode, book_id, "batch")
     # round=0: a user-initiated (re)start runs the round loop from the top. Crash
     # resume (server startup -> start_bake) leaves the pointer untouched instead.
