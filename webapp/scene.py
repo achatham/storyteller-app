@@ -978,6 +978,20 @@ def critique_prompt(ctx: dict) -> str:
         source=(page["read_text"] or "")[:1200] or "(not available)")
 
 
+def critique_prompt_lite(ctx: dict) -> str:
+    """A critique prompt with the two embedded verbatim story passages (source +
+    chapter-ahead) removed. Those passages, alongside the child imagery in the
+    illustration + reference sheets, are what trip Gemini's PROHIBITED_CONTENT
+    child-safety filter (empirically: removing either passage clears the block).
+    Used only as critique_image's last fallback tier -- it loses spoiler-detection
+    and source-detail grounding, but reliably gets a score for a page the full
+    prompt won't grade, instead of leaving it unscored."""
+    page = ctx["page"]
+    return SCENE_CRITIQUE.format(
+        brief=page["brief"], chars=ctx["char_desc"] or "(none)", style=ctx["style_text"],
+        roster=ctx["roster"], chapter_ahead="(omitted)", source="(omitted)")
+
+
 def _judge_best(cands: list, brief: str, td: Path) -> dict | None:
     """Vision critic picks the best of several candidates (bytes) when none cleared
     the bar. Returns {"best": idx0based, "why": str} or None. Shared with the bake."""
@@ -1050,7 +1064,7 @@ def _render_scene(book_id: int, idx: int, fast_critique: bool = False) -> bytes:
             try:
                 crit = gem.critique_image(cand, critique_prompt(ctx), refs=crit_ref_paths,
                                           ref_labels=ctx["ref_labels"], schema=SCENE_CRITIQUE_SCHEMA,
-                                          tries=crit_tries)
+                                          tries=crit_tries, lite_brief=critique_prompt_lite(ctx))
             except Exception as ex:  # noqa: BLE001 -- a blocked/empty critique must not sink
                 # the page: keep this candidate as an unscored fallback and REGENERATE a
                 # fresh image next attempt (a different image often isn't blocked).

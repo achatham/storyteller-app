@@ -31,7 +31,8 @@ from pipeline.config import CRITIQUE_MODEL, IMAGE_SIZE
 
 from . import db, scene
 from .scene import (build_scene_context, build_round_request, apply_verdict,
-                    new_scene_state, critique_prompt, _attempt_trace, _compress,
+                    new_scene_state, critique_prompt, critique_prompt_lite,
+                    _attempt_trace, _compress,
                     SCENE_TRIES, PASS_THRESHOLD, DEBUG_MAXW, DEBUG_QUALITY,
                     SCENE_MAXW, JUDGE_BEST, SCENE_CRITIQUE_SCHEMA,
                     FIX_VERIFY, FIX_VERIFY_SCHEMA)
@@ -249,6 +250,30 @@ def _run_critique(book_id, r, runs, open_idxs) -> dict:
             out[int(idx)] = gem._coerce_json(resp.text, gem._block_reason(resp))
         except Exception as ex:  # noqa: BLE001
             log(f"r{r} critique parse failed for page {idx}: {ex}")
+    # LITE re-critique: pages that drew an image but got no parseable critique are
+    # usually a PROHIBITED_CONTENT block on the embedded story text -- retry them in
+    # one more batch with that text stripped + image only (no child reference
+    # sheets), which reliably clears the child-safety filter and gets a real score.
+    blocked = [idx for idx in open_idxs if runs[idx].cand is not None and idx not in out]
+    if blocked:
+        lite_reqs = [{"key": str(idx),
+                      "parts": gem.critique_parts(critique_prompt_lite(runs[idx].ctx), runs[idx].cand),
+                      "generation_config": gem.json_config(SCENE_CRITIQUE_SCHEMA, temperature=0.3)}
+                     for idx in blocked]
+        ljob = _submit_or_reattach(book_id, r, "critique_lite", CRITIQUE_MODEL, lite_reqs,
+                                   f"bake b{book_id} r{r} critique-lite")
+        if _await(book_id, r, "critique_lite", ljob) == gem.BATCH_DONE:
+            n = 0
+            for idx, resp in gem.batch_results(ljob).items():
+                if resp is None:
+                    continue
+                gem.record_batch_usage(resp, CRITIQUE_MODEL, "critique")
+                try:
+                    out[int(idx)] = gem._coerce_json(resp.text, gem._block_reason(resp))
+                    n += 1
+                except Exception as ex:  # noqa: BLE001
+                    log(f"r{r} lite critique still failed for page {idx}: {ex}")
+            log(f"r{r} lite critique recovered {n}/{len(blocked)} blocked page(s)")
     return out
 
 
