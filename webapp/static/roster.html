@@ -81,12 +81,6 @@
   <a class="back" id="back" href="#">&#8592; Book settings</a>
   <h1 id="title">Roster</h1>
   <div class="sub" id="sub"></div>
-  <div id="bakebar" hidden style="margin-top:12px;padding:12px 14px;border:1px solid #d8d2c4;border-radius:10px;background:#faf7ef;display:flex;align-items:center;gap:14px;flex-wrap:wrap">
-    <div id="bakemsg" style="flex:1 1 240px;font-size:14px"></div>
-    <button id="bakego" style="padding:9px 16px;border:0;border-radius:8px;background:#7a5c2e;color:#fff;font-weight:600;cursor:pointer">Illustrate whole book</button>
-    <button id="bakeretry" hidden style="padding:9px 16px;border:1px solid #7a5c2e;border-radius:8px;background:#fff;color:#7a5c2e;font-weight:600;cursor:pointer">Retry failed pages</button>
-    <button id="bakecancel" hidden style="padding:9px 16px;border:1px solid #b9532e;border-radius:8px;background:#fff;color:#b9532e;cursor:pointer">Cancel bake</button>
-  </div>
 </header>
 <main id="main"></main>
 <div id="ov" hidden><div class="dlg">
@@ -285,74 +279,5 @@ document.addEventListener("click", e => {
 $("#ovcancel").onclick = closeEditor;
 $("#ovgo").onclick = submitEdit;
 document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#ov").hidden) closeEditor(); });
-
-// ---- whole-book batch bake ----
-let bakeTimer = null;
-function renderBake(bake){
-  const bar = $("#bakebar"), go = $("#bakego"), cancel = $("#bakecancel"), msg = $("#bakemsg");
-  const retry = $("#bakeretry");
-  const st = bake && bake.status;
-  if (!st){ bar.hidden = true; return; }
-  bar.hidden = false;
-  const failed = (bake.counts && bake.counts.failed) || 0;
-  retry.hidden = true;   // shown only when a finished bake left failed pages
-  if (st === "baking"){
-    go.hidden = true; cancel.hidden = false;
-    msg.innerHTML = `<b>Illustrating…</b> ${bake.done_pages}/${bake.total_pages} pages `
-      + `(round ${(bake.round||0)+1}). Runs in the background — you can leave this page.`;
-  } else if (st === "done"){
-    go.hidden = false; go.textContent = "Re-illustrate whole book"; cancel.hidden = true;
-    if (failed){
-      retry.hidden = false;
-      retry.textContent = `Retry ${failed} failed page${failed>1?"s":""}`;
-      msg.innerHTML = `<b>Done.</b> ${bake.done_pages}/${bake.total_pages} pages illustrated `
-        + `at the batch (~50%-off) rate — ${failed} could not be drawn.`;
-    } else {
-      msg.innerHTML = `<b>Done.</b> All ${bake.total_pages} pages illustrated at the batch (~50%-off) rate.`;
-    }
-  } else if (st === "cancelled" || st === "failed"){
-    go.hidden = false; go.textContent = "Illustrate whole book"; cancel.hidden = true;
-    msg.innerHTML = st === "failed"
-      ? `<b>Bake failed.</b> ${esc(bake.detail||"")} — you can retry.`
-      : `Bake cancelled. Press to start again.`;
-  } else { // roster_review or other pre-bake
-    go.hidden = false; go.textContent = "Illustrate whole book"; cancel.hidden = true;
-    msg.innerHTML = `Review & edit the roster above, then illustrate all `
-      + `${bake.total_pages||""} pages in one batch (~50% cheaper, runs in the background).`;
-  }
-}
-async function pollBake(){
-  try {
-    const bake = await (await fetch("/api/books/"+ID+"/bake")).json();
-    renderBake(bake);
-    if (bake && bake.status === "baking" && !bakeTimer) bakeTimer = setInterval(pollBake, 5000);
-    if (bake && bake.status !== "baking" && bakeTimer){ clearInterval(bakeTimer); bakeTimer = null; }
-  } catch (ex) { /* ignore transient */ }
-}
-$("#bakego").onclick = async () => {
-  $("#bakego").disabled = true;
-  const fresh = $("#bakego").textContent.startsWith("Re-");
-  try {
-    const r = await fetch("/api/books/"+ID+"/bake" + (fresh?"?fresh=1":""), {method:"POST"});
-    if (!r.ok){ const e = await r.json().catch(()=>({})); throw new Error(e.detail||("HTTP "+r.status)); }
-    await pollBake();
-  } catch (ex){ $("#bakemsg").textContent = "Failed to start: " + ex.message; }
-  finally { $("#bakego").disabled = false; }
-};
-$("#bakeretry").onclick = async () => {
-  $("#bakeretry").disabled = true;
-  try {
-    const r = await fetch("/api/books/"+ID+"/bake?retry_failed=1", {method:"POST"});
-    if (!r.ok){ const e = await r.json().catch(()=>({})); throw new Error(e.detail||("HTTP "+r.status)); }
-    await pollBake();
-  } catch (ex){ $("#bakemsg").textContent = "Failed to start retry: " + ex.message; }
-  finally { $("#bakeretry").disabled = false; }
-};
-$("#bakecancel").onclick = async () => {
-  $("#bakecancel").disabled = true;
-  try { await fetch("/api/books/"+ID+"/bake/cancel", {method:"POST"}); await pollBake(); }
-  finally { $("#bakecancel").disabled = false; }
-};
-pollBake();
 </script>
 </body></html>

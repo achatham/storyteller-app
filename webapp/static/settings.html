@@ -81,12 +81,20 @@
     <button class="btn" id="redraw">Redraw art</button>
     <a class="btn back" href="/">Library</a>
   </div>
+  <div id="bakebar" hidden style="margin-top:14px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--panel);display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+    <div id="bakemsg" style="flex:1 1 260px;font-size:.9rem;font-family:system-ui,sans-serif"></div>
+    <button class="btn go" id="bakego">Illustrate whole book</button>
+    <button class="btn" id="bakeretry" hidden>Retry failed pages</button>
+    <button class="btn" id="bakecancel" hidden style="border-color:#b9532e;color:#b9532e">Cancel bake</button>
+  </div>
   <div class="note" id="redrawmsg" style="display:none"></div>
 </main>
 <script>
 const ID = __BOOK_ID__;
 const $ = s => document.querySelector(s);
 const usd = n => "$" + (n||0).toFixed(n>=1?2:3);
+const esc = s => (s||"").replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+let numPages = 0;
 
 // Fetch JSON, treating an auth-proxy bounce (redirect / non-OK / login HTML) as
 // "not signed in" rather than letting it render as blank or stale content.
@@ -109,6 +117,7 @@ async function getJSON(url){
   }
   $("#title").textContent = b.title;
   $("#auth").textContent = b.author || "";
+  numPages = b.num_pages || 0;
   $("#read").href = "/book/"+ID;     // paginated book view is the default reading mode
   $("#bookview").href = "/read/"+ID;  // single-page (image-focused) viewer
   $("#roster").href = "/roster/"+ID;
@@ -171,6 +180,75 @@ async function getJSON(url){
       : `Every page kept the first image that cleared the quality bar. Counts each page's current `
         + `illustration only; redraws and character sheets add to the totals above.`;
   }
+  pollBake();   // now that numPages is known, paint the bake bar
 })();
+
+// ---- whole-book batch bake ----
+let bakeTimer = null;
+function renderBake(bake){
+  const bar = $("#bakebar"), go = $("#bakego"), cancel = $("#bakecancel"), msg = $("#bakemsg");
+  const retry = $("#bakeretry");
+  const st = bake && bake.status;
+  bar.hidden = false;   // always available from settings, even before a first bake
+  const failed = (bake && bake.counts && bake.counts.failed) || 0;
+  const total = (bake && bake.total_pages) || numPages || "";
+  retry.hidden = true;   // shown only when a finished bake left failed pages
+  if (st === "baking"){
+    go.hidden = true; cancel.hidden = false;
+    msg.innerHTML = `<b>Illustrating…</b> ${bake.done_pages}/${total} pages `
+      + `(round ${(bake.round||0)+1}). Runs in the background — you can leave this page.`;
+  } else if (st === "done"){
+    go.hidden = false; go.textContent = "Illustrate whole book"; cancel.hidden = true;
+    if (failed){
+      retry.hidden = false;
+      retry.textContent = `Retry ${failed} failed page${failed>1?"s":""}`;
+      msg.innerHTML = `<b>Done.</b> ${bake.done_pages}/${total} pages illustrated `
+        + `— ${failed} could not be drawn.`;
+    } else {
+      msg.innerHTML = `<b>Done.</b> All ${total} pages illustrated.`;
+    }
+  } else if (st === "cancelled" || st === "failed"){
+    go.hidden = false; go.textContent = "Illustrate whole book"; cancel.hidden = true;
+    msg.innerHTML = st === "failed"
+      ? `<b>Bake failed.</b> ${esc(bake.detail||"")} — you can retry.`
+      : `Bake cancelled. Press to start again.`;
+  } else { // null (never baked), roster_review, or other pre-bake
+    go.hidden = false; go.textContent = "Illustrate whole book"; cancel.hidden = true;
+    msg.innerHTML = `Draw every page that doesn't have a picture yet, in one batch — `
+      + `~50% cheaper than drawing them as you read, and it runs in the background. `
+      + `Pages already illustrated are left as they are.`;
+  }
+}
+async function pollBake(){
+  try {
+    const bake = await (await fetch("/api/books/"+ID+"/bake")).json();
+    renderBake(bake);
+    if (bake && bake.status === "baking" && !bakeTimer) bakeTimer = setInterval(pollBake, 5000);
+    if (bake && bake.status !== "baking" && bakeTimer){ clearInterval(bakeTimer); bakeTimer = null; }
+  } catch (ex) { /* ignore transient */ }
+}
+$("#bakego").onclick = async () => {
+  $("#bakego").disabled = true;
+  try {
+    const r = await fetch("/api/books/"+ID+"/bake", {method:"POST"});
+    if (!r.ok){ const e = await r.json().catch(()=>({})); throw new Error(e.detail||("HTTP "+r.status)); }
+    await pollBake();
+  } catch (ex){ $("#bakemsg").textContent = "Failed to start: " + ex.message; }
+  finally { $("#bakego").disabled = false; }
+};
+$("#bakeretry").onclick = async () => {
+  $("#bakeretry").disabled = true;
+  try {
+    const r = await fetch("/api/books/"+ID+"/bake?retry_failed=1", {method:"POST"});
+    if (!r.ok){ const e = await r.json().catch(()=>({})); throw new Error(e.detail||("HTTP "+r.status)); }
+    await pollBake();
+  } catch (ex){ $("#bakemsg").textContent = "Failed to start retry: " + ex.message; }
+  finally { $("#bakeretry").disabled = false; }
+};
+$("#bakecancel").onclick = async () => {
+  $("#bakecancel").disabled = true;
+  try { await fetch("/api/books/"+ID+"/bake/cancel", {method:"POST"}); await pollBake(); }
+  finally { $("#bakecancel").disabled = false; }
+};
 </script>
 </body></html>
