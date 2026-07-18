@@ -145,10 +145,11 @@ function card(b){
     ${ready ? `<div class="barwrap"><div class="bar" style="width:${pct}%"></div></div>` : ""}
     ${baking ? `<div class="barwrap"><div class="bar" style="width:${bakePct}%"></div></div>` : ""}
     <div class="row">
-      ${rosterReview || baking
-        ? `<a class="btn go" href="/roster/${b.id}">${rosterReview ? "Review roster" : "View progress"}</a>`
-        : `<a class="btn go" href="/book/${b.id}" aria-disabled="${ready?'false':'true'}">
-             ${b.position>0 && ready ? "Continue" : "Read"}</a>`}
+      ${rosterReview
+        ? `<a class="btn go" href="/roster/${b.id}">Review roster</a>`
+        : `<a class="btn go" href="/book/${b.id}" aria-disabled="${(ready||baking)?'false':'true'}">
+             ${b.position>0 && (ready||baking) ? "Continue" : "Read"}</a>`}
+      ${baking ? `<a class="btn" href="/roster/${b.id}" title="Bake progress">&#127912;</a>` : ""}
       <a class="btn" href="/settings/${b.id}" title="Settings & cost">&#9881;</a>
       <button class="del" onclick="del(${b.id},event)">✕</button>
     </div>

@@ -6,12 +6,21 @@ per-page path), run as its own subprocess:
 Batch mode is asynchronous, so the tight per-image critique/revise loop of
 webapp/scene.py becomes ROUNDS across every page:
 
-    prepare   -> build each page's scene context (draws any missing roster sheets)
+    roster    -> draw the reference sheets in the BACKGROUND (batch_roster), saving
+                 wave 1 (anchors) before wave 2 (variants) so sheets land mid-draw
+    admit     -> each round, admit any page whose OWN sheets are all present (so it
+                 starts illustrating without waiting for the whole roster); once the
+                 roster finishes, force-admit the rest (missing sheets drawn interactively)
     round r   -> GENERATE batch (image model)   : one draft per still-open page
                  CRITIQUE batch (text model)     : score + verdict per draft
                  VERIFY   batch (text model)     : carry-forward fix check (revises)
                  apply the SAME accept/revise/regenerate bookkeeping as the lazy path
     finalise  -> best-of judge for pages that never passed; store every page image
+
+Pages stream in as their sheets become ready rather than waiting for a full roster
+phase, so the reader (which shows pages progressively during a bake) gets its first
+illustrations sooner. Each page still gets up to SCENE_TRIES attempts regardless of
+which round it joined -- the attempt cap is per-page, not the global round counter.
 
 All decision logic is shared with the interactive path via webapp/scene.py
 (build_scene_context / build_round_request / apply_verdict / ...), so a batched
@@ -22,6 +31,7 @@ resubmitting, and finished pages are stored as they complete.
 import json
 import os
 import sys
+import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -29,7 +39,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pipeline import gem, costs
 from pipeline.config import CRITIQUE_MODEL, IMAGE_SIZE
 
-from . import db, scene
+from . import batch_roster, db, scene
 from .scene import (build_scene_context, build_round_request, apply_verdict,
                     new_scene_state, critique_prompt, critique_prompt_lite,
                     _attempt_trace, _compress,
@@ -116,51 +126,109 @@ class PageRun:
             s["best_key"] = (0 if actionable else 1, s["best"][1])
 
 
-# ---------------- prepare ----------------
+# ---------------- seed / roster / admission ----------------
 
-def prepare(book_id) -> dict:
-    """Build a PageRun (with scene context + gen_id + trace) for every page, drawing
-    any missing roster sheets on the way. Runs page contexts in parallel (each is an
-    independent text pass + cached sheet draws). Restores state for a resumed bake."""
+def _seed(book_id):
+    """Seed per-page bake state and drop pages that already have an illustration (drawn
+    lazily as-read, or by a prior bake) so the bake only fills pages without an image.
+    Skipped pages are marked done up front: out of the actionable set, still counted."""
     db.bps_init(book_id, [p["idx"] for p in db.get_pages(book_id)])
-    # Skip pages that already have an illustration (drawn lazily as-read, or by a prior
-    # bake): the bake only fills pages without an image yet -- existing pictures are
-    # never redrawn. Marks them done up front so they drop out of the actionable set
-    # and still count toward done_pages.
     skipped = db.bps_skip_illustrated(book_id)
     if skipped:
         log(f"skipping {skipped} page(s) that already have an illustration")
-    # Only build contexts for pages that still need work: a fresh bake seeds every
-    # page 'pending' (minus the ones already illustrated), while a resume or a
-    # retry-failed run reopens just the handful still open -- no point re-preparing
-    # finished pages.
-    idxs = db.bps_actionable(book_id)
-    runs: dict = {}
 
-    def one(idx):
-        pr = PageRun(idx)
-        pr.book_id = book_id
-        row = db.bps_get(book_id, idx)
+
+class _RosterThread:
+    """Draws the batch roster in the BACKGROUND so page rounds overlap it (~50% cheaper
+    than interactive, and pages don't wait for a full roster phase). draw_roster saves
+    wave 1 (anchors) before wave 2 (variants), so pages needing only anchors go ready --
+    and start generating -- while wave 2 is still drawing. `finished` flips true on
+    completion OR failure; that's when the run loop force-admits any remaining pages,
+    letting build_scene_context draw whatever the batch couldn't produce interactively.
+    Idempotent on resume: draw_roster skips already-cached sheets. Daemon: a cancelled
+    bake exits the process, killing the thread."""
+
+    def __init__(self, book_id):
+        self.book_id = book_id
+        self.finished = False
+        self._t = None
+
+    def start(self):
+        def _go():
+            try:
+                n = batch_roster.draw_roster(self.book_id, log=log)
+                log(f"batch roster drew {n} sheets")
+            except Exception as ex:  # noqa: BLE001 -- fall back to interactive per-page draws
+                log(f"batch roster failed ({type(ex).__name__}: {ex}); "
+                    "remaining sheets drawn interactively")
+            finally:
+                self.finished = True
+        self._t = threading.Thread(target=_go, name=f"roster-{self.book_id}", daemon=True)
+        self._t.start()
+
+    def join(self):
+        if self._t:
+            self._t.join()
+        self.finished = True
+
+
+def _build_page_run(book_id, idx):
+    """Build one page's PageRun (scene context + debug gen id + trace), restoring prior
+    state for a resumed/continued page. Returns None if the context can't be built (the
+    page is marked failed). build_scene_context draws any still-missing sheet for this
+    page interactively as a side effect -- the fallback for sheets the batch skipped."""
+    pr = PageRun(idx)
+    pr.book_id = book_id
+    row = db.bps_get(book_id, idx)
+    try:
+        pr.ctx = build_scene_context(book_id, idx)
+    except Exception as ex:  # noqa: BLE001 -- a bad page shouldn't sink the bake
+        log(f"page {idx} context failed: {ex}")
+        db.bps_save(book_id, idx, status="failed")
+        return None
+    if row and row["gen_id"]:      # resume: keep the same debug gen + prior state
+        pr.gen_id = row["gen_id"]
+        pr.restore(row)
+    else:
+        pr.gen_id = db.next_gen_id(book_id, idx)
+    pr.trace = {"states": pr.ctx["states"], "max_tries": MAX_ROUNDS, "attempts": []}
+    return pr
+
+
+def _page_ready(book_id, idx, plan_cache) -> bool:
+    """True once every real (non-view) roster sheet page `idx` references is drawn, so
+    the page can generate without waiting for the rest of the roster. View sheets ('__')
+    are drawn interactively by build_scene_context and don't gate readiness. The sheet
+    plan is page-stable, so it's cached across rounds (a cheap DB-only resolve)."""
+    plan = plan_cache.get(idx)
+    if plan is None:
         try:
-            pr.ctx = build_scene_context(book_id, idx)
-        except Exception as ex:  # noqa: BLE001 -- a bad page shouldn't sink the bake
-            log(f"page {idx} context failed: {ex}")
-            db.bps_save(book_id, idx, status="failed")
-            return idx, None
-        if row and row["gen_id"]:      # resume: keep the same debug gen + prior state
-            pr.gen_id = row["gen_id"]
-            pr.restore(row)
-        else:
-            pr.gen_id = db.next_gen_id(book_id, idx)
-        pr.trace = {"states": pr.ctx["states"], "max_tries": MAX_ROUNDS, "attempts": []}
-        return idx, pr
+            plan = scene.plan_page_sheets(book_id, idx)
+        except Exception:  # noqa: BLE001 -- treat as not-ready; a later force-admit covers it
+            return False
+        plan_cache[idx] = plan
+    return all(db.has_sheet(book_id, m["entity_id"], m["variant_id"])
+               for m in plan if not m["variant_id"].startswith("__"))
 
+
+def _admit(book_id, runs, plan_cache, force) -> int:
+    """Admit still-actionable pages into `runs`. While the roster is drawing, only pages
+    whose sheets are all present are admitted (they start generating early); once the
+    roster is done, `force` admits the rest. Contexts build in parallel (independent
+    text passes). Returns how many pages were newly admitted."""
+    targets = [idx for idx in db.bps_actionable(book_id)
+               if idx not in runs and (force or _page_ready(book_id, idx, plan_cache))]
+    if not targets:
+        return 0
+    added = 0
     with ThreadPoolExecutor(max_workers=PREPARE_WORKERS) as ex:
-        for idx, pr in ex.map(one, idxs):
+        for pr in ex.map(lambda i: _build_page_run(book_id, i), targets):
             if pr is not None:
-                runs[idx] = pr
-    log(f"prepared {len(runs)}/{len(idxs)} page contexts")
-    return runs
+                runs[pr.idx] = pr
+                added += 1
+    if added:
+        log(f"admitted {added} page(s) ({'roster done' if force else 'sheets ready'})")
+    return added
 
 
 # ---------------- batch job helpers ----------------
@@ -168,12 +236,15 @@ def prepare(book_id) -> dict:
 def _submit_or_reattach(book_id, r, kind, model, reqs, display):
     """Reuse an already-submitted job for this (round, kind) if present (resume),
     else submit a new one. Returns the job name."""
+    coarse = "image" if kind.startswith("gen:") else "text"
     existing = db.bjob_get(book_id, r, kind)
     if existing and existing["job_name"]:
+        db.batch_req_add(book_id, existing["job_name"], coarse, len(reqs))
         log(f"r{r} {kind}: reattaching {existing['job_name']} ({existing['state']})")
         return existing["job_name"]
     job = gem.batch_submit(reqs, model=model, display_name=display)
     db.bjob_upsert(book_id, r, kind, job, "JOB_STATE_PENDING")
+    db.batch_req_add(book_id, job, coarse, len(reqs))
     log(f"r{r} {kind}: submitted {job} ({len(reqs)} reqs, model={model})")
     return job
 
@@ -369,9 +440,9 @@ def _apply_round(book_id, r, runs, open_idxs, crits, verifies):
         pr.save(status="revising" if pr.state["draft"] is not None else "pending")
 
 
-def run_round(book_id, r, runs) -> int:
-    """Run one full round over the still-open pages. Returns how many remain open."""
-    open_idxs = [i for i in db.bps_actionable(book_id) if i in runs]
+def run_round(book_id, r, runs, open_idxs) -> int:
+    """Run one full round over the given open pages (chosen by the caller: admitted,
+    still actionable, attempts remaining). Returns how many pages remain actionable."""
     if not open_idxs:
         return 0
     log(f"round {r}: {len(open_idxs)} pages open")
@@ -503,8 +574,18 @@ def run(book_id: int):
     if not book:
         raise ValueError(f"no book {book_id}")
     with costs.run_as(f"book:{book_id}"):
-        runs = prepare(book_id)
+        _seed(book_id)
         total = len(db.get_pages(book_id))
+        # Draw the roster in the BACKGROUND so a page starts illustrating as soon as ITS
+        # OWN sheets are ready, instead of waiting for the whole roster (better time to
+        # first illustrated page -- the reader shows pages progressively during a bake).
+        roster = _RosterThread(book_id)
+        if scene.ROSTER_BATCH:
+            roster.start()
+        else:
+            roster.finished = True   # no batch roster: force-admit draws sheets interactively
+        runs: dict = {}
+        plan_cache: dict = {}
         # resume from the last-unfinished round (0 on a fresh bake); a completed round
         # advanced the pointer to r+1 so it is not redone.
         start_round = (db.bake_get(book_id) or {}).get("round") or 0
@@ -512,19 +593,35 @@ def run(book_id: int):
                        done_pages=db.bps_counts(book_id).get("done", 0))
         if start_round:
             log(f"resuming at round {start_round}")
-        for r in range(start_round, MAX_ROUNDS):
+        # The round counter is just a batch-job namespace + resume pointer now; the real
+        # stop condition is per-page (a page leaves the open set after SCENE_TRIES
+        # attempts). A late-admitted page can push total iterations past MAX_ROUNDS, so
+        # cap generously -- every open page still increments its attempt each round, so
+        # once the roster is done the loop drains in <= MAX_ROUNDS more iterations.
+        r = start_round
+        max_round = start_round + MAX_ROUNDS * 4
+        while r < max_round:
             if _cancelled(book_id):
                 log("cancelled")
                 db.set_status(book_id, "roster_review", "bake cancelled — review or re-illustrate")
                 return
-            if run_round(book_id, r, runs) == 0:
-                break
+            _admit(book_id, runs, plan_cache, force=roster.finished)
+            open_idxs = [i for i in db.bps_actionable(book_id)
+                         if i in runs and runs[i].attempt < MAX_ROUNDS]
+            if not open_idxs:
+                if roster.finished:
+                    break                     # roster done and nothing left to generate
+                time.sleep(POLL_SECONDS)       # sheets still drawing -- wait, then re-admit
+                continue
+            run_round(book_id, r, runs, open_idxs)
+            r += 1
+        roster.join()
         if _cancelled(book_id):
             db.set_status(book_id, "roster_review", "bake cancelled — review or re-illustrate")
             return
         finalise(book_id, runs)
         done = db.bps_counts(book_id).get("done", 0)
-        db.bake_upsert(book_id, "done", round=MAX_ROUNDS, done_pages=done)
+        db.bake_upsert(book_id, "done", round=r, done_pages=done)
         db.set_status(book_id, "ready", f"{done} pages illustrated (batch)")
         log(f"book {book_id} bake done: {done}/{total} pages")
 

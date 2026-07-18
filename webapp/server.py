@@ -551,6 +551,22 @@ def api_sheet(book_id: int, entity_id: str, variant_id: str, request: Request):
     return _image_response(data, request)
 
 
+@app.get("/api/books/{book_id}/batch")
+async def api_batch_outstanding(book_id: int):
+    """How many Batch API requests are still in flight for this book (image vs text),
+    for the cost page's outstanding-requests indicator. Decided against the LIVE batch
+    job list; returns {"known": false} if the API can't be reached so the UI stays quiet
+    instead of showing a false zero."""
+    from pipeline import gem
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    active = await asyncio.to_thread(gem.active_batch_jobs)
+    if active is None:
+        return {"known": False}
+    out = await asyncio.to_thread(db.outstanding_batch, book_id, active)
+    return {"known": True, **out}
+
+
 @app.get("/api/books/{book_id}/cost")
 def api_book_cost(book_id: int):
     from pipeline import costs
@@ -768,7 +784,10 @@ async def api_scene_image(book_id: int, idx: int, request: Request):
     book = db.get_book(book_id)
     if not book:
         raise HTTPException(404, "no such book")
-    if book["status"] != "ready":
+    # A whole-book bake ('baking') is readable: pages already illustrated serve
+    # normally; the still-baking ones show a placeholder (below). Only genuinely
+    # unready states (uploading/segmenting) block.
+    if book["status"] not in ("ready", "baking"):
         raise HTTPException(409, f"book not ready ({book['status']})")
     if not db.get_page(book_id, idx):
         raise HTTPException(404, "no such page")
@@ -778,8 +797,11 @@ async def api_scene_image(book_id: int, idx: int, request: Request):
         return _image_response(data, request)
     # Not drawn yet: a scene takes ~30-40s (sheets + critic + revise). Don't hold the
     # connection that long (it trips reverse-proxy timeouts and stalls reading-ahead).
-    # Kick off a background render and tell the client to poll; it shows a placeholder.
-    if await asyncio.to_thread(db.scene_status, book_id, idx) != "generating":
+    # Tell the client to poll; it shows a placeholder meanwhile. During a bake the
+    # batch subprocess owns this page, so DON'T start a competing interactive render --
+    # just let the reader poll until the bake stores it.
+    if book["status"] != "baking" and \
+            await asyncio.to_thread(db.scene_status, book_id, idx) != "generating":
         asyncio.create_task(_safe_ensure(book_id, idx))
     return Response(status_code=202, headers={"Retry-After": "2", "Cache-Control": "no-store"})
 

@@ -147,7 +147,9 @@ async function boot(){
       + `<a href="#" onclick="location.reload();return false" style="color:var(--muted);text-decoration:underline">sign in again</a>.`;
     return;
   }
-  if (META.status !== "ready"){ $("#splash").textContent = "Still processing… " + (META.detail||""); setTimeout(boot,3000); return; }
+  // 'baking' is readable: illustrated pages show now, still-baking ones show a
+  // placeholder and appear as the whole-book bake finishes them.
+  if (META.status !== "ready" && META.status !== "baking"){ $("#splash").textContent = "Still processing… " + (META.detail||""); setTimeout(boot,3000); return; }
   $("#bk").textContent = META.title;
   $("#chap").innerHTML = (META.chapters||[]).map(c => `<option value="${c.idx}">${c.title}</option>`).join("");
   let start = { ch:0, page:0 }, localT = 0;

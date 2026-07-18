@@ -55,6 +55,7 @@
       <div>text&nbsp; <b id="textc"></b></div>
       <div>images&nbsp; <b id="imgc"></b> <span class="pill" id="nimg"></span></div>
       <div id="savedrow" style="display:none">batch saved&nbsp; <b id="saved"></b></div>
+      <div id="outrow" style="display:none">outstanding batch&nbsp; <b id="outstanding"></b></div>
     </div>
     <table><thead><tr><th>model</th><th>kind</th><th>in tok</th><th>out tok</th><th>imgs</th><th>USD</th></tr></thead>
       <tbody id="rows"></tbody></table>
@@ -187,7 +188,25 @@ async function getJSON(url){
   }
   pollBake();   // now that numPages is known, paint the bake bar
   pollEpub();
+  pollOutstanding();
 })();
+
+// ---- outstanding batch requests (live, while a bake has jobs in flight) ----
+async function pollOutstanding(){
+  try {
+    const o = await (await fetch("/api/books/"+ID+"/batch", {cache:"no-store"})).json();
+    const row = $("#outrow");
+    if (o.known && o.total > 0){
+      $("#outstanding").textContent =
+        `${o.total.toLocaleString()} request${o.total>1?"s":""} `
+        + `(${o.image.toLocaleString()} image / ${o.text.toLocaleString()} text) `
+        + `in ${o.jobs} batch job${o.jobs>1?"s":""}`;
+      row.style.display = "";
+    } else {
+      row.style.display = "none";
+    }
+  } catch (e) { /* indicator only */ }
+}
 
 // ---- whole-book batch bake ----
 let bakeTimer = null;
@@ -229,6 +248,7 @@ async function pollBake(){
   try {
     const bake = await (await fetch("/api/books/"+ID+"/bake")).json();
     renderBake(bake);
+    pollOutstanding();   // refresh the in-flight batch count alongside bake progress
     if (bake && bake.status === "baking" && !bakeTimer) bakeTimer = setInterval(pollBake, 5000);
     if (bake && bake.status !== "baking" && bakeTimer){ clearInterval(bakeTimer); bakeTimer = null; }
   } catch (ex) { /* ignore transient */ }

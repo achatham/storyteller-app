@@ -622,6 +622,22 @@ def generate_scene(book_id: int, idx: int, fast_critique: bool = False) -> bytes
         return _render_scene(book_id, idx, fast_critique=fast_critique)
 
 
+_CHAR_STATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "states": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "state": {"type": "string"}},
+                "required": ["name", "state"],
+            },
+        }
+    },
+    "required": ["states"],
+}
+
+
 def _character_states(brief: str, source: str, members: list) -> dict:
     """A cheap text pass: each present character's PHYSICAL state/action at THIS one
     moment (bound, crying, holding X, kneeling). Lets the image model attach a state
@@ -639,12 +655,23 @@ def _character_states(brief: str, source: str, members: list) -> dict:
         f"THE MOMENT (illustration brief):\n{brief}\n\n"
         f"SOURCE PASSAGE:\n{(source or '')[:1000]}\n\n"
         f"CHARACTERS PRESENT: {', '.join(names)}\n\n"
-        'Return JSON only: {"states": {"<name>": "<short phrase or empty>"}}'
+        'Return JSON only: a "states" array with one {"name","state"} object per character '
+        "above (state = a short phrase or empty string)."
     )
+    # An array of {name,state} objects, not a {name: state} map: dynamic map keys can't be
+    # expressed in Gemini's response_schema subset, so a schema-less call here used to emit
+    # malformed/duplicated JSON and burn retries. This shape IS schema-able -> clean output.
     try:
-        out = gem.text_json(prompt, model=ANALYZE_MODEL)
-        st = out.get("states", {}) if isinstance(out, dict) else {}
-        return {k: v.strip() for k, v in st.items() if isinstance(v, str) and v.strip()}
+        out = gem.text_json(prompt, schema=_CHAR_STATE_SCHEMA, model=ANALYZE_MODEL)
+        rows = out.get("states", []) if isinstance(out, dict) else []
+        result = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name, st = row.get("name"), row.get("state")
+            if isinstance(name, str) and isinstance(st, str) and st.strip():
+                result[name] = st.strip()
+        return result
     except Exception as ex:  # noqa: BLE001 -- never fail a scene on the state pass
         print(f"[scene] character-state pass failed: {ex}", flush=True)
         return {}

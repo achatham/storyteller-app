@@ -184,6 +184,17 @@ CREATE TABLE IF NOT EXISTS batch_jobs (
     updated_at REAL,
     PRIMARY KEY (book_id, round, kind)
 );
+-- one row per submitted Batch API job + its request count, so the cost page can show
+-- how many batch requests are still outstanding (the API doesn't report per-request
+-- progress mid-flight). Whether a job is still in flight is decided against the LIVE
+-- Batch API job list, so there's no state column to keep in sync here.
+CREATE TABLE IF NOT EXISTS batch_reqs (
+    job_name   TEXT PRIMARY KEY,
+    book_id    INTEGER REFERENCES books(id) ON DELETE CASCADE,
+    kind       TEXT,         -- coarse: image|text
+    n_reqs     INTEGER,
+    created_at REAL
+);
 CREATE TABLE IF NOT EXISTS progress (
     book_id    INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
     position   INTEGER,
@@ -942,12 +953,46 @@ def bjob_set_state(book_id, round, kind, state):
                   "AND kind=?", (state, time.time(), book_id, round, kind))
 
 
+def batch_req_add(book_id, job_name, kind, n_reqs):
+    """Record a submitted Batch API job + how many requests it carries, for the
+    outstanding-requests indicator. `kind` is coarse: 'image' or 'text'. Idempotent
+    per job (a resume that reattaches the same job just re-asserts the count)."""
+    with conn() as c:
+        c.execute("INSERT INTO batch_reqs(job_name,book_id,kind,n_reqs,created_at) "
+                  "VALUES (?,?,?,?,?) ON CONFLICT(job_name) DO UPDATE SET "
+                  "n_reqs=excluded.n_reqs, kind=excluded.kind",
+                  (job_name, book_id, kind, n_reqs, time.time()))
+
+
+def outstanding_batch(book_id, active_names) -> dict:
+    """How many Batch API requests are still in flight for this book: sum n_reqs over
+    recorded jobs whose name is in `active_names` (the live non-terminal set from the
+    Batch API), split coarse image/text. Empty active set -> all zero."""
+    out = {"total": 0, "image": 0, "text": 0, "jobs": 0}
+    names = list(active_names or [])
+    if not names:
+        return out
+    qs = ",".join("?" * len(names))
+    with conn() as c:
+        rows = c.execute(
+            f"SELECT kind, COUNT(*) jobs, COALESCE(SUM(n_reqs),0) n FROM batch_reqs "
+            f"WHERE book_id=? AND job_name IN ({qs}) GROUP BY kind",
+            (book_id, *names)).fetchall()
+    for r in rows:
+        k = r["kind"] if r["kind"] in ("image", "text") else "text"
+        out[k] += r["n"]
+        out["total"] += r["n"]
+        out["jobs"] += r["jobs"]
+    return out
+
+
 def bake_clear(book_id):
     """Drop all bake bookkeeping for a book (e.g. before a fresh re-bake)."""
     with conn() as c:
         c.execute("DELETE FROM batch_page_state WHERE book_id=?", (book_id,))
         c.execute("DELETE FROM batch_jobs WHERE book_id=?", (book_id,))
         c.execute("DELETE FROM batch_bake WHERE book_id=?", (book_id,))
+        c.execute("DELETE FROM batch_reqs WHERE book_id=?", (book_id,))
 
 
 def bake_retry_failed(book_id) -> int:

@@ -190,10 +190,17 @@ def _coerce_json(raw: str | None, reason: str = "") -> dict:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        s, e = raw.find("{"), raw.rfind("}")
-        if s == -1 or e == -1 or e < s:
+        # Recover the FIRST JSON object and ignore any trailing junk (a duplicate
+        # object, a stray brace, a markdown fence, explanatory prose) -- the common
+        # "Extra data" failure mode of schema-less JSON-mode calls. raw_decode stops
+        # at the end of the first value, unlike a first-{/last-} slice which re-includes
+        # trailing braces and fails again. A malformation WITHIN the first object still
+        # raises here, so the caller's retry kicks in.
+        s = raw.find("{")
+        if s == -1:
             raise ValueError(f"no JSON object in response: {raw[:160]!r}")
-        return json.loads(raw[s:e + 1])
+        obj, _ = json.JSONDecoder().raw_decode(raw[s:])
+        return obj
 
 
 def text_json(prompt: str, schema: dict | None = None, model: str = TEXT_MODEL,
@@ -413,6 +420,25 @@ BATCH_TERMINAL = {"JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED",
 def batch_state(job_name: str) -> str:
     """Current state string of a batch job (e.g. JOB_STATE_RUNNING)."""
     return _client.batches.get(name=job_name).state.name
+
+
+def active_batch_jobs(scan_limit: int = 200) -> set | None:
+    """Names of batch jobs not yet in a terminal state, from the LIVE Batch API -- the
+    source of truth for "still outstanding" (the API doesn't report per-request progress
+    mid-flight, so callers sum their own recorded request counts over this set). Active
+    jobs are recent, so scanning the most-recent `scan_limit` (newest first) captures
+    them. Returns a set of names, or None on error so callers show 'unknown', not a
+    false zero."""
+    try:
+        active = set()
+        for i, j in enumerate(_client.batches.list(config={"page_size": 100})):
+            if i >= scan_limit:
+                break
+            if j.state.name not in BATCH_TERMINAL:
+                active.add(j.name)
+        return active
+    except Exception:  # noqa: BLE001 -- indicator only; never break the cost page
+        return None
 
 
 class _Blob:

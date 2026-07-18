@@ -125,6 +125,7 @@ def _draw_wave(book_id, wave, style_text, style_ref_bytes, use_anchor, log) -> i
             break
         gjob = gem.batch_submit(gen_reqs, model=ROSTER_IMAGE_MODEL,
                                 display_name=f"roster b{book_id} gen a{attempt}")
+        db.batch_req_add(book_id, gjob, "image", len(gen_reqs))
         log(f"[roster] gen a{attempt}: submitted {gjob} ({len(gen_reqs)} sheets)")
         if _await(gjob) != gem.BATCH_DONE:
             log(f"[roster] gen batch {gjob} did not succeed; stopping wave")
@@ -158,6 +159,7 @@ def _draw_wave(book_id, wave, style_text, style_ref_bytes, use_anchor, log) -> i
         if crit_reqs:
             cjob = gem.batch_submit(crit_reqs, model=CRITIQUE_MODEL,
                                     display_name=f"roster b{book_id} crit a{attempt}")
+            db.batch_req_add(book_id, cjob, "text", len(crit_reqs))
             if _await(cjob) == gem.BATCH_DONE:
                 for k, resp in gem.batch_results(cjob).items():
                     if resp is None:
