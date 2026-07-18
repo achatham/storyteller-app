@@ -120,9 +120,17 @@ def prepare(book_id) -> dict:
     any missing roster sheets on the way. Runs page contexts in parallel (each is an
     independent text pass + cached sheet draws). Restores state for a resumed bake."""
     db.bps_init(book_id, [p["idx"] for p in db.get_pages(book_id)])
+    # Skip pages that already have an illustration (drawn lazily as-read, or by a prior
+    # bake): the bake only fills pages without an image yet -- existing pictures are
+    # never redrawn. Marks them done up front so they drop out of the actionable set
+    # and still count toward done_pages.
+    skipped = db.bps_skip_illustrated(book_id)
+    if skipped:
+        log(f"skipping {skipped} page(s) that already have an illustration")
     # Only build contexts for pages that still need work: a fresh bake seeds every
-    # page 'pending' (so this is all of them), while a resume or a retry-failed run
-    # reopens just the handful still open -- no point re-preparing finished pages.
+    # page 'pending' (minus the ones already illustrated), while a resume or a
+    # retry-failed run reopens just the handful still open -- no point re-preparing
+    # finished pages.
     idxs = db.bps_actionable(book_id)
     runs: dict = {}
 

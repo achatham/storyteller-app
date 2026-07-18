@@ -846,6 +846,20 @@ def bps_init(book_id, idxs: list[int]):
                       (book_id, idx, now))
 
 
+def bps_skip_illustrated(book_id) -> int:
+    """Mark bake pages that already have a stored illustration as done, so the bake
+    only draws pages that don't have an image yet (a page drawn lazily as you read, or
+    by a prior bake, is left untouched -- never redrawn). They still count toward
+    done_pages. Pages the current bake just finished are already done=1, so the
+    done=0 guard leaves them alone. Returns how many pages were skipped."""
+    with conn() as c:
+        return c.execute(
+            "UPDATE batch_page_state SET status='done', done=1, updated_at=? "
+            "WHERE book_id=? AND done=0 AND idx IN "
+            "(SELECT idx FROM scenes WHERE book_id=? AND status='done' AND length(data)>0)",
+            (time.time(), book_id, book_id)).rowcount
+
+
 def bps_get(book_id, idx) -> dict | None:
     with conn() as c:
         r = c.execute("SELECT * FROM batch_page_state WHERE book_id=? AND idx=?",

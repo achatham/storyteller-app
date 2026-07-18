@@ -355,21 +355,27 @@ async def api_reprocess(book_id: int, fresh: bool = False):
 @app.post("/api/books/{book_id}/bake")
 async def api_bake(book_id: int, fresh: bool = False, retry_failed: bool = False):
     """Illustrate the whole book via the Batch API (~50% cheaper). Kicks off the
-    background bake subprocess. Valid once the roster is ready (roster_review) or on
-    a ready book you want to (re)bake. ?fresh=1 discards prior bake bookkeeping and
-    redraws every page; ?retry_failed=1 regenerates ONLY the pages that ended failed
-    (finished pages are left untouched) -- cheap way to mop up a bake's stragglers."""
+    background bake subprocess, which draws only the pages that don't have an image yet
+    -- pages already illustrated (lazily as-read, or by a prior bake) are left untouched.
+    Valid once the roster is ready (roster_review) or on a ready book you want to bake.
+    ?fresh=1 discards prior bake bookkeeping (a clean re-scan); ?retry_failed=1
+    regenerates ONLY the pages that ended failed -- cheap way to mop up stragglers."""
     b = db.get_book(book_id)
     if not b:
         raise HTTPException(404, "no such book")
     if b["num_pages"] < 1:
         raise HTTPException(409, "book not segmented yet")
-    if fresh:
-        await asyncio.to_thread(db.bake_clear, book_id)
-    elif retry_failed:
+    if retry_failed:
         n = await asyncio.to_thread(db.bake_retry_failed, book_id)
         if not n:
             return {"ok": True, "reopened": 0, "detail": "no failed pages to retry"}
+    else:
+        # A user-initiated start (fresh or not) re-scans from a clean slate: drop any
+        # prior bake bookkeeping so prepare() re-seeds and re-detects which pages still
+        # need an image. (Skips this only for a retry-failed mop-up, handled above.)
+        prev = await asyncio.to_thread(db.bake_get, book_id)
+        if prev and prev["status"] != "baking":
+            await asyncio.to_thread(db.bake_clear, book_id)
     await asyncio.to_thread(db.set_illustration_mode, book_id, "batch")
     # round=0: a user-initiated (re)start runs the round loop from the top. Crash
     # resume (server startup -> start_bake) leaves the pointer untouched instead.
