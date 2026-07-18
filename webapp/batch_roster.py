@@ -90,9 +90,12 @@ def _draw_wave(book_id, wave, style_text, style_ref_bytes, use_anchor, log) -> i
     slots: dict = {}
     for m in wave:
         slots[_skey(m["entity_id"], m["variant_id"])] = {
-            "m": m, "best": None, "attempts": [], "fix": ""}
+            "m": m, "best": None, "attempts": [], "fix": "",
+            "safe_prompt": "", "safety_tries": 0}
 
-    for attempt in range(1, scene.SHEET_TRIES + 1):
+    # extra attempts beyond SHEET_TRIES cover slots whose draw was policy-refused and
+    # rewritten (a refused attempt produced no candidate, so it shouldn't cost a try).
+    for attempt in range(1, scene.SHEET_TRIES + scene.SAFETY_REWRITES + 1):
         todo = [k for k, s in slots.items()
                 if s["best"] is None or (s["best"][1] or 0) < scene.SHEET_PASS]
         if not todo:
@@ -108,8 +111,10 @@ def _draw_wave(book_id, wave, style_text, style_ref_bytes, use_anchor, log) -> i
             r = scene.sheet_gen_request(m, style_text, style_ref_bytes, sib)
             if not r:
                 continue
-            prompt = r["prompt"] + (f"\n\nIMPORTANT FIX FROM LAST ATTEMPT: {s['fix']}"
-                                    if s["fix"] else "")
+            # a prior draw was refused on policy -> use the rewritten, policy-safe prompt
+            base = s["safe_prompt"] or r["prompt"]
+            prompt = base + (f"\n\nIMPORTANT FIX FROM LAST ATTEMPT: {s['fix']}"
+                             if s["fix"] else "")
             s["_prompt"], s["_desc"] = prompt, r["desc"]
             gen_reqs.append({"key": k,
                              "parts": [gem.text_part(prompt)]
@@ -132,6 +137,15 @@ def _draw_wave(book_id, wave, style_text, style_ref_bytes, use_anchor, log) -> i
             img = gem.response_image_bytes(resp)
             if img:
                 cands[k] = img
+                continue
+            # blocked/empty draw: on a policy refusal, rewrite this slot's prompt so the
+            # next attempt regenerates a policy-safe version (e.g. a distressed child).
+            reason = gem._block_reason(resp)
+            s = slots.get(k)
+            if s is not None and gem.is_policy_refusal(reason) and s["safety_tries"] < scene.SAFETY_REWRITES:
+                s["safe_prompt"] = gem.rewrite_prompt_safely(s.get("_prompt", ""), reason)
+                s["safety_tries"] += 1
+                log(f"[roster] {k}: image blocked [{reason}] -- rewrote prompt for next attempt")
 
         # --- CRITIQUE (single-subject text batch) ---
         crits = {}

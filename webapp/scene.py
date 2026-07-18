@@ -76,6 +76,10 @@ from pipeline.run import (resolve_cast, scene_members, build_scene_prompt,
 from . import db
 
 SCENE_TRIES = int(os.environ.get("STORY_SCENE_TRIES", "3"))  # max image attempts per scene
+# Max times a single image's prompt is rewritten to get past a content-policy refusal
+# (child-peril/violence/etc). Small: one neutralising rewrite usually clears it, and
+# each costs a cheap text pass; after this the image falls back to its normal handling.
+SAFETY_REWRITES = int(os.environ.get("STORY_SAFETY_REWRITES", "2"))
 # Critic sub-score weights in the averaged quality score: anatomical correctness
 # and not-spoiling-later-in-the-chapter matter twice as much as the rest.
 SCORE_WEIGHTS = {"physical": 2, "no_spoiler": 2}
@@ -150,12 +154,33 @@ def _draw_sheet(prompt, refs, aspect, desc):
     (e.g. a figurehead at both ends -> 'two heads'). Returns (best_bytes, trace) where
     trace = {"attempts": [...], "chosen": n} for the debug history."""
     with tempfile.TemporaryDirectory() as td:
-        best, fix, attempts = None, "", []
-        for attempt in range(1, SHEET_TRIES + 1):
+        best, fix, attempts, safety_tries, drawn = None, "", [], 0, 0
+        # up to SHEET_TRIES *successful* draws; refused attempts (which we replace with
+        # a safety rewrite) don't count against that budget.
+        for attempt in range(1, SHEET_TRIES + SAFETY_REWRITES + 1):
+            if drawn >= SHEET_TRIES:
+                break
             p = prompt + (f"\n\nIMPORTANT FIX FROM LAST ATTEMPT: {fix}" if fix else "")
             cand = Path(td) / f"cand{attempt}.webp"
-            gem.generate_image(p, refs=refs, out_path=cand, aspect=aspect, model=ROSTER_IMAGE_MODEL)
-            data = cand.read_bytes()
+            try:
+                gem.generate_image(p, refs=refs, out_path=cand, aspect=aspect, model=ROSTER_IMAGE_MODEL)
+                data = cand.read_bytes()
+            except gem.ImageRefused as ex:
+                # A content-policy refusal (e.g. child-safety on a distressed-child
+                # subject) won't clear by redrawing the same prompt -- rewrite it to a
+                # policy-safe version and retry. A transient empty just regenerates.
+                print(f"[scene] sheet draw refused attempt {attempt}: {ex}", flush=True)
+                if ex.policy and safety_tries < SAFETY_REWRITES:
+                    prompt = gem.rewrite_prompt_safely(prompt, ex.reason)
+                    safety_tries += 1
+                    print("[scene] rewrote sheet prompt to pass the safety filter", flush=True)
+                fix = ""
+                continue
+            except Exception as ex:  # noqa: BLE001 -- other draw error: regenerate fresh
+                print(f"[scene] sheet draw failed attempt {attempt}: {ex}", flush=True)
+                fix = ""
+                continue
+            drawn += 1
             try:
                 crit = gem.critique_image(cand, SHEET_CRITIQUE.format(desc=desc or "(the subject)"))
                 cs, mt = crit.get("clean_sheet", 0), crit.get("match", 0)
@@ -172,6 +197,8 @@ def _draw_sheet(prompt, refs, aspect, desc):
             if score >= SHEET_PASS:
                 break
             fix = crit.get("fix_hint", "")
+        if best is None:   # every attempt's image draw was blocked/empty
+            return None, {"attempts": attempts, "chosen": None}
         return best[0], {"attempts": attempts, "chosen": best[2]}
 
 
@@ -360,6 +387,9 @@ def _ensure_sheet(book_id, member, style_text, style_ref=None) -> bytes | None:
                 data, trace = _draw_sheet(prompt, refs or None, img_aspect, appearance)
         except Exception as ex:  # noqa: BLE001
             print(f"[scene] sheet {eid}/{vid} failed: {ex}", flush=True)
+            return None
+        if data is None:   # blocked/empty on every attempt -- leave the sheet absent
+            print(f"[scene] sheet {eid}/{vid} blocked/empty every attempt -- skipping", flush=True)
             return None
         db.save_sheet(book_id, eid, vid, data)
         _save_sheet_history(book_id, eid, vid, appearance, trace)
@@ -662,7 +692,10 @@ def new_scene_state() -> dict:
     BYTES (not paths) so the state survives across async batch rounds/processes."""
     return {"mode": "fresh", "draft": None, "best": None, "best_key": None,
             "fix": "", "pending_defect": "", "escalate": False,
-            "edit_instr": "", "ref_chars": [], "cands": []}
+            "edit_instr": "", "ref_chars": [], "cands": [],
+            # safety-rewrite carry: a policy-safe prompt override (used verbatim by
+            # build_round_request when set) + how many rewrites we've spent on this page.
+            "safe_prompt": "", "safety_tries": 0}
 
 
 def apply_verdict(state: dict, crit: dict, data: bytes, attempt: int,
@@ -963,8 +996,12 @@ def build_round_request(ctx: dict, state: dict, name_cache: dict) -> dict:
         ref_bytes = [state["draft"]] + [b for _, b in sheet_refs]
         model = SHEET_IMAGE_MODEL if state.get("escalate") else PAGE_IMAGE_MODEL
         return {"prompt": prompt, "ref_bytes": ref_bytes, "model": model, "mode": "revise"}
-    prompt = build_scene_prompt(ctx["spread"], ctx["members"], ctx["ref_members"],
-                                style_text, fix=state.get("fix", "")) + place_note
+    # A prior attempt's prompt was refused for content policy -> use the rewritten,
+    # policy-safe prompt verbatim (it already folds in style + place). Shared by both
+    # paths: interactive sets it inline, the batch bake carries it in carry_json.
+    prompt = state.get("safe_prompt") or (
+        build_scene_prompt(ctx["spread"], ctx["members"], ctx["ref_members"],
+                           style_text, fix=state.get("fix", "")) + place_note)
     return {"prompt": prompt, "ref_bytes": list(ctx["ref_bytes"]),
             "model": PAGE_IMAGE_MODEL, "mode": "fresh"}
 
@@ -1057,9 +1094,25 @@ def _render_scene(book_id: int, idx: int, fast_critique: bool = False) -> bytes:
                 gp.write_bytes(b)
                 gen_ref_paths.append(gp)
             cand = Path(td) / f"cand{attempt}.webp"
-            gem.generate_image(req["prompt"], refs=gen_ref_paths, out_path=cand,
-                               aspect="3:2", model=req["model"])
-            data = cand.read_bytes()
+            try:
+                gem.generate_image(req["prompt"], refs=gen_ref_paths, out_path=cand,
+                                   aspect="3:2", model=req["model"])
+                data = cand.read_bytes()
+            except gem.ImageRefused as ex:
+                # The image itself was blocked. A content-policy refusal (child peril,
+                # violence...) won't clear by redrawing the same prompt -- rewrite it to
+                # a policy-safe version and retry; a transient empty just regenerates.
+                print(f"[scene] image gen refused for page {idx} attempt {attempt}: {ex}", flush=True)
+                if ex.policy and state["safety_tries"] < SAFETY_REWRITES:
+                    state["safe_prompt"] = gem.rewrite_prompt_safely(req["prompt"], ex.reason)
+                    state["safety_tries"] += 1
+                    print(f"[scene] rewrote page {idx} prompt to pass the safety filter", flush=True)
+                state["mode"], state["draft"] = "fresh", None
+                continue
+            except Exception as ex:  # noqa: BLE001 -- other draw error: regenerate fresh
+                print(f"[scene] image gen failed for page {idx} attempt {attempt}: {ex}", flush=True)
+                state["mode"], state["draft"] = "fresh", None
+                continue
             last_cand = data
             try:
                 crit = gem.critique_image(cand, critique_prompt(ctx), refs=crit_ref_paths,
@@ -1100,11 +1153,15 @@ def _render_scene(book_id: int, idx: int, fast_critique: bool = False) -> bytes:
                     c = state["cands"][pick["best"]]
                     data, score, chosen = c["data"], c["score"], c["n"]
                     trace["judge_pick"] = {"attempt": chosen, "why": pick["why"]}
-        else:
+        elif last_cand is not None:
             # every attempt's critique was blocked -> store the last drawn image unscored
             # (an illustration beats a blank; the reader can redraw it if it looks off).
             data, score, chosen = last_cand, None, SCENE_TRIES
             trace["fallback"] = "kept last candidate (critique blocked every attempt)"
+        else:
+            # nothing to store: every attempt's IMAGE generation was blocked/empty too.
+            raise RuntimeError(f"page {idx}: image generation was blocked/empty on every "
+                               f"attempt -- no illustration to store")
         data = _compress(data, SCENE_MAXW, WEBP_QUALITY)   # downscale for display storage
 
     trace["chosen"] = chosen

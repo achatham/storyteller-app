@@ -33,7 +33,7 @@ from . import db, scene
 from .scene import (build_scene_context, build_round_request, apply_verdict,
                     new_scene_state, critique_prompt, critique_prompt_lite,
                     _attempt_trace, _compress,
-                    SCENE_TRIES, PASS_THRESHOLD, DEBUG_MAXW, DEBUG_QUALITY,
+                    SCENE_TRIES, SAFETY_REWRITES, PASS_THRESHOLD, DEBUG_MAXW, DEBUG_QUALITY,
                     SCENE_MAXW, JUDGE_BEST, SCENE_CRITIQUE_SCHEMA,
                     FIX_VERIFY, FIX_VERIFY_SCHEMA)
 from pipeline.config import WEBP_QUALITY
@@ -82,7 +82,8 @@ class PageRun:
         best_actionable = bool(s["best_key"][0] == 0) if s["best_key"] else True
         return json.dumps({"mode": s["mode"], "pending_defect": s["pending_defect"],
                            "escalate": s["escalate"], "edit_instr": s["edit_instr"],
-                           "ref_chars": s["ref_chars"], "best_actionable": best_actionable})
+                           "ref_chars": s["ref_chars"], "best_actionable": best_actionable,
+                           "safe_prompt": s["safe_prompt"], "safety_tries": s["safety_tries"]})
 
     def save(self, status):
         s = self.state
@@ -108,6 +109,8 @@ class PageRun:
         s["escalate"] = carry.get("escalate", False)
         s["edit_instr"] = carry.get("edit_instr", "")
         s["ref_chars"] = carry.get("ref_chars", [])
+        s["safe_prompt"] = carry.get("safe_prompt", "")
+        s["safety_tries"] = carry.get("safety_tries", 0)
         if s["best"]:
             actionable = carry.get("best_actionable", True)
             s["best_key"] = (0 if actionable else 1, s["best"][1])
@@ -226,6 +229,19 @@ def _run_generate(book_id, r, runs, open_idxs):
             img = gem.response_image_bytes(resp)
             if img:
                 runs[idx].cand = img
+                continue
+            # No image: a blocked/empty generation. On a content-policy refusal, rewrite
+            # the prompt so the NEXT round regenerates a policy-safe version -- via the
+            # same state["safe_prompt"] field build_round_request reads on both paths.
+            # Persisted to carry_json so a crash-resume keeps the rewrite. A transient
+            # empty just leaves cand=None and retries the same prompt next round.
+            reason = gem._block_reason(resp)
+            st = runs[idx].state
+            if gem.is_policy_refusal(reason) and st["safety_tries"] < SAFETY_REWRITES:
+                st["safe_prompt"] = gem.rewrite_prompt_safely(runs[idx].req["prompt"], reason)
+                st["safety_tries"] += 1
+                runs[idx].save(status="pending")
+                log(f"page {idx}: image blocked [{reason}] -- rewrote prompt for next round")
 
 
 def _run_critique(book_id, r, runs, open_idxs) -> dict:

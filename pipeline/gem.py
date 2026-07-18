@@ -122,6 +122,63 @@ def _block_reason(resp) -> str:
     return "; ".join(parts)
 
 
+# Block/finish tags that mean the model REFUSED on content policy -- re-issuing the
+# same prompt won't help, only rewriting it will. Distinct from a transient empty
+# response (network blip, truncation), which a plain retry can recover.
+_POLICY_REASONS = ("IMAGE_SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII",
+                   "IMAGE_PROHIBITED_CONTENT", "IMAGE_OTHER", "SAFETY")
+
+
+def is_policy_refusal(reason: str) -> bool:
+    """True if a _block_reason tag names a content-policy refusal (rewrite needed)."""
+    return bool(reason) and any(k in reason.upper() for k in _POLICY_REASONS)
+
+
+class ImageRefused(RuntimeError):
+    """generate_image produced no image because the response was blocked/empty.
+    `.reason` is the block/finish tag (e.g. 'blocked: IMAGE_SAFETY'); `.policy` is
+    True for a content-policy refusal (rewriting the prompt is the only fix) vs a
+    transient empty response (a plain regenerate may recover)."""
+
+    def __init__(self, reason: str = ""):
+        super().__init__("image generation returned no image"
+                         + (f" [{reason}]" if reason else ""))
+        self.reason = reason
+        self.policy = is_policy_refusal(reason)
+
+
+_SAFE_REWRITE_SCHEMA = {"type": "object",
+                        "properties": {"prompt": {"type": "string"}},
+                        "required": ["prompt"]}
+
+
+def rewrite_prompt_safely(prompt: str, reason: str = "", model: str = TEXT_MODEL) -> str:
+    """The image model refused `prompt` for a content-policy reason (`reason`); ask the
+    text model to rewrite it into a policy-safe equivalent for a children's storybook --
+    softening a child in peril/distress, injuries, gore, violence, weapons, nudity or
+    frightening imagery, while KEEPING the same characters and their identity, the
+    setting, composition, framing and art style -- so a retry can actually produce an
+    image. One cheap text pass. Falls back to the original prompt if the rewrite comes
+    back empty or itself errors, so it can never sink the draw."""
+    instr = (
+        "An image generator REFUSED to draw the prompt below for a content-safety "
+        f"reason ({reason or 'safety'}). Rewrite the prompt so it passes a children's-"
+        "book safety filter while depicting the SAME scene. Keep the same characters "
+        "and their identity/appearance, the setting, the composition, camera framing "
+        "and art style/medium. Soften or reframe ONLY what could trip a safety filter: "
+        "a child in peril, distress or danger, injuries, blood/gore, violence, weapons "
+        "aimed at people, nudity, or frightening imagery -- make it gentle and age-"
+        "appropriate (e.g. 'a crying, terrified child' -> 'a young child with a sad, "
+        "worried expression'; 'a sword plunged into his chest' -> 'a tense standoff, "
+        "swords raised'). Do not add any disclaimer or caption. Return JSON "
+        '{"prompt": "<rewritten prompt>"}.\n\nPROMPT TO REWRITE:\n' + prompt)
+    try:
+        out = text_json(instr, schema=_SAFE_REWRITE_SCHEMA, model=model)
+        return (out.get("prompt") or "").strip() or prompt
+    except Exception:  # noqa: BLE001 -- a failed rewrite must never sink the draw
+        return prompt
+
+
 def _coerce_json(raw: str | None, reason: str = "") -> dict:
     """Parse a JSON object from a model response, raising (so the caller's
     retry kicks in) when the response is empty/blocked/truncated. `reason` (from
@@ -180,7 +237,7 @@ def generate_image(prompt: str, refs: list[Path] | None = None, out_path: Path |
 
     resp = _retry(_go, what="generate_image")
     import io
-    for part in resp.parts:
+    for part in (resp.parts or []):   # .parts is None on a blocked/empty response
         if part.inline_data is not None:
             if out_path is None:
                 return part.as_image()
@@ -191,7 +248,12 @@ def generate_image(prompt: str, refs: list[Path] | None = None, out_path: Path |
             else:
                 pil.save(str(out_path))
             return out_path
-    return None
+    # No image part came back: an empty or safety-blocked response (e.g. a child-safety
+    # IMAGE_SAFETY block on a distressed-child subject). Raise a clear, catchable typed
+    # error naming the reason -- callers rewrite the prompt (policy refusal) or
+    # regenerate (transient) next attempt -- rather than iterating None (the cryptic
+    # "'NoneType' object is not iterable") or returning a path to an unwritten file.
+    raise ImageRefused(_block_reason(resp))
 
 
 def critique_image(image_path: Path, brief: str, refs: list[Path] | None = None,
