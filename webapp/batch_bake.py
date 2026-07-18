@@ -541,11 +541,17 @@ def _escalate_interactive(book_id, stragglers, runs):
 
 def _drain_interactive(book_id):
     """Finish the remaining actionable pages with the INTERACTIVE renderer instead of
-    more batch rounds -- the tail cutover (see INTERACTIVE_TAIL). Each page gets the full
-    interactive critique/revise loop and is stored by generate_scene itself; we just mark
-    its bake row done. Runs in parallel (full price, but a small tail). A page that still
-    can't be drawn (every image blocked) is left actionable so finalise() can fall back to
-    any batch candidate it accumulated. Cancellation-aware between pages."""
+    more batch rounds -- the tail cutover (see INTERACTIVE_TAIL). Each page still gets the
+    full generate/revise loop (SCENE_TRIES attempts) and is stored by generate_scene
+    itself; we just mark its bake row done. Runs in parallel (full price, but a small
+    tail). fast_critique=True makes each critique a single no-backoff attempt: a bake's
+    tail is disproportionately the filter-BLOCKED pages (child-safety PROHIBITED_CONTENT),
+    where the critique can't succeed no matter what -- full critique there only burns
+    minutes of 4/8/16s retry backoff across the 3 critique tiers for zero score gain,
+    while regeneration (not re-critique) is the actual recovery lever. Non-blocked pages
+    still get scored on the first try. A page that still can't be drawn (every image
+    blocked) is left actionable so finalise() can fall back to any batch candidate it
+    accumulated. Cancellation-aware between pages."""
     targets = db.bps_actionable(book_id)
     if not targets:
         return
@@ -555,7 +561,7 @@ def _drain_interactive(book_id):
         if _cancelled(book_id):
             return False
         try:
-            scene.generate_scene(book_id, idx)   # full critique/revise; stores the scene
+            scene.generate_scene(book_id, idx, fast_critique=True)   # stores the scene
             db.bps_save(book_id, idx, status="done", done=1)
             return True
         except Exception as ex:  # noqa: BLE001 -- leave actionable for finalise's fallback
