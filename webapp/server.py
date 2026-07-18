@@ -30,7 +30,7 @@ from pathlib import Path
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from pipeline.config import STYLES
@@ -95,6 +95,11 @@ def _startup():
     for bid in db.books_baking():
         start_bake(bid)
         print(f"[server] resumed interrupted bake for book {bid}", flush=True)
+    # resume any EPUB build interrupted mid-way. make_epub reuses the (also-resumed)
+    # bake if pages are still missing, else just rebuilds the file.
+    for bid in db.epubs_pending():
+        start_epub(bid)
+        print(f"[server] resumed interrupted EPUB build for book {bid}", flush=True)
 
 
 # ---------------- lazy scene generation ----------------
@@ -185,6 +190,18 @@ def start_bake(book_id: int):
     env["STORY_RUN"] = f"book:{book_id}"
     logf = open(LOGS / f"bake_{book_id}.log", "ab")
     subprocess.Popen([sys.executable, "-m", "webapp.batch_bake", str(book_id)],
+                     cwd=str(ROOT), env=env, stdout=logf, stderr=logf)
+
+
+def start_epub(book_id: int):
+    """Launch the EPUB build as a detached subprocess. It illustrates any missing
+    pages (via the bake) first, then assembles the .epub -- long-running, so it
+    runs out-of-band and the UI polls the epub_jobs row for progress."""
+    env = dict(os.environ)
+    env["STORY_APP_DB"] = str(db.DB)
+    env["STORY_RUN"] = f"book:{book_id}"
+    logf = open(LOGS / f"epub_{book_id}.log", "ab")
+    subprocess.Popen([sys.executable, "-m", "webapp.make_epub", str(book_id)],
                      cwd=str(ROOT), env=env, stdout=logf, stderr=logf)
 
 
@@ -419,6 +436,62 @@ def api_bake_status(book_id: int):
     return {"status": bake["status"], "round": bake["round"],
             "total_pages": bake["total_pages"], "done_pages": counts.get("done", 0),
             "detail": bake["detail"], "counts": counts}
+
+
+def _epub_status(book_id: int) -> dict:
+    job = db.epub_get(book_id)
+    ready = bool(job and job["status"] == "ready" and db.epub_path(book_id).exists())
+    have = {idx for idx, data in db.iter_scene_blobs(book_id) if data}
+    total = db.get_book(book_id)["num_pages"] or 0
+    return {
+        "status": job["status"] if job else None,
+        "detail": job["detail"] if job else None,
+        "size": job["size"] if job else None,
+        "ready": ready,
+        "illustrated": len(have), "total_pages": total,
+        "download_url": f"/api/books/{book_id}/epub/file" if ready else None,
+    }
+
+
+@app.get("/api/books/{book_id}/epub")
+def api_epub_status(book_id: int):
+    """EPUB build progress: job state + how many of the book's pages are illustrated
+    (the build must illustrate any that aren't before it can assemble the file)."""
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    return _epub_status(book_id)
+
+
+@app.post("/api/books/{book_id}/epub")
+async def api_epub_build(book_id: int):
+    """(Re)build the book's illustrated EPUB. If any pages lack an image, this first
+    runs the whole-book batch bake to fill them, then assembles the file -- all in a
+    background subprocess. Poll GET .../epub for progress; download when ready."""
+    b = db.get_book(book_id)
+    if not b:
+        raise HTTPException(404, "no such book")
+    if (b["num_pages"] or 0) < 1:
+        raise HTTPException(409, "book not segmented yet")
+    job = db.epub_get(book_id)
+    if job and job["status"] in ("baking", "building"):
+        return {"ok": True, "already_running": True, **_epub_status(book_id)}
+    await asyncio.to_thread(db.epub_upsert, book_id, "building", detail="starting…")
+    await asyncio.to_thread(start_epub, book_id)
+    return {"ok": True, **_epub_status(book_id)}
+
+
+@app.get("/api/books/{book_id}/epub/file")
+def api_epub_file(book_id: int):
+    """Download the finished .epub."""
+    book = db.get_book(book_id)
+    if not book:
+        raise HTTPException(404, "no such book")
+    path = db.epub_path(book_id)
+    if not path.exists():
+        raise HTTPException(404, "no epub built yet")
+    fname = re.sub(r"[^A-Za-z0-9]+", "-", (book["title"] or f"book{book_id}")).strip("-") or f"book{book_id}"
+    return FileResponse(str(path), media_type="application/epub+zip",
+                        filename=f"{fname}.epub")
 
 
 @app.post("/api/books/{book_id}/recompress")

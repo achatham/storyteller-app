@@ -87,6 +87,11 @@
     <button class="btn" id="bakeretry" hidden>Retry failed pages</button>
     <button class="btn" id="bakecancel" hidden style="border-color:#b9532e;color:#b9532e">Cancel bake</button>
   </div>
+  <div id="epubbar" hidden style="margin-top:14px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--panel);display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+    <div id="epubmsg" style="flex:1 1 260px;font-size:.9rem;font-family:system-ui,sans-serif"></div>
+    <a class="btn go" id="epubdl" hidden download>Download EPUB</a>
+    <button class="btn go" id="epubgo">Build EPUB</button>
+  </div>
   <div class="note" id="redrawmsg" style="display:none"></div>
 </main>
 <script>
@@ -181,6 +186,7 @@ async function getJSON(url){
         + `illustration only; redraws and character sheets add to the totals above.`;
   }
   pollBake();   // now that numPages is known, paint the bake bar
+  pollEpub();
 })();
 
 // ---- whole-book batch bake ----
@@ -249,6 +255,58 @@ $("#bakecancel").onclick = async () => {
   $("#bakecancel").disabled = true;
   try { await fetch("/api/books/"+ID+"/bake/cancel", {method:"POST"}); await pollBake(); }
   finally { $("#bakecancel").disabled = false; }
+};
+
+// ---- downloadable EPUB (all illustrations, JPEG ~1000px for any ereader) ----
+let epubTimer = null;
+const MB = n => (n/1e6).toFixed(1) + " MB";
+function renderEpub(e){
+  const bar = $("#epubbar"), msg = $("#epubmsg"), go = $("#epubgo"), dl = $("#epubdl");
+  bar.hidden = false;
+  const st = e && e.status;
+  const missing = Math.max(0, (e.total_pages||0) - (e.illustrated||0));
+  dl.hidden = !e.ready;
+  if (e.ready){ dl.href = e.download_url; }
+  const busy = st === "baking" || st === "building";
+  go.disabled = busy;
+  if (st === "baking"){
+    go.textContent = "Building…";
+    msg.innerHTML = `<b>Illustrating missing pages…</b> ${e.illustrated}/${e.total_pages} done. `
+      + `The EPUB builds automatically once every page has art. Runs in the background.`;
+  } else if (st === "building"){
+    go.textContent = "Building…";
+    msg.innerHTML = `<b>Assembling EPUB…</b> ${esc(e.detail||"")}`;
+  } else if (e.ready){
+    go.textContent = "Rebuild EPUB";
+    msg.innerHTML = `<b>EPUB ready</b>${e.size?` — ${MB(e.size)}`:""}. ${esc(e.detail||"")} `
+      + `Download it, then drop it on GitHub Pages or copy to an ereader.`;
+  } else if (st === "failed"){
+    go.textContent = "Build EPUB";
+    msg.innerHTML = `<b>EPUB build failed.</b> ${esc(e.detail||"")}`;
+  } else {
+    go.textContent = "Build EPUB";
+    msg.innerHTML = missing
+      ? `Bundle the whole book + illustrations into a single .epub for any ereader. `
+        + `${missing} of ${e.total_pages} pages still need art — building will illustrate them first (batch, ~50% cheaper), which can take a while.`
+      : `Bundle the whole book + all ${e.illustrated} illustrations into a single .epub for any ereader.`;
+  }
+}
+async function pollEpub(){
+  try {
+    const e = await (await fetch("/api/books/"+ID+"/epub", {cache:"no-store"})).json();
+    renderEpub(e);
+    const busy = e && (e.status === "baking" || e.status === "building");
+    if (busy && !epubTimer) epubTimer = setInterval(pollEpub, 5000);
+    if (!busy && epubTimer){ clearInterval(epubTimer); epubTimer = null; }
+  } catch (ex) { /* ignore transient */ }
+}
+$("#epubgo").onclick = async () => {
+  $("#epubgo").disabled = true;
+  try {
+    const r = await fetch("/api/books/"+ID+"/epub", {method:"POST"});
+    if (!r.ok){ const e = await r.json().catch(()=>({})); throw new Error(e.detail||("HTTP "+r.status)); }
+    await pollEpub();
+  } catch (ex){ $("#epubmsg").textContent = "Failed to start: " + ex.message; }
 };
 </script>
 </body></html>

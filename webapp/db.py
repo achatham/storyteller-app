@@ -189,6 +189,14 @@ CREATE TABLE IF NOT EXISTS progress (
     position   INTEGER,
     updated_at REAL
 );
+-- one row per book EPUB build job (bake-if-needed -> build -> write file).
+CREATE TABLE IF NOT EXISTS epub_jobs (
+    book_id    INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+    status     TEXT,        -- baking|building|ready|failed
+    detail     TEXT,
+    size       INTEGER,     -- bytes of the finished .epub
+    updated_at REAL
+);
 -- reading history: one row per reading *session* (a stretch of reading with no
 -- big gap). Progress reports arrive debounced every page turn; instead of a row
 -- per report we coalesce consecutive reports on the same book into one session
@@ -956,6 +964,42 @@ def bake_retry_failed(book_id) -> int:
             "WHERE book_id=? AND status='failed'", (time.time(), book_id)).rowcount
         c.execute("DELETE FROM batch_jobs WHERE book_id=?", (book_id,))
     return n
+
+
+# ---------------- epub build jobs ----------------
+
+# Finished .epub files live on disk next to the DB (they're large + regenerable).
+EPUB_DIR = DB.parent / "epubs"
+
+
+def epub_path(book_id) -> Path:
+    return EPUB_DIR / f"book{book_id}.epub"
+
+
+def epub_upsert(book_id, status, detail=None, size=None):
+    """Create/update a book's EPUB-build row. Only non-None fields change."""
+    now = time.time()
+    with conn() as c:
+        c.execute("INSERT INTO epub_jobs(book_id,status,detail,size,updated_at) "
+                  "VALUES (?,?,?,?,?) ON CONFLICT(book_id) DO UPDATE SET "
+                  "status=excluded.status, "
+                  "detail=COALESCE(?,epub_jobs.detail), "
+                  "size=COALESCE(?,epub_jobs.size), updated_at=excluded.updated_at",
+                  (book_id, status, detail, size, now, detail, size))
+
+
+def epub_get(book_id) -> dict | None:
+    with conn() as c:
+        r = c.execute("SELECT * FROM epub_jobs WHERE book_id=?", (book_id,)).fetchone()
+        return dict(r) if r else None
+
+
+def epubs_pending() -> list[int]:
+    """Books whose EPUB build was interrupted (still baking/building) -- relaunched
+    on restart."""
+    with conn() as c:
+        return [r["book_id"] for r in c.execute(
+            "SELECT book_id FROM epub_jobs WHERE status IN ('baking','building')")]
 
 
 # ---------------- progress ----------------
