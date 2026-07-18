@@ -15,6 +15,9 @@ webapp/scene.py becomes ROUNDS across every page:
                  CRITIQUE batch (text model)     : score + verdict per draft
                  VERIFY   batch (text model)     : carry-forward fix check (revises)
                  apply the SAME accept/revise/regenerate bookkeeping as the lazy path
+    tail      -> once the roster is drawn and < INTERACTIVE_TAIL pages remain, finish
+                 them with the interactive renderer (batch per-round latency isn't worth
+                 it for a handful of pages)
     finalise  -> best-of judge for pages that never passed; store every page image
 
 Pages stream in as their sheets become ready rather than waiting for a full roster
@@ -57,6 +60,12 @@ PREPARE_WORKERS = int(os.environ.get("STORY_BATCH_PREPARE_WORKERS", "6"))
 # already gives every page an image. Enable per-book with STORY_BAKE_ESCALATE=1.
 ESCALATE_INTERACTIVE = os.environ.get("STORY_BAKE_ESCALATE", "0") == "1"
 INTERACTIVE_WORKERS = int(os.environ.get("STORY_BAKE_INTERACTIVE_WORKERS", "4"))
+# Once the roster is drawn and fewer than this many pages remain actionable, stop
+# running batch rounds and finish the tail with the INTERACTIVE renderer. A batch
+# round costs minutes-per-job latency across several serial jobs (gen/critique/verify),
+# which isn't worth it for a handful of pages -- interactive draws them in parallel far
+# faster (full price, full critique/revise loop). 0 disables the cutover (batch to the end).
+INTERACTIVE_TAIL = int(os.environ.get("STORY_BAKE_INTERACTIVE_TAIL", "20"))
 MAX_ROUNDS = SCENE_TRIES
 
 JUDGE_SCHEMA = {"type": "object", "properties": {
@@ -530,6 +539,35 @@ def _escalate_interactive(book_id, stragglers, runs):
     log(f"interactive render resolved {n}/{len(targets)} page(s)")
 
 
+def _drain_interactive(book_id):
+    """Finish the remaining actionable pages with the INTERACTIVE renderer instead of
+    more batch rounds -- the tail cutover (see INTERACTIVE_TAIL). Each page gets the full
+    interactive critique/revise loop and is stored by generate_scene itself; we just mark
+    its bake row done. Runs in parallel (full price, but a small tail). A page that still
+    can't be drawn (every image blocked) is left actionable so finalise() can fall back to
+    any batch candidate it accumulated. Cancellation-aware between pages."""
+    targets = db.bps_actionable(book_id)
+    if not targets:
+        return
+    log(f"interactive tail: drawing {len(targets)} remaining page(s)")
+
+    def one(idx):
+        if _cancelled(book_id):
+            return False
+        try:
+            scene.generate_scene(book_id, idx)   # full critique/revise; stores the scene
+            db.bps_save(book_id, idx, status="done", done=1)
+            return True
+        except Exception as ex:  # noqa: BLE001 -- leave actionable for finalise's fallback
+            log(f"interactive tail render failed for page {idx}: {ex}")
+            return False
+
+    with ThreadPoolExecutor(max_workers=INTERACTIVE_WORKERS) as ex:
+        n = sum(1 for ok in ex.map(one, targets) if ok)
+    db.bake_upsert(book_id, "baking", done_pages=db.bps_counts(book_id).get("done", 0))
+    log(f"interactive tail drew {n}/{len(targets)} page(s)")
+
+
 def finalise(book_id, runs):
     """Finish every page that never passed. First escalate pages the batch critic never
     scored to the interactive render (fresh regeneration usually unblocks them); then a
@@ -600,13 +638,22 @@ def run(book_id: int):
         # once the roster is done the loop drains in <= MAX_ROUNDS more iterations.
         r = start_round
         max_round = start_round + MAX_ROUNDS * 4
+        tail = False
         while r < max_round:
             if _cancelled(book_id):
                 log("cancelled")
                 db.set_status(book_id, "roster_review", "bake cancelled — review or re-illustrate")
                 return
             _admit(book_id, runs, plan_cache, force=roster.finished)
-            open_idxs = [i for i in db.bps_actionable(book_id)
+            outstanding = db.bps_actionable(book_id)
+            # Tail cutover: once the roster is drawn and only a small tail of pages
+            # remains, stop batching and finish them interactively -- a batch round's
+            # minutes-per-job latency isn't worth it for a handful of pages.
+            if INTERACTIVE_TAIL and roster.finished and 0 < len(outstanding) < INTERACTIVE_TAIL:
+                log(f"{len(outstanding)} page(s) left (< {INTERACTIVE_TAIL}) -> interactive tail")
+                tail = True
+                break
+            open_idxs = [i for i in outstanding
                          if i in runs and runs[i].attempt < MAX_ROUNDS]
             if not open_idxs:
                 if roster.finished:
@@ -619,6 +666,8 @@ def run(book_id: int):
         if _cancelled(book_id):
             db.set_status(book_id, "roster_review", "bake cancelled — review or re-illustrate")
             return
+        if tail:
+            _drain_interactive(book_id)       # finish the last few pages interactively
         finalise(book_id, runs)
         done = db.bps_counts(book_id).get("done", 0)
         db.bake_upsert(book_id, "done", round=r, done_pages=done)
