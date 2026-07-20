@@ -161,14 +161,21 @@ async function refresh(){
   let books;
   try {
     const r = await fetch("/api/books", {cache: "no-store"});
+    // Expired session: the auth proxy 302s /api/books to its login page, which
+    // fetch follows transparently (r.redirected, r.url = login URL). An XHR can
+    // never enter the OAuth flow, so navigate the top-level window to the login
+    // page — that redirect Caddy *can* carry into the OAuth handshake.
+    if (r.redirected) { location.href = r.url; return; }
     if (!r.ok) throw new Error("HTTP " + r.status);
     books = await r.json();
     if (!Array.isArray(books)) throw new Error("not signed in");
   } catch (e) {
-    // an offline/auth failure must not silently look like an empty library
+    // an offline/auth failure must not silently look like an empty library.
+    // The retry is a full-page reload (not another XHR) so that if this was an
+    // auth bounce the reload navigates into the proxy's login redirect.
     el.innerHTML = `<div class="empty">⚠ Couldn't load your library — check your connection
       or sign in again. <a href="#" id="retry" style="color:var(--accent)">Tap to retry</a>.</div>`;
-    $("#retry").onclick = ev => { ev.preventDefault(); refresh(); };
+    $("#retry").onclick = ev => { ev.preventDefault(); location.reload(); };
     return;
   }
   el.innerHTML = books.length ? books.map(card).join("")
