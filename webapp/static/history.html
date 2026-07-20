@@ -38,6 +38,7 @@
   <div class="sub"><a class="back" href="/">← Library</a></div>
 </header>
 <main><div id="list"><div class="empty">Loading…</div></div></main>
+<script src="/static/auth.js"></script>
 <script>
 const $ = s => document.querySelector(s);
 
@@ -81,12 +82,12 @@ async function load(){
   let rows;
   try {
     const r = await fetch("/api/history", {cache:"no-store"});
-    if (!r.ok || r.redirected) throw new Error("HTTP " + r.status);
+    if (Auth.bounced(r)) return;   // expired session -> sign-in overlay
+    if (!r.ok) throw new Error("HTTP " + r.status);
     rows = await r.json();   // a login page is HTML -> throws, handled below
     if (!Array.isArray(rows)) throw new Error("not signed in");
   } catch(e){
-    $("#list").innerHTML = `<div class="empty">⚠ Couldn't load history — your session may have
-      expired. <a href="#" onclick="location.reload();return false" style="color:var(--accent)">Sign in again</a>.</div>`;
+    Auth.fail({offline: true});
     return;
   }
   if (!rows.length){

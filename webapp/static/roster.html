@@ -117,6 +117,7 @@
     <button class="go" id="ovgo">Render fix</button>
   </div>
 </div></div>
+<script src="/static/auth.js"></script>
 <script>
 const ID = __BOOK_ID__;
 const $ = s => document.querySelector(s);
@@ -126,14 +127,11 @@ $("#back").href = "/settings/" + ID;
 // "not signed in" rather than letting it render as blank or stale content.
 async function getJSON(url, opts){
   const r = await fetch(url, Object.assign({cache:"no-store"}, opts));
-  if (!r.ok || r.redirected) throw new Error("not signed in (HTTP " + r.status + ")");
+  if (Auth.bounced(r)) throw new Error("auth");   // expired session -> sign-in overlay
+  if (!r.ok) throw new Error("not signed in (HTTP " + r.status + ")");
   return r.json();   // login pages are HTML -> this throws, caught the same way
 }
-function signInPrompt(msg){
-  $("#main").innerHTML = `<div style="font-family:system-ui,sans-serif;color:var(--muted);padding:28px 0">`
-    + `⚠ ${msg} — your session may have expired. `
-    + `<a href="#" onclick="location.reload();return false" style="color:var(--accent)">Sign in again</a>.</div>`;
-}
+function signInPrompt(msg){ Auth.fail({offline: true}); }
 
 (async () => {
   let b, roster;

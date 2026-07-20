@@ -119,6 +119,7 @@
   </div>
 </div>
 <div id="splash"><div class="ring"></div><span id="splashmsg">Loading…</span></div>
+<script src="/static/auth.js"></script>
 <script>
 const BOOK_ID = __BOOK_ID__;
 const API = "/api/books/" + BOOK_ID;
@@ -131,11 +132,11 @@ async function boot(){
   let meta;
   try {
     const r = await fetch(API);
-    if (!r.ok || r.redirected) throw new Error("auth");
+    if (Auth.bounced(r)) return;   // expired session -> sign-in overlay
+    if (!r.ok) throw new Error("auth");
     meta = await r.json();   // a login page is HTML -> throws, handled below
   } catch(e) {
-    $("#splashmsg").innerHTML = `Couldn't load — check your connection or `
-      + `<a href="#" onclick="location.reload();return false" style="color:inherit;text-decoration:underline">sign in again</a>.`;
+    Auth.fail({offline: true});
     return;
   }
   if (meta.status !== "ready") {

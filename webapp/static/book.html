@@ -111,6 +111,7 @@
 </div></div>
 <div id="zoom" hidden><img alt=""></div>
 <div id="splash">Loading…</div>
+<script src="/static/auth.js"></script>
 <script>
 const BOOK_ID = __BOOK_ID__;
 const BUILD = "__BUILD__";   // front-end build this page was served with
@@ -140,11 +141,11 @@ function setFont(delta){
 async function boot(){
   try {
     const r = await fetch(API);
-    if (!r.ok || r.redirected) throw new Error("auth");
+    if (Auth.bounced(r)) return;   // expired session -> sign-in overlay
+    if (!r.ok) throw new Error("auth");
     META = await r.json();   // a login page is HTML -> throws, handled below
   } catch(e){
-    $("#splash").innerHTML = `Couldn't load — check your connection or `
-      + `<a href="#" onclick="location.reload();return false" style="color:var(--muted);text-decoration:underline">sign in again</a>.`;
+    Auth.fail({offline: true});
     return;
   }
   // 'baking' is readable: illustrated pages show now, still-baking ones show a

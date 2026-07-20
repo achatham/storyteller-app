@@ -95,6 +95,7 @@
   </div>
   <div class="note" id="redrawmsg" style="display:none"></div>
 </main>
+<script src="/static/auth.js"></script>
 <script>
 const ID = __BOOK_ID__;
 const $ = s => document.querySelector(s);
@@ -106,7 +107,8 @@ let numPages = 0;
 // "not signed in" rather than letting it render as blank or stale content.
 async function getJSON(url){
   const r = await fetch(url, {cache:"no-store"});
-  if (!r.ok || r.redirected) throw new Error("not signed in (HTTP " + r.status + ")");
+  if (Auth.bounced(r)) throw new Error("auth");   // expired session -> sign-in overlay
+  if (!r.ok) throw new Error("not signed in (HTTP " + r.status + ")");
   return r.json();   // login pages are HTML -> this throws, caught the same way
 }
 
@@ -115,10 +117,7 @@ async function getJSON(url){
   try {
     b = await getJSON("/api/books/"+ID);
   } catch (e) {
-    $("#title").textContent = "Couldn't load";
-    document.querySelector("main").innerHTML = `<div class="panel" style="color:var(--muted);`
-      + `font-family:system-ui,sans-serif">⚠ Couldn't load this book — your session may have expired. `
-      + `<a href="#" onclick="location.reload();return false" style="color:var(--accent)">Sign in again</a>.</div>`;
+    Auth.fail({offline: true});
     return;
   }
   $("#title").textContent = b.title;
