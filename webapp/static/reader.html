@@ -112,6 +112,8 @@
         <button id="next">Next &#8250;</button>
       </div>
       <button id="bookview">&#128214; Book view (two-column)</button>
+      <button id="offline">&#8681; Save for offline reading</button>
+      <div id="offmeta" style="color:var(--muted);font-size:.78rem;text-align:center;min-height:1em;margin-top:-8px"></div>
       <button id="fs">&#9974; Full screen</button>
       <button id="closebook">&#10005; Close book</button>
       <button id="close">Close menu</button>
@@ -120,6 +122,8 @@
 </div>
 <div id="splash"><div class="ring"></div><span id="splashmsg">Loading…</span></div>
 <script src="/static/auth.js"></script>
+<script src="/static/offline-idb.js"></script>
+<script src="/static/offline.js"></script>
 <script>
 const BOOK_ID = __BOOK_ID__;
 const API = "/api/books/" + BOOK_ID;
@@ -258,6 +262,44 @@ function syncFS(){ $("#fs").textContent = (inFS() ? "⛶ Exit full screen" : "�
 if (!fsSupported()) $("#fs").style.display = "none";
 $("#fs").onclick = e => { e.stopPropagation(); toggleFS(); };
 $("#bookview").onclick = e => { e.stopPropagation(); window.location.href = "/book/" + BOOK_ID; };
+
+// ---- save-for-offline (stores the whole book + pictures in IndexedDB) ----
+let offBusy = false, offAbort = null;
+async function refreshOffline(){
+  const info = await Offline.info(BOOK_ID).catch(()=>null);
+  if (offBusy) return;
+  if (info){
+    $("#offline").innerHTML = "🗑 Remove offline copy";
+    $("#offmeta").textContent = `Saved · ${info.imgCount||0}/${info.numPages||0} pages · ${Offline.fmtSize(info.bytes||0)}`;
+  } else {
+    $("#offline").innerHTML = "⬇ Save for offline reading";
+    $("#offmeta").textContent = "Reads with no connection once saved";
+  }
+}
+$("#offline").onclick = async e => {
+  e.stopPropagation();
+  if (offBusy){ if (offAbort) offAbort.abort(); return; }
+  if (await Offline.isDownloaded(BOOK_ID)){
+    if (!confirm("Remove this book’s saved offline copy?")) return;
+    await Offline.remove(BOOK_ID); refreshOffline(); return;
+  }
+  offBusy = true; offAbort = new AbortController();
+  $("#offline").innerHTML = "✕ Cancel download";
+  try {
+    await Offline.downloadBook(BOOK_ID, { signal: offAbort.signal, onProgress: p => {
+      $("#offmeta").textContent = p.phase === "images"
+        ? `Saving pictures… ${p.done}/${p.total}` + (p.bytes ? ` · ${Offline.fmtSize(p.bytes)}` : "")
+        : "Saving text…";
+    }});
+    offBusy = false; refreshOffline();
+    $("#offmeta").textContent = "Saved for offline ✓";
+  } catch (err) {
+    offBusy = false; refreshOffline();
+    $("#offmeta").textContent = (err && err.name === "AbortError")
+      ? "Download cancelled" : ("Couldn’t save: " + (err.message || err));
+  } finally { offAbort = null; }
+};
+refreshOffline();
 $("#closebook").onclick = e => {       // exit the book -> back to the library
   e.stopPropagation();
   try { if (inFS()) (document.exitFullscreen || document.webkitExitFullscreen).call(document); } catch (_) {}
