@@ -102,6 +102,8 @@
   </details>
 </main>
 <script src="/static/auth.js"></script>
+<script src="/static/offline-idb.js"></script>
+<script src="/static/offline.js"></script>
 <script>
 const $ = s => document.querySelector(s);
 const PROCESSING = ["queued","extracting","registry","roster","segmenting","processing","warming"];
@@ -157,6 +159,30 @@ function card(b){
   </div>`;
 }
 
+function offlineCard(b){
+  return `<div class="card" data-id="${b.id}">
+    <span class="pill">offline</span>
+    <h3>${b.title||("Book "+b.id)}</h3>
+    <div class="status">📥 Saved · ${b.imgCount||0}/${b.numPages||0} pages · ${Offline.fmtSize(b.bytes||0)}</div>
+    <div class="row"><a class="btn go" href="/book/${b.id}">Read</a></div>
+  </div>`;
+}
+
+async function markSaved(){
+  // Badge the cards for books that also have an offline copy saved.
+  try {
+    const saved = new Set((await Offline.list()).map(b => b.id));
+    document.querySelectorAll(".card").forEach(c => {
+      if (saved.has(+c.dataset.id) && !c.querySelector(".savedtag")){
+        const s = document.createElement("span");
+        s.className = "pill savedtag"; s.textContent = "📥 saved";
+        s.style.marginLeft = "6px";
+        const pill = c.querySelector(".pill"); if (pill) pill.after(s);
+      }
+    });
+  } catch(_){}
+}
+
 async function refresh(){
   const el = $("#books");
   let books;
@@ -167,12 +193,20 @@ async function refresh(){
     books = await r.json();
     if (!Array.isArray(books)) throw new Error("not signed in");
   } catch (e) {
-    // an offline/auth failure must not silently look like an empty library
+    // Offline/auth failure: rather than a dead overlay, show any books saved for
+    // offline so the library is still usable with no connection.
+    const saved = await Offline.list().catch(()=>[]);
+    if (saved.length){
+      el.innerHTML = `<div class="empty" style="grid-column:1/-1">📴 Offline — showing your saved books.</div>`
+        + saved.map(offlineCard).join("");
+      return;
+    }
     Auth.fail({offline: true});
     return;
   }
   el.innerHTML = books.length ? books.map(card).join("")
     : `<div class="empty">No books yet — add one below.</div>`;
+  markSaved();
   if (books.some(b => PROCESSING.includes(b.status) || b.status === "baking")) setTimeout(refresh, 2500);
 }
 
