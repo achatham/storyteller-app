@@ -41,6 +41,10 @@
       let r;
       try { r = await fetch(path + bust, { cache: "no-store", signal }); }
       catch (e) { if (e.name === "AbortError") throw e; return null; }
+      // A redirected 200 is the auth proxy's login page, not an image. Saving it
+      // as image/webp would store a broken picture; abort the whole download so
+      // the user re-signs in and retries rather than silently baking in garbage.
+      if (r.redirected) throw new Error("Please sign in first");
       if (r.status === 200) return await r.blob();
       if (r.status === 202) { await sleep(2000, signal); continue; }
       return null;   // 404/409/5xx -> skip this page rather than hang the whole download
@@ -48,8 +52,24 @@
     return null;
   }
 
+  // One-line status for a saved book, shared by both readers and the hub so they
+  // never drift. Text is saved for every page; only pictures can come up short, so
+  // count those and flag any gap (a partial copy the user can re-save to repair).
+  // Older manifests predate `imgCount` meaning "saved" -- treat a missing field as
+  // complete rather than alarming on copies we can't retro-measure.
+  function savedLabel(info) {
+    if (!info) return "";
+    const total = info.numPages || 0;
+    const imgs = info.imgCount != null ? info.imgCount : total;
+    const miss = info.missing != null ? info.missing : Math.max(0, total - imgs);
+    let s = `${imgs}/${total} pictures · ${fmtSize(info.bytes || 0)}`;
+    if (miss > 0) s += ` · ⚠ ${miss} missing — re-save`;
+    return s;
+  }
+
   const Offline = {
     fmtSize,
+    savedLabel,
     async isDownloaded(id) { return !!(await OfflineDB.getBook(id)); },
     async info(id) { return OfflineDB.getBook(id); },
     async list() {
@@ -92,9 +112,13 @@
           await fetch(base + "/chapter/" + c.idx, { cache: "no-store", signal }));
       }
 
-      // every page image
-      let done = 0, bytes = 0;
-      onProgress({ phase: "images", done, total, bytes });
+      // every page image. `done` counts pages attempted (drives the progress bar);
+      // `saved` counts pages whose picture actually landed in IndexedDB. They only
+      // diverge when a page is skipped (404/409/5xx or a 202 that never resolved) --
+      // and recording `saved`, not `done`, is what lets the UI show a partial copy
+      // honestly instead of a reassuring N/N.
+      let done = 0, saved = 0, bytes = 0;
+      onProgress({ phase: "images", done, saved, total, bytes });
       for (let idx = 0; idx < total; idx++) {
         aborted(signal);
         const blob = await fetchImage(base + "/pages/" + idx + "/image?v=" + seg, signal);
@@ -104,14 +128,16 @@
             book: id, type: "image/webp", body: blob, savedAt: Date.now(),
           });
           bytes += blob.size;
+          saved++;
         }
         done++;
-        onProgress({ phase: "images", done, total, bytes });
+        onProgress({ phase: "images", done, saved, total, bytes });
       }
 
       await OfflineDB.putBook({
         id, title: meta.title || ("Book " + id), seg,
-        numPages: total, imgCount: done, bytes, savedAt: Date.now(),
+        numPages: total, imgCount: saved, missing: total - saved,
+        bytes, savedAt: Date.now(),
       });
       // Ask the browser not to evict us under storage pressure (best effort).
       try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (_) {}

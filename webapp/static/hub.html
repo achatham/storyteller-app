@@ -163,7 +163,7 @@ function offlineCard(b){
   return `<div class="card" data-id="${b.id}">
     <span class="pill">offline</span>
     <h3>${b.title||("Book "+b.id)}</h3>
-    <div class="status">📥 Saved · ${b.imgCount||0}/${b.numPages||0} pages · ${Offline.fmtSize(b.bytes||0)}</div>
+    <div class="status">📥 Saved · ${Offline.savedLabel(b)}</div>
     <div class="row"><a class="btn go" href="/book/${b.id}">Read</a></div>
   </div>`;
 }

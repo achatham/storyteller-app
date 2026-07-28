@@ -367,7 +367,7 @@ async function refreshOffline(){
   if (offBusy) return;                         // don't stomp the live progress text
   if (info){
     $("#offline").innerHTML = "🗑 Remove offline copy";
-    $("#offmeta").textContent = `Saved · ${info.imgCount||0}/${info.numPages||0} pages · ${Offline.fmtSize(info.bytes||0)}`;
+    $("#offmeta").textContent = "Saved · " + Offline.savedLabel(info);
   } else {
     $("#offline").innerHTML = "⬇ Save for offline reading";
     $("#offmeta").textContent = "Reads with no connection once saved";

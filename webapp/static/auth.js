@@ -68,6 +68,14 @@
     };
   }
 
+  // The service worker detects login bounces on requests the page can't guard --
+  // above all <img> image loads -- and messages us here so the overlay still pops.
+  try {
+    navigator.serviceWorker?.addEventListener("message", function (e) {
+      if (e.data && e.data.type === "auth-bounce") show(e.data.loginUrl || null, false);
+    });
+  } catch (_) {}
+
   window.Auth = {
     // Call immediately after a fetch(). Returns true (and shows the overlay)
     // when the response is an expired-session bounce to the login portal.

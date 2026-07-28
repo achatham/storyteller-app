@@ -12,7 +12,7 @@
 // saved book reads with zero reader-side offline logic.
 importScripts("/static/offline-idb.js");
 
-const CACHE = "storyteller-v13";
+const CACHE = "storyteller-v14";
 
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) => e.waitUntil((async () => {
@@ -31,6 +31,16 @@ function maybeCache(req, res) {
     }
   } catch (_) {}
   return res;
+}
+
+// Tell every open page that an /api request bounced to the login portal, so the
+// shared auth overlay pops immediately -- crucial for <img> loads, which aren't
+// guarded fetches and so can never surface the sign-in prompt on their own.
+async function notifyAuthBounce(loginUrl) {
+  try {
+    const cs = await self.clients.matchAll({ includeUncontrolled: true, type: "window" });
+    for (const c of cs) c.postMessage({ type: "auth-bounce", loginUrl });
+  } catch (_) {}
 }
 
 // Rebuild a Response from the offline store, or null if this URL wasn't saved.
@@ -55,6 +65,16 @@ self.addEventListener("fetch", (e) => {
     e.respondWith((async () => {
       try {
         const res = await fetch(req);
+        // An expired session makes the auth proxy 302 this /api request to its
+        // login portal; fetch follows it, so we get a 200 login page with
+        // res.redirected === true (never a real /api body). Treat it like being
+        // offline: serve the saved copy so a downloaded book keeps reading, and
+        // ping open pages to raise the sign-in overlay (images can't do that
+        // themselves -- they're <img> loads, not Auth.bounced fetches).
+        if (res.redirected) {
+          notifyAuthBounce(res.url);
+          return (await fromOffline(url)) || res;
+        }
         // A 202 means "not drawn yet". If we have the page saved offline, prefer
         // the saved image over the placeholder so a bake-in-progress book still
         // shows its saved pictures.
