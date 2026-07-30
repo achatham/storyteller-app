@@ -1,6 +1,10 @@
 services:
   storyteller:
     build: .
+    labels:
+      # Built here, never pushed to a registry -- watchtower would resolve this
+      # to library/storyteller-storyteller on Docker Hub and 401 every night.
+      - com.centurylinklabs.watchtower.enable=false
     ports:
       - "${STORY_PORT:-8000}:8000"
     env_file:
