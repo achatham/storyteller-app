@@ -211,7 +211,10 @@ def start_epub(book_id: int):
 
 @app.get("/", response_class=HTMLResponse)
 def hub():
-    return (STATIC / "hub.html").read_text()
+    # __BUILD__ so the library can tell it is running an older build than the server
+    # and offer the update itself. It is the page you land on, and the one the
+    # service worker is most likely to be serving stale.
+    return (STATIC / "hub.html").read_text().replace("__BUILD__", APP_VERSION)
 
 
 @app.get("/history", response_class=HTMLResponse)

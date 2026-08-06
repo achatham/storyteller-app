@@ -12,7 +12,7 @@
 // saved book reads with zero reader-side offline logic.
 importScripts("/static/offline-idb.js");
 
-const CACHE = "storyteller-v17";   // bumped for the cover art on the library page
+const CACHE = "storyteller-v19";   // bumped for the denser phone library + update pill
 
 // The app shell, fetched at install time. Without this the cache only ever held
 // what happened to be requested while a previous worker was already in control --

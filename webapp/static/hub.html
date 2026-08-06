@@ -28,6 +28,7 @@
   .cover img { width:100%; height:100%; object-fit:cover; display:block; opacity:0; transition:opacity .35s; }
   .cover.nocover { display:flex; align-items:center; justify-content:center; font-size:2.4rem;
           color:var(--line); background:repeating-linear-gradient(45deg,#efe7d8,#efe7d8 10px,#e9e0cf 10px,#e9e0cf 20px); }
+  .body { display:flex; flex-direction:column; gap:8px; min-width:0; }
   .card h3 { margin:0; font-size:1.15rem; }
   .card .auth { color:var(--muted); font-size:.85rem; font-style:italic; }
   .pill { align-self:flex-start; font-family:system-ui,sans-serif; font-size:.7rem; letter-spacing:.5px;
@@ -54,6 +55,10 @@
   details > summary { cursor:pointer; font-family:system-ui,sans-serif; color:var(--accent); margin-top:8px; }
   .hint { font-family:system-ui,sans-serif; font-size:.8rem; color:var(--muted); }
   .empty { color:var(--muted); font-family:system-ui,sans-serif; padding:20px 0; }
+  #update { display:none; margin-top:8px; font-family:system-ui,sans-serif; font-size:.8rem;
+          padding:7px 14px; border-radius:20px; border:1px solid var(--accent);
+          background:var(--accent); color:#fff; cursor:pointer; }
+  #update.show { display:inline-block; }
   .gallabel { font-size:.72rem; letter-spacing:.5px; text-transform:uppercase; color:var(--muted); margin-bottom:8px; }
   .gallery { display:grid; grid-template-columns:repeat(auto-fill,minmax(140px,1fr)); gap:10px; }
   .styletile { padding:0; border:2px solid var(--line); border-radius:12px; overflow:hidden;
@@ -66,12 +71,59 @@
           opacity:0; transition:opacity .35s; }
   .styletile.thumbfail img { display:none; }
   .tlabel { font-family:system-ui,sans-serif; font-size:.78rem; padding:6px 4px; text-transform:capitalize; }
+
+  /* Phone held upright: minmax(210px) leaves room for exactly ONE column on a
+     ~400px screen, so a single book -- cover, title and buttons -- fills the whole
+     display and browsing the shelf means scrolling a book at a time. Two columns of
+     smaller cards puts four on screen and still leads with the cover art. */
+  @media (orientation: portrait) and (max-width: 560px) {
+    header { padding:18px 14px 4px; }
+    h1 { font-size:1.5rem; }
+    main { padding:10px 14px 40px; }
+    .grid { grid-template-columns:repeat(auto-fill,minmax(140px,1fr)); gap:12px; }
+    .card { padding:10px; gap:6px; border-radius:12px; }
+    .cover { margin:-10px -10px 2px; border-radius:12px 12px 0 0; }
+    .body { gap:5px; }
+    .card h3 { font-size:.95rem; line-height:1.25; display:-webkit-box; -webkit-line-clamp:2;
+               -webkit-box-orient:vertical; overflow:hidden; }
+    .card .auth { font-size:.72rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .card .status { font-size:.7rem; }
+    .pill { font-size:.58rem; padding:1px 6px; }
+    .row { gap:6px; }
+    button, .btn { padding:6px 8px; font-size:.78rem; border-radius:7px; }
+    .del { padding:6px; }
+  }
+
+  /* Phone held sideways: the screen is ~390px tall and a 2:3 cover is 315px of it,
+     so the tall card shows ONE book and cuts off its own buttons. Switch to a row --
+     small cover on the left, everything else beside it -- which fits three columns
+     of three on the same screen. Keyed on height, not width: a landscape tablet has
+     the room for the normal grid. */
+  @media (orientation: landscape) and (max-height: 560px) {
+    header { padding:10px 16px 2px; }
+    h1 { font-size:1.25rem; }
+    .sub { font-size:.75rem; }
+    main { padding:8px 16px 24px; }
+    .grid { grid-template-columns:repeat(auto-fill,minmax(270px,1fr)); gap:10px; margin-top:6px; }
+    .card { flex-direction:row; align-items:stretch; padding:10px; gap:10px; border-radius:12px; }
+    .cover { flex:0 0 auto; width:58px; margin:-10px 0 -10px -10px; border-radius:12px 0 0 12px;
+             border-bottom:none; border-right:1px solid var(--line); }
+    .cover.nocover { font-size:1.4rem; }
+    .body { gap:5px; flex:1; }
+    .card h3 { font-size:.98rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .card .auth, .card .status { font-size:.72rem; }
+    .pill { font-size:.6rem; padding:2px 7px; }
+    .row { gap:6px; margin-top:2px; }
+    button, .btn { padding:5px 10px; font-size:.78rem; border-radius:7px; }
+    details > summary { margin-top:4px; }
+  }
 </style>
 </head><body>
 <header>
   <h1>📖 Storyteller</h1>
   <div class="sub">Illustrated read-aloud editions — upload a book, then read it to your kids.
     · <a href="/history" style="color:var(--accent)">Reading history</a></div>
+  <button id="update" type="button">↻ New version — tap to update</button>
 </header>
 <main>
   <div id="books" class="grid"></div>
@@ -114,6 +166,43 @@
 <script>
 const $ = s => document.querySelector(s);
 const PROCESSING = ["queued","extracting","registry","roster","segmenting","processing","warming"];
+const BUILD = "__BUILD__";   // front-end build this page was served with
+
+// ---- "there is a newer build" pill -------------------------------------------
+// The service worker serves this page stale-while-revalidate, so the first load
+// after a deploy always renders the OLD library and only caches the new one for
+// next time -- and an installed PWA resumed from the app switcher never reloads at
+// all. The reader has a "Check for updates" button for this; the library, the page
+// you actually land on, had no way to notice. So it checks for itself.
+//
+// It offers, it does not act: a version check that reloads on its own can loop if
+// it ever compares wrong, and a library that reloads itself under a child's finger
+// is worse than a stale one.
+async function checkVersion(){
+  if (!BUILD || BUILD.startsWith("__")) return;      // page served without a build id
+  try {
+    const r = await fetch("/api/version", {cache:"no-store"});
+    if (!r.ok || r.redirected) return;                // offline / bounced to sign-in
+    const { version } = await r.json();
+    if (version && version !== BUILD) $("#update").classList.add("show");
+  } catch(_){}                                        // offline: nothing to offer
+}
+
+$("#update").onclick = async () => {
+  const btn = $("#update");
+  btn.disabled = true; btn.textContent = "Updating…";
+  // Same sequence the reader's update button uses: pull the new worker, then drop
+  // every cache so this reload is the fresh one rather than the one after it.
+  try { const r = await navigator.serviceWorker?.getRegistration(); if (r) await r.update(); } catch(_){}
+  try { const ks = await caches.keys(); await Promise.all(ks.map(k => caches.delete(k))); } catch(_){}
+  location.reload();
+};
+
+// Re-check when the app comes back to the foreground -- for an installed PWA that
+// is the only moment a new build can be noticed, since resuming isn't a load.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") checkVersion();
+});
 
 async function loadStyles(){
   const styles = await (await fetch("/api/styles")).json();
@@ -150,26 +239,28 @@ function card(b){
   return `<div class="card" data-id="${b.id}">
     ${href ? `<a class="cover ${b.has_cover?'':'nocover'}" href="${href}">${cover}</a>`
            : `<span class="cover ${b.has_cover?'':'nocover'}">${cover}</span>`}
-    <span class="pill">${(b.style||"").replace(/_/g,' ')}</span>
-    <h3>${b.title}</h3>
-    ${b.author ? `<div class="auth">${b.author}</div>` : ""}
-    <div class="status">${
-      failed ? "⚠ " + (b.detail||"failed")
-      : rosterReview ? "🎨 Roster ready — review & illustrate"
-      : baking ? `🎨 Illustrating… ${b.scenes_done||0}/${b.num_pages} pages`
-      : processing ? "⏳ " + (b.detail||b.status)
-      : ready ? `${b.num_pages} pages · ${b.scenes_done} drawn`
-      : b.status}</div>
-    ${ready ? `<div class="barwrap"><div class="bar" style="width:${pct}%"></div></div>` : ""}
-    ${baking ? `<div class="barwrap"><div class="bar" style="width:${bakePct}%"></div></div>` : ""}
-    <div class="row">
-      ${rosterReview
-        ? `<a class="btn go" href="/roster/${b.id}">Review roster</a>`
-        : `<a class="btn go" href="/book/${b.id}" aria-disabled="${(ready||baking)?'false':'true'}">
-             ${b.position>0 && (ready||baking) ? "Continue" : "Read"}</a>`}
-      ${baking ? `<a class="btn" href="/roster/${b.id}" title="Bake progress">&#127912;</a>` : ""}
-      <a class="btn" href="/settings/${b.id}" title="Settings & cost">&#9881;</a>
-      <button class="del" onclick="del(${b.id},event)">✕</button>
+    <div class="body">
+      <span class="pill">${(b.style||"").replace(/_/g,' ')}</span>
+      <h3>${b.title}</h3>
+      ${b.author ? `<div class="auth">${b.author}</div>` : ""}
+      <div class="status">${
+        failed ? "⚠ " + (b.detail||"failed")
+        : rosterReview ? "🎨 Roster ready — review & illustrate"
+        : baking ? `🎨 Illustrating… ${b.scenes_done||0}/${b.num_pages} pages`
+        : processing ? "⏳ " + (b.detail||b.status)
+        : ready ? `${b.num_pages} pages · ${b.scenes_done} drawn`
+        : b.status}</div>
+      ${ready ? `<div class="barwrap"><div class="bar" style="width:${pct}%"></div></div>` : ""}
+      ${baking ? `<div class="barwrap"><div class="bar" style="width:${bakePct}%"></div></div>` : ""}
+      <div class="row">
+        ${rosterReview
+          ? `<a class="btn go" href="/roster/${b.id}">Review roster</a>`
+          : `<a class="btn go" href="/book/${b.id}" aria-disabled="${(ready||baking)?'false':'true'}">
+               ${b.position>0 && (ready||baking) ? "Continue" : "Read"}</a>`}
+        ${baking ? `<a class="btn" href="/roster/${b.id}" title="Bake progress">&#127912;</a>` : ""}
+        <a class="btn" href="/settings/${b.id}" title="Settings & cost">&#9881;</a>
+        <button class="del" onclick="del(${b.id},event)">✕</button>
+      </div>
     </div>
   </div>`;
 }
@@ -181,10 +272,12 @@ function offlineCard(b){
     <a class="cover" href="/book/${b.id}"><img loading="lazy" src="/api/books/${b.id}/cover" alt=""
        onload="this.style.opacity=1"
        onerror="this.closest('.cover').classList.add('nocover');this.closest('.cover').textContent='📖'"></a>
-    <span class="pill">offline</span>
-    <h3>${b.title||("Book "+b.id)}</h3>
-    <div class="status">📥 Saved · ${Offline.savedLabel(b)}</div>
-    <div class="row"><a class="btn go" href="/book/${b.id}">Read</a></div>
+    <div class="body">
+      <span class="pill">offline</span>
+      <h3>${b.title||("Book "+b.id)}</h3>
+      <div class="status">📥 Saved · ${Offline.savedLabel(b)}</div>
+      <div class="row"><a class="btn go" href="/book/${b.id}">Read</a></div>
+    </div>
   </div>`;
 }
 
@@ -255,5 +348,6 @@ $("#form").addEventListener("submit", async e => {
 
 loadStyles().catch(()=>{});   // offline: no style samples to show, but the library still loads
 refresh();
+checkVersion();
 </script>
 </body></html>
