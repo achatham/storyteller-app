@@ -41,16 +41,50 @@ SHEET_CRITIQUE_SCHEMA = {"type": "object", "properties": {
     "fix_hint": {"type": "string"}}, "required": ["clean_sheet", "match"]}
 
 
+# Roster jobs share the page rounds' batch_jobs bookkeeping, under a round of their
+# own so the (book, round, kind) key can't collide with a page round.
+ROSTER_ROUND = -1
+
+
 def _skey(eid: str, vid: str) -> str:
     return f"{eid}|{vid}"
 
 
-def _await(job_name: str) -> str:
+def _await(book_id, kind, job_name: str) -> str:
     while True:
         st = gem.batch_state(job_name)
         if st in gem.BATCH_TERMINAL:
+            db.bjob_set_state(book_id, ROSTER_ROUND, kind, st)
             return st
         time.sleep(POLL_SECONDS)
+
+
+def _submit_or_reattach(book_id, kind, reqs, model, display, coarse, log) -> str:
+    """Reuse a job already submitted for this roster step instead of paying for the
+    same batch twice.
+
+    A batch job runs server-side, so killing the bake (a restart, a redeploy) doesn't
+    cancel it -- and the roster used to submit blind on resume, duplicating a whole
+    wave's spend for anything in flight. Page rounds have had this since they landed;
+    the roster was the gap.
+
+    A job that ended FAILED/CANCELLED/EXPIRED is not reattached: there are no results
+    to collect, so the only useful move is a fresh submit."""
+    existing = db.bjob_get(book_id, ROSTER_ROUND, kind)
+    if existing and existing["job_name"] and existing["state"] != gem.BATCH_DONE and \
+            existing["state"] in gem.BATCH_TERMINAL:
+        log(f"[roster] {kind}: last job {existing['job_name']} ended "
+            f"{existing['state']} -- submitting a fresh one")
+        existing = None
+    if existing and existing["job_name"]:
+        db.batch_req_add(book_id, existing["job_name"], coarse, len(reqs))
+        log(f"[roster] {kind}: reattaching {existing['job_name']} ({existing['state']})")
+        return existing["job_name"]
+    job = gem.batch_submit(reqs, model=model, display_name=display)
+    db.bjob_upsert(book_id, ROSTER_ROUND, kind, job, "JOB_STATE_PENDING")
+    db.batch_req_add(book_id, job, coarse, len(reqs))
+    log(f"[roster] {kind}: submitted {job} ({len(reqs)} reqs)")
+    return job
 
 
 def _collect(book_id, log) -> dict:
@@ -81,10 +115,11 @@ def _collect(book_id, log) -> dict:
     return {k: m for k, m in needed.items() if not db.has_sheet(book_id, k[0], k[1])}
 
 
-def _draw_wave(book_id, wave, style_text, style_ref_bytes, use_anchor, log) -> int:
+def _draw_wave(book_id, w, wave, style_text, style_ref_bytes, use_anchor, log) -> int:
     """Generate + critique + save one wave of sheets, keeping the best of up to
     SHEET_TRIES attempts each. `use_anchor` attaches a same-entity sibling sheet as
-    an identity reference (for wave 2, whose entities were drawn in wave 1)."""
+    an identity reference (for wave 2, whose entities were drawn in wave 1). `w` is
+    the wave number, which with the attempt names the job for resume."""
     if not wave:
         return 0
     slots: dict = {}
@@ -123,16 +158,18 @@ def _draw_wave(book_id, wave, style_text, style_ref_bytes, use_anchor, log) -> i
                                                                        size=IMAGE_SIZE)})
         if not gen_reqs:
             break
-        gjob = gem.batch_submit(gen_reqs, model=ROSTER_IMAGE_MODEL,
-                                display_name=f"roster b{book_id} gen a{attempt}")
-        db.batch_req_add(book_id, gjob, "image", len(gen_reqs))
-        log(f"[roster] gen a{attempt}: submitted {gjob} ({len(gen_reqs)} sheets)")
-        if _await(gjob) != gem.BATCH_DONE:
+        gkind = f"w{w}:gen:a{attempt}"
+        gjob = _submit_or_reattach(book_id, gkind, gen_reqs, ROSTER_IMAGE_MODEL,
+                                   f"roster b{book_id} gen a{attempt}", "image", log)
+        if _await(book_id, gkind, gjob) != gem.BATCH_DONE:
             log(f"[roster] gen batch {gjob} did not succeed; stopping wave")
             break
         cands = {}
         for k, resp in gem.batch_results(gjob).items():
-            if resp is None:
+            # A reattached job answers the request set it was submitted with, which a
+            # resume can have re-planned around (sheets saved since are dropped from
+            # the wave). Ignore anything we're no longer drawing.
+            if resp is None or k not in slots:
                 continue
             gem.record_batch_usage(resp, ROSTER_IMAGE_MODEL, "image", images=1)
             img = gem.response_image_bytes(resp)
@@ -157,12 +194,12 @@ def _draw_wave(book_id, wave, style_text, style_ref_bytes, use_anchor, log) -> i
                       "generation_config": gem.json_config(SHEET_CRITIQUE_SCHEMA, temperature=0.3)}
                      for k in cands]
         if crit_reqs:
-            cjob = gem.batch_submit(crit_reqs, model=CRITIQUE_MODEL,
-                                    display_name=f"roster b{book_id} crit a{attempt}")
-            db.batch_req_add(book_id, cjob, "text", len(crit_reqs))
-            if _await(cjob) == gem.BATCH_DONE:
+            ckind = f"w{w}:crit:a{attempt}"
+            cjob = _submit_or_reattach(book_id, ckind, crit_reqs, CRITIQUE_MODEL,
+                                       f"roster b{book_id} crit a{attempt}", "text", log)
+            if _await(book_id, ckind, cjob) == gem.BATCH_DONE:
                 for k, resp in gem.batch_results(cjob).items():
-                    if resp is None:
+                    if resp is None or k not in slots:
                         continue
                     gem.record_batch_usage(resp, CRITIQUE_MODEL, "critique")
                     try:
@@ -230,7 +267,7 @@ def draw_roster(book_id, log=print) -> int:
                 wave2 += [m for _, m in items[1:]]
         log(f"[roster] {len(needed)} sheets to batch (wave1={len(wave1)} anchors, "
             f"wave2={len(wave2)}), model={ROSTER_IMAGE_MODEL}")
-        n = _draw_wave(book_id, wave1, style_text, style_ref, use_anchor=False, log=log)
-        n += _draw_wave(book_id, wave2, style_text, style_ref, use_anchor=True, log=log)
+        n = _draw_wave(book_id, 1, wave1, style_text, style_ref, use_anchor=False, log=log)
+        n += _draw_wave(book_id, 2, wave2, style_text, style_ref, use_anchor=True, log=log)
         log(f"[roster] batch drew {n}/{len(needed)} sheets")
         return n
