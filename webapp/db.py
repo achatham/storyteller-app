@@ -141,6 +141,16 @@ CREATE TABLE IF NOT EXISTS style_samples (
     mime       TEXT,
     data       BLOB
 );
+-- One cover illustration per book (library card + EPUB cover), drawn from the
+-- book's own roster sheets so its characters match the interior art.
+CREATE TABLE IF NOT EXISTS covers (
+    book_id    INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+    mime       TEXT,
+    data       BLOB,
+    prompt     TEXT,
+    cast_json  TEXT,        -- the roster members referenced, for debugging/redraw
+    created_at REAL
+);
 -- ===== batch "illustrate the whole book" bake =====
 -- One row per book bake: the overall state machine + progress for the hub/roster UI.
 CREATE TABLE IF NOT EXISTS batch_bake (
@@ -772,14 +782,16 @@ def flagged_sheets(book_id, threshold: float = 4.0) -> list[dict]:
 
 
 def clear_art(book_id) -> dict:
-    """Drop a book's roster sheets and scene images so they redraw (lazily) with
-    the current prompts/style. Bumps seg_ver to bust cached scene image URLs.
-    Keeps registry + pages (text) intact."""
+    """Drop a book's roster sheets, scene images and cover so they redraw (lazily)
+    with the current prompts/style. Bumps seg_ver to bust cached scene image URLs.
+    Keeps registry + pages (text) intact. The cover goes too: it is drawn FROM the
+    sheets, so keeping it would leave a cover in the old style/likeness."""
     with conn() as c:
         sheets = c.execute("DELETE FROM sheets WHERE book_id=?", (book_id,)).rowcount
         scenes = c.execute("DELETE FROM scenes WHERE book_id=?", (book_id,)).rowcount
+        cover = c.execute("DELETE FROM covers WHERE book_id=?", (book_id,)).rowcount
         c.execute("UPDATE books SET seg_ver = seg_ver + 1 WHERE id=?", (book_id,))
-    return {"sheets": sheets, "scenes": scenes}
+    return {"sheets": sheets, "scenes": scenes, "cover": cover}
 
 
 def reset_generating():
@@ -817,6 +829,39 @@ def save_style_sample(style_key, data, mime="image/webp"):
 def styles_with_samples() -> set:
     with conn() as c:
         return {r["style_key"] for r in c.execute("SELECT style_key FROM style_samples")}
+
+
+# ---------------- covers ----------------
+
+def get_cover(book_id) -> bytes | None:
+    with conn() as c:
+        r = c.execute("SELECT data FROM covers WHERE book_id=?", (book_id,)).fetchone()
+        return r["data"] if r else None
+
+
+def cover_meta(book_id) -> dict | None:
+    """The cover's prompt + referenced cast (no blob), for the settings/debug view."""
+    with conn() as c:
+        r = c.execute("SELECT prompt, cast_json, created_at, LENGTH(data) AS bytes "
+                      "FROM covers WHERE book_id=?", (book_id,)).fetchone()
+        return dict(r) if r else None
+
+
+def save_cover(book_id, data, prompt="", cast=None, mime="image/webp"):
+    with conn() as c:
+        c.execute("INSERT OR REPLACE INTO covers(book_id,mime,data,prompt,cast_json,created_at) "
+                  "VALUES (?,?,?,?,?,?)",
+                  (book_id, mime, data, prompt, json.dumps(cast or []), time.time()))
+
+
+def delete_cover(book_id) -> int:
+    with conn() as c:
+        return c.execute("DELETE FROM covers WHERE book_id=?", (book_id,)).rowcount
+
+
+def books_with_covers() -> set:
+    with conn() as c:
+        return {r["book_id"] for r in c.execute("SELECT book_id FROM covers")}
 
 
 # ---------------- batch bake ----------------

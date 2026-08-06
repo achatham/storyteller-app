@@ -79,6 +79,7 @@
     <a class="btn" id="roster">View roster</a>
     <a class="btn" id="debug">Generation debug</a>
     <button class="btn" id="recompress">Recompress art</button>
+    <button class="btn" id="cover">Redraw cover</button>
     <button class="btn" id="redraw">Redraw art</button>
     <a class="btn back" href="/">Library</a>
   </div>
@@ -132,8 +133,24 @@ async function getJSON(url){
     $("#redraw").disabled = true; $("#redraw").textContent = "Clearing…";
     const r = await (await fetch("/api/books/"+ID+"/redraw", {method:"POST"})).json();
     const m = $("#redrawmsg"); m.style.display = "block";
-    m.textContent = `Cleared ${r.sheets} sheets and ${r.scenes} pictures — they'll redraw with the latest style as you read.`;
+    m.textContent = `Cleared ${r.sheets} sheets, ${r.scenes} pictures and ${r.cover} cover — `
+      + `they'll redraw with the latest style as you read.`;
     $("#redraw").textContent = "Redraw art"; $("#redraw").disabled = false;
+  };
+  $("#cover").onclick = async () => {
+    // Slow (pro model, and it draws any missing sheets for its cast first).
+    if (!confirm("Redraw this book's cover? Takes a minute or so and costs one pro image generation.")) return;
+    $("#cover").disabled = true; $("#cover").textContent = "Drawing…";
+    const m = $("#redrawmsg"); m.style.display = "block"; m.textContent = "Drawing the cover…";
+    try {
+      const res = await fetch("/api/books/"+ID+"/cover?fresh=1", {method:"POST"});
+      const r = await res.json();
+      m.textContent = res.ok
+        ? `New cover drawn (${Math.round(r.bytes/1024)} KB) featuring `
+          + `${(JSON.parse(r.cast_json||"[]").map(c=>c.name).join(", ")||"no named characters")}.`
+        : `Cover failed: ${r.detail || res.status}`;
+    } catch (e) { m.textContent = "Cover failed: " + e; }
+    $("#cover").textContent = "Redraw cover"; $("#cover").disabled = false;
   };
   $("#recompress").onclick = async () => {
     $("#recompress").disabled = true; $("#recompress").textContent = "Recompressing…";

@@ -522,6 +522,7 @@ def run(book_id: int):
         db.bake_upsert(book_id, "roster_review", total_pages=n)
         db.set_status(book_id, "roster_review",
                       f"roster ready ({n} pages) — review it, then illustrate the book")
+        _draw_cover(book_id)
         print(f"[process] book {book_id} roster ready: {n} pages (awaiting bake)", flush=True)
         return
 
@@ -533,7 +534,19 @@ def run(book_id: int):
         prewarm(book_id, warm)
 
     db.set_status(book_id, "ready", f"{n} pages ready to read")
+    _draw_cover(book_id)
     print(f"[process] book {book_id} ready: {n} pages", flush=True)
+
+
+def _draw_cover(book_id):
+    """Draw the book's library/EPUB cover, once the status is one the cover module
+    will accept (it needs a settled roster). Best-effort: a book without a cover is
+    a cosmetic gap, so this must never fail an otherwise-good import."""
+    try:
+        from . import cover
+        cover.ensure_cover(book_id)
+    except Exception as ex:  # noqa: BLE001
+        print(f"[process] book {book_id}: cover failed ({type(ex).__name__}: {ex})", flush=True)
 
 
 def backfill_metadata(force=False):

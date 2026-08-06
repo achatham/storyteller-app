@@ -46,7 +46,8 @@ PRICING = {
     "gemini-3.5-flash":            {"in": 1.50, "out": 9.00},    # text + critique
     "gemini-3.1-flash-lite":       {"in": 0.25, "out": 1.50},    # text (official)
     "gemini-3.1-pro-preview":      {"in": 2.00, "out": 12.00},
-    "gemini-3-pro-image-preview":  {"in": 2.00, "out": 120.00},  # pro image: ~$0.134/1K-2K img
+    "gemini-3-pro-image":          {"in": 2.00, "out": 120.00},  # pro image: ~$0.134/1K-2K img
+    "gemini-3-pro-image-preview":  {"in": 2.00, "out": 120.00},  # (retired preview alias)
     "gemini-3.1-flash-image":      {"in": 0.50, "out": 60.00},   # flash image: ~$0.067/1K img
     "gemini-3.1-flash-image-preview": {"in": 0.50, "out": 60.00},
     "gemini-3.1-flash-lite-image": {"in": 0.30, "out": 40.00},   # "nano banana lite" (estimated)

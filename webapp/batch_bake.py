@@ -678,6 +678,13 @@ def run(book_id: int):
         done = db.bps_counts(book_id).get("done", 0)
         db.bake_upsert(book_id, "done", round=r, done_pages=done)
         db.set_status(book_id, "ready", f"{done} pages illustrated (batch)")
+        # Cover last: it needs a settled roster (and the status it just got), and a
+        # lazily-read book that only reached the bake now may never have had one.
+        try:
+            from . import cover
+            cover.ensure_cover(book_id, log=log)
+        except Exception as ex:  # noqa: BLE001 -- cosmetic; never fail a finished bake
+            log(f"book {book_id} cover failed: {type(ex).__name__}: {ex}")
         log(f"book {book_id} bake done: {done}/{total} pages")
 
 

@@ -183,15 +183,19 @@ ART_STYLE = STYLES[STYLE]
 
 # ---- image models + output resolution ----
 # Image models by role. SHEET_IMAGE_MODEL is the higher-fidelity "pro" model,
-# now reserved for the high-stakes cases: a manual roster-sheet edit and the
-# revise ESCALATION (when a flash img2img fix fails to land). ROSTER_IMAGE_MODEL
+# now reserved for the high-stakes cases: a manual roster-sheet edit, the revise
+# ESCALATION (when a flash img2img fix fails to land), and the one-per-book cover
+# (see COVER_IMAGE_MODEL below). ROSTER_IMAGE_MODEL
 # is what the automatic roster reference-sheet draws use; it defaults to the same
 # cheap "flash" model as the per-page SCENE illustrations, since the batch roster
 # draw + single-subject critic/reroll keeps sheet consistency good enough without
 # paying pro prices on every sheet. Override any of them via env.
-SHEET_IMAGE_MODEL = os.environ.get("STORY_SHEET_IMAGE_MODEL", "gemini-3-pro-image-preview")
+SHEET_IMAGE_MODEL = os.environ.get("STORY_SHEET_IMAGE_MODEL", "gemini-3-pro-image")
 PAGE_IMAGE_MODEL = os.environ.get("STORY_PAGE_IMAGE_MODEL", "gemini-3.1-flash-image")
 ROSTER_IMAGE_MODEL = os.environ.get("STORY_ROSTER_IMAGE_MODEL", PAGE_IMAGE_MODEL)
+# The book's one cover illustration: a single high-visibility image per book, so it
+# is worth the pro model even though every interior page uses flash.
+COVER_IMAGE_MODEL = os.environ.get("STORY_COVER_IMAGE_MODEL", SHEET_IMAGE_MODEL)
 # "Nano Banana Lite": the cheapest/fastest image model, offered as a manual
 # choice for roster-sheet correction edits (not used in the automatic pipeline).
 LITE_IMAGE_MODEL = os.environ.get("STORY_LITE_IMAGE_MODEL", "gemini-3.1-flash-lite-image")

@@ -6,6 +6,8 @@
   GET  /api/books                 list books (+ status + progress)
   POST /api/books                 upload a book -> kicks off processing subprocess
   GET  /api/books/{id}            book detail (status, chapters, progress)
+  GET  /api/books/{id}/cover      the book's cover illustration (404 if not drawn)
+  POST /api/books/{id}/cover      draw / redraw the cover
   DELETE /api/books/{id}          remove a book
   GET  /api/books/{id}/pages      page text (no images)
   GET  /api/books/{id}/pages/{i}/image   scene image (generated lazily; prefetches ahead)
@@ -34,7 +36,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from pipeline.config import STYLES
-from . import db, flow, scene
+from . import cover, db, flow, scene
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = Path(__file__).resolve().parent / "static"
@@ -294,6 +296,7 @@ async def api_style_sample(key: str):
 @app.get("/api/books")
 def api_books():
     out = []
+    covered = db.books_with_covers()
     for b in db.list_books():
         sp = db.scene_progress(b["id"])
         out.append({
@@ -301,6 +304,7 @@ def api_books():
             "author": b["author"], "style": b["style"], "status": b["status"],
             "detail": b["detail"], "num_pages": b["num_pages"],
             "position": b["position"], "scenes_done": sp.get("done", 0),
+            "has_cover": b["id"] in covered,
         })
     return out
 
@@ -510,6 +514,31 @@ def api_redraw(book_id: int):
     if not db.get_book(book_id):
         raise HTTPException(404, "no such book")
     return {"ok": True, **db.clear_art(book_id)}
+
+
+@app.get("/api/books/{book_id}/cover")
+def api_cover(book_id: int, request: Request):
+    """The book's cover illustration. 404 when it hasn't been drawn -- never
+    generates: a cover needs roster sheets and the pro model, which is far too
+    slow/expensive to do inside a library-grid image request. The library shows a
+    placeholder for a book without one; POST to this URL to draw it."""
+    data = db.get_cover(book_id)
+    if not data:
+        raise HTTPException(404, "no cover")
+    return _image_response(data, request)
+
+
+@app.post("/api/books/{book_id}/cover")
+async def api_cover_draw(book_id: int, fresh: bool = False):
+    """Draw the cover (?fresh=1 redraws an existing one). Ensures the cover cast's
+    roster sheets exist first, so the cover's characters match the interior art."""
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    async with _sem:
+        data = await asyncio.to_thread(cover.ensure_cover, book_id, fresh)
+    if not data:
+        raise HTTPException(503, "cover not drawn (roster not ready, or generation failed)")
+    return {"ok": True, "bytes": len(data), **(db.cover_meta(book_id) or {})}
 
 
 @app.get("/api/books/{book_id}/roster")

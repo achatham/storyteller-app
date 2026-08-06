@@ -97,8 +97,12 @@ Reads `GEMINI_API_KEY` from `.env` (same as the CLI pipeline).
 | `STORY_WEBP_QUALITY` | `72` | lossy WebP quality for stored art (1–100) |
 | `STORY_SCENE_MAXW` | `1152` | downscale stored scenes to this max width px (0 = keep generated ~1264) |
 | `STORY_DEBUG_MAXW` / `STORY_DEBUG_QUALITY` | `960` / `52` | harder compression for review-only debug-history candidates |
-| `STORY_SHEET_IMAGE_MODEL` | `gemini-3-pro-image-preview` | roster sheets |
+| `STORY_SHEET_IMAGE_MODEL` | `gemini-3-pro-image` | "pro" model: manual sheet edits + revise escalation |
 | `STORY_PAGE_IMAGE_MODEL` | `gemini-3.1-flash-image` | page scenes |
+| `STORY_ROSTER_IMAGE_MODEL` | = page model | automatic roster reference sheets |
+| `STORY_COVER_IMAGE_MODEL` | = sheet model | the one cover illustration per book |
+| `STORY_COVER_SIZE` / `STORY_COVER_MAXW` / `STORY_COVER_QUALITY` | `2K` / `1024` / `82` | cover generation size, stored width, WebP quality |
+| `STORY_COVER_CAST` | `3` | max characters on a cover |
 | `STORY_TEXT_MODEL` | `gemini-3.5-flash` | default for all text steps |
 | `STORY_ANALYZE_MODEL` | = text model | segmentation (page anchors + briefs) |
 | `STORY_REGISTRY_MODEL` | = text model | entity discovery/expansion (identity-critical) |

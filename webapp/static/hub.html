@@ -18,9 +18,16 @@
   h1 { margin:0; font-size:2rem; }
   .sub { color:var(--muted); font-family:system-ui,sans-serif; font-size:.9rem; }
   main { max-width:1000px; margin:0 auto; padding:16px 24px 60px; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:18px; margin-top:10px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:18px; margin-top:10px; }
   .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px;
           display:flex; flex-direction:column; gap:8px; box-shadow:0 4px 16px rgba(0,0,0,.06); }
+  /* Cover art: full-bleed across the top of the card, book-shaped (2:3). Books with
+     no cover yet keep the same slot so the grid doesn't jump when one arrives. */
+  .cover { display:block; aspect-ratio:2/3; margin:-16px -16px 2px; border-radius:14px 14px 0 0;
+          overflow:hidden; background:var(--bg); border-bottom:1px solid var(--line); }
+  .cover img { width:100%; height:100%; object-fit:cover; display:block; opacity:0; transition:opacity .35s; }
+  .cover.nocover { display:flex; align-items:center; justify-content:center; font-size:2.4rem;
+          color:var(--line); background:repeating-linear-gradient(45deg,#efe7d8,#efe7d8 10px,#e9e0cf 10px,#e9e0cf 20px); }
   .card h3 { margin:0; font-size:1.15rem; }
   .card .auth { color:var(--muted); font-size:.85rem; font-style:italic; }
   .pill { align-self:flex-start; font-family:system-ui,sans-serif; font-size:.7rem; letter-spacing:.5px;
@@ -134,7 +141,15 @@ function card(b){
   const rosterReview = b.status === "roster_review";
   const baking = b.status === "baking";
   const bakePct = b.num_pages ? Math.round((b.scenes_done||0)/b.num_pages*100) : 0;
+  const href = rosterReview ? `/roster/${b.id}` : (ready||baking) ? `/book/${b.id}` : null;
+  const cover = b.has_cover
+    ? `<img loading="lazy" src="/api/books/${b.id}/cover" alt=""
+         onload="this.style.opacity=1"
+         onerror="this.closest('.cover').classList.add('nocover');this.remove()">`
+    : "📖";
   return `<div class="card" data-id="${b.id}">
+    ${href ? `<a class="cover ${b.has_cover?'':'nocover'}" href="${href}">${cover}</a>`
+           : `<span class="cover ${b.has_cover?'':'nocover'}">${cover}</span>`}
     <span class="pill">${(b.style||"").replace(/_/g,' ')}</span>
     <h3>${b.title}</h3>
     ${b.author ? `<div class="auth">${b.author}</div>` : ""}
@@ -160,7 +175,12 @@ function card(b){
 }
 
 function offlineCard(b){
+  // Try the cover anyway: the service worker caches it like any other /api GET, so
+  // a book you've looked at recently still shows its art with no connection.
   return `<div class="card" data-id="${b.id}">
+    <a class="cover" href="/book/${b.id}"><img loading="lazy" src="/api/books/${b.id}/cover" alt=""
+       onload="this.style.opacity=1"
+       onerror="this.closest('.cover').classList.add('nocover');this.closest('.cover').textContent='📖'"></a>
     <span class="pill">offline</span>
     <h3>${b.title||("Book "+b.id)}</h3>
     <div class="status">📥 Saved · ${Offline.savedLabel(b)}</div>

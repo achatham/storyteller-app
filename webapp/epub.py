@@ -127,7 +127,12 @@ def build_epub(book_id: int, max_w: int = DEFAULT_MAXW,
                          "title": ch["title"] or f"Chapter {ci + 1}",
                          "body": "\n".join(parts)})
 
-    cover_page = next(iter(images.values()), None)   # first illustrated page
+    # The book's real cover if one has been drawn (portrait, made from the roster
+    # sheets); otherwise fall back to the first illustrated page, as before.
+    cover_art = db.get_cover(book_id)
+    cover_page = ({"name": "images/cover.jpg", "jpeg": _to_jpeg(cover_art, max_w, quality)}
+                  if cover_art else next(iter(images.values()), None))
+    standalone_cover = bool(cover_art)
 
     # ---- assemble the zip ----
     buf = io.BytesIO()
@@ -163,7 +168,9 @@ def build_epub(book_id: int, max_w: int = DEFAULT_MAXW,
         for ch in chapters:
             z.writestr(f"OEBPS/{ch['file']}", _xhtml(ch["title"], ch["body"]))
 
-        # images
+        # images (the drawn cover is not one of the page images, so write it too)
+        if standalone_cover:
+            z.writestr(f"OEBPS/{cover_page['name']}", cover_page["jpeg"])
         for info in images.values():
             z.writestr(f"OEBPS/{info['name']}", info["jpeg"])
 
@@ -237,7 +244,7 @@ def build_epub(book_id: int, max_w: int = DEFAULT_MAXW,
             f'  <navMap>\n{navpoints}\n  </navMap>\n</ncx>\n')
 
     return {"data": buf.getvalue(), "images": len(images), "chapters": len(chapters),
-            "pages_missing_image": sorted(set(missing))}
+            "cover": standalone_cover, "pages_missing_image": sorted(set(missing))}
 
 
 if __name__ == "__main__":
