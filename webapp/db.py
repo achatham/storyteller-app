@@ -426,6 +426,41 @@ def get_pages(book_id) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def page_briefs(book_id, limit: int = 6, skip_blank: bool = True) -> list[str]:
+    """The first `limit` non-empty illustration briefs. get_pages() deliberately
+    omits the heavy text columns, so anything wanting briefs needs this rather than
+    a .get('brief') that silently returns None on every page."""
+    with conn() as c:
+        rows = c.execute("SELECT brief FROM pages WHERE book_id=? "
+                         + ("AND brief IS NOT NULL AND brief != '' " if skip_blank else "")
+                         + "ORDER BY idx LIMIT ?", (book_id, limit)).fetchall()
+        return [r["brief"] for r in rows]
+
+
+def variant_usage(book_id) -> dict:
+    """{(entity_id, variant_id): {"pages": n, "first": earliest page idx}}.
+
+    The only honest answer to "what does this character look like in THIS book" --
+    the registry lists every variant with equal standing, so a one-scene infant
+    variant is indistinguishable from the look 200 pages use without counting.
+    `first` is what separates a look the reader meets early from an end-state one
+    (King Caspian, marooned Jim) that would be a spoiler on a cover."""
+    out: dict = {}
+    with conn() as c:
+        rows = c.execute("SELECT idx, cast_json FROM pages WHERE book_id=? ORDER BY idx",
+                         (book_id,)).fetchall()
+    for r in rows:
+        for m in json.loads(r["cast_json"] or "[]"):
+            eid = m.get("entity_id")
+            if not eid:
+                continue
+            rec = out.setdefault((eid, m.get("variant_id") or "default"),
+                                 {"pages": 0, "first": r["idx"]})
+            rec["pages"] += 1
+            rec["first"] = min(rec["first"], r["idx"])
+    return out
+
+
 def get_page(book_id, idx) -> dict | None:
     with conn() as c:
         r = c.execute("SELECT * FROM pages WHERE book_id=? AND idx=?",
