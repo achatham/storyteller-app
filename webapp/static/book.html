@@ -366,6 +366,7 @@ async function refreshOffline(){
   const info = await Offline.info(BOOK_ID).catch(()=>null);
   if (offBusy) return;                         // don't stomp the live progress text
   if (info){
+    Offline.ensureShells(BOOK_ID);              // top up a copy saved before we stored the reader HTML
     $("#offline").innerHTML = "🗑 Remove offline copy";
     $("#offmeta").textContent = "Saved · " + Offline.savedLabel(info);
   } else {

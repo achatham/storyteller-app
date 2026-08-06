@@ -52,6 +52,25 @@
     return null;
   }
 
+  // Both readers' HTML pages for one book. They're server-rendered per book (the
+  // id and build are substituted in), so they can't live in the service worker's
+  // generic shell precache -- and the SW wipes its whole cache on every version
+  // bump, which used to leave a fully-saved book with no page left to open
+  // ("site can't be reached" offline, with the whole book sitting in IndexedDB).
+  // Storing them alongside the book ties their lifetime to it: removed with the
+  // book, and never evicted by an app update.
+  const shellPaths = (id) => ["/book/" + id, "/read/" + id];
+
+  async function saveShells(id, signal) {
+    for (const path of shellPaths(id)) {
+      aborted(signal);
+      try {
+        const r = await fetch(path, { cache: "no-store", signal });
+        if (r.ok && !r.redirected) await saveResponse(id, path, r);
+      } catch (e) { if (e.name === "AbortError") throw e; }
+    }
+  }
+
   // One-line status for a saved book, shared by both readers and the hub so they
   // never drift. Text is saved for every page; only pictures can come up short, so
   // count those and flag any gap (a partial copy the user can re-save to repair).
@@ -75,6 +94,16 @@
     async list() {
       const all = await OfflineDB.allBooks().catch(() => []);
       return (all || []).sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+    },
+    // Backfill the reader HTML for a book saved before we stored it (and repair a
+    // copy whose shell was lost). Cheap: two small documents, and only when
+    // missing. No-ops offline -- the fetches just fail and are swallowed.
+    async ensureShells(id) {
+      try {
+        if (await OfflineDB.getResponse(shellPaths(id)[0])) return;
+        if (!(await OfflineDB.getBook(id))) return;
+        await saveShells(id);
+      } catch (_) {}
     },
     async remove(id) {
       await OfflineDB.delResponsesFor(id);
@@ -102,6 +131,8 @@
 
       const seg = meta.seg_ver || 0;
       const total = meta.num_pages || 0;
+
+      await saveShells(id, signal);
 
       // page text (classic reader) + per-chapter flows (paginated reader)
       aborted(signal);

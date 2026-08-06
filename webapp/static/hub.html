@@ -172,6 +172,9 @@ async function markSaved(){
   // Badge the cards for books that also have an offline copy saved.
   try {
     const saved = new Set((await Offline.list()).map(b => b.id));
+    // We're online here, so top up any saved book still missing its reader HTML
+    // (books saved before the app stored it couldn't be opened offline at all).
+    saved.forEach(id => Offline.ensureShells(id));
     document.querySelectorAll(".card").forEach(c => {
       if (saved.has(+c.dataset.id) && !c.querySelector(".savedtag")){
         const s = document.createElement("span");
@@ -230,7 +233,7 @@ $("#form").addEventListener("submit", async e => {
   refresh();
 });
 
-loadStyles();
+loadStyles().catch(()=>{});   // offline: no style samples to show, but the library still loads
 refresh();
 </script>
 </body></html>
