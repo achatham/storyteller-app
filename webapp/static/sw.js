@@ -12,7 +12,7 @@
 // saved book reads with zero reader-side offline logic.
 importScripts("/static/offline-idb.js");
 
-const CACHE = "storyteller-v15";
+const CACHE = "storyteller-v16";   // bumped to purge the duplicated image entries
 
 // The app shell, fetched at install time. Without this the cache only ever held
 // what happened to be requested while a previous worker was already in control --
@@ -72,8 +72,18 @@ self.addEventListener("activate", (e) => e.waitUntil((async () => {
 // makes the hub render every book on the server as if it were readable, hiding
 // the saved-books view and handing the user cards that die when tapped. Letting
 // the request fail is what lets hub.html fall back to the offline library.
+//
+// Cache-busted requests are skipped too. `dl=` (the offline download), `r=`
+// (image retry / manual refresh) are single-use by construction, so an entry
+// stored under one can never be matched again -- the reader asks for
+// .../image?v=<seg>, never .../image?v=<seg>&dl=3. Caching them wrote a second,
+// unreachable copy of every picture: a 21 MB book cost 43 MB of quota, 21 MB of
+// it dead weight. That matters beyond disk, since browsers evict per origin
+// under pressure and can take the saved books' IndexedDB with it.
 function cacheable(req) {
-  return new URL(req.url).pathname !== "/api/books";
+  const u = new URL(req.url);
+  if (u.pathname === "/api/books") return false;
+  return !u.searchParams.has("dl") && !u.searchParams.has("r");
 }
 
 function maybeCache(req, res) {
