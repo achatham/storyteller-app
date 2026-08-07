@@ -64,6 +64,12 @@
       character art, segmentation) plus illustrations generated as you read. Read-time generations
       began being attributed per-book recently, so very early reading may be under-counted.</div>
   </div>
+  <div class="panel" id="jobpanel">
+    <h2>Background jobs</h2>
+    <div id="jobs" class="note">Loading job status…</div>
+    <div class="actions" id="jobactions" style="margin-top:12px"></div>
+    <div class="note">Cancelling preserves your upload, completed art, and any earlier EPUB. You can retry from this page.</div>
+  </div>
   <div class="panel" id="attpanel" style="display:none">
     <h2>Image attempts</h2>
     <div class="split">
@@ -167,6 +173,7 @@ async function getJSON(url){
     ["Pages", b.num_pages],
     ["Status", b.status],
   ].map(([k,v]) => `<div class="k">${k}</div><div>${v}</div>`).join("");
+  renderJobs(b.jobs || []);
 
   const c = await (await fetch("/api/books/"+ID+"/cost")).json();
   $("#total").textContent = usd(c.total_usd);
@@ -213,6 +220,39 @@ async function getJSON(url){
   pollEpub();
   pollOutstanding();
 })();
+
+// ---- durable background-job status and controls -----------------------------
+const when = ts => ts ? new Date(ts * 1000).toLocaleString() : "—";
+function renderJobs(jobs){
+  const host = $("#jobs"), actions = $("#jobactions");
+  if (!jobs.length){ host.textContent = "No background jobs have run for this book."; actions.innerHTML = ""; return; }
+  host.innerHTML = jobs.map(j => {
+    const label = ({process:"Import / processing", bake:"Whole-book bake", epub:"EPUB build"})[j.kind] || j.kind;
+    const active = j.status === "running";
+    return `<div style="padding:8px 0;border-bottom:1px solid var(--line)"><b>${label}</b> · ${esc(j.status)}<br>`
+      + `<span>${active ? "started" : "finished"} ${when(active ? j.started_at : j.finished_at || j.updated_at)}</span>`
+      + `${j.detail ? `<br><span>${esc(j.detail)}</span>` : ""}</div>`;
+  }).join("");
+  const running = new Set(jobs.filter(j => j.status === "running").map(j => j.kind));
+  actions.innerHTML = [
+    running.has("process") && `<button class="btn" id="cancelprocess">Cancel import</button>`,
+    running.has("epub") && `<button class="btn" id="cancelepub">Cancel EPUB build</button>`,
+  ].filter(Boolean).join("");
+  const cancel = (kind, label, url) => {
+    const btn = $("#"+kind); if (!btn) return;
+    btn.onclick = async () => {
+      if (!confirm(`Cancel ${label}? Completed work is kept.`)) return;
+      btn.disabled = true;
+      try {
+        const r = await fetch(url, {method:"POST"});
+        if (!r.ok) { const e = await r.json().catch(()=>({})); throw new Error(e.detail || "request failed"); }
+        location.reload();
+      } catch (e) { btn.disabled = false; alert(`Could not cancel: ${e.message}`); }
+    };
+  };
+  cancel("cancelprocess", "import", `/api/books/${ID}/process/cancel`);
+  cancel("cancelepub", "EPUB build", `/api/books/${ID}/epub/cancel`);
+}
 
 // ---- outstanding batch requests (live, while a bake has jobs in flight) ----
 async function pollOutstanding(){
@@ -323,9 +363,11 @@ function renderEpub(e){
     go.textContent = "Rebuild EPUB";
     msg.innerHTML = `<b>EPUB ready</b>${e.size?` — ${MB(e.size)}`:""}. ${esc(e.detail||"")} `
       + `Download it, then drop it on GitHub Pages or copy to an ereader.`;
-  } else if (st === "failed"){
+  } else if (st === "failed" || st === "cancelled"){
     go.textContent = "Build EPUB";
-    msg.innerHTML = `<b>EPUB build failed.</b> ${esc(e.detail||"")}`;
+    msg.innerHTML = st === "cancelled"
+      ? `<b>EPUB build cancelled.</b> ${esc(e.detail||"")}`
+      : `<b>EPUB build failed.</b> ${esc(e.detail||"")}`;
   } else {
     go.textContent = "Build EPUB";
     msg.innerHTML = missing

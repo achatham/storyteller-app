@@ -97,12 +97,37 @@ def _launch(kind: str, book_id: int, args: list[str], env: dict, log_name: str) 
     return True
 
 
-def _cancel_local_jobs(book_id: int):
+def _cancel_local_jobs(book_id: int, kinds: set[str] | None = None) -> list[str]:
+    """Terminate selected local workers and persist a cancellation result.
+
+    Cancellation intentionally preserves uploaded source, registry, generated art,
+    and any previously-built EPUB so the user can safely retry later.
+    """
+    cancelled = []
     for key, proc in list(_children.items()):
-        if key[1] == book_id and proc.poll() is None:
+        kind, bid = key
+        if bid != book_id or (kinds is not None and kind not in kinds):
+            continue
+        if proc.poll() is None:
             proc.terminate()
-            db.job_finish(book_id, key[0], "cancelled", "cancelled by user")
+            db.job_finish(book_id, kind, "cancelled", "cancelled by user")
+            cancelled.append(kind)
         _children.pop(key, None)
+    return cancelled
+
+
+def _cancel_batch_api_jobs(book_id: int):
+    """Best-effort cancellation of provider jobs created by a bake/EPUB worker."""
+    from pipeline import gem
+    with db.conn() as c:
+        rows = c.execute("SELECT job_name, state FROM batch_jobs WHERE book_id=?",
+                         (book_id,)).fetchall()
+    for row in rows:
+        if row["job_name"] and row["state"] not in gem.BATCH_TERMINAL:
+            try:
+                gem._client.batches.cancel(name=row["job_name"])
+            except Exception:  # noqa: BLE001 -- remote cancellation is best-effort
+                pass
 
 
 def _check_upload_rate(request: Request):
@@ -487,6 +512,18 @@ def api_delete(book_id: int):
     return {"ok": True}
 
 
+@app.post("/api/books/{book_id}/process/cancel")
+async def api_process_cancel(book_id: int):
+    """Cancel an import/reprocess without deleting its reusable source or work."""
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    cancelled = await asyncio.to_thread(_cancel_local_jobs, book_id, {"process"})
+    if not cancelled:
+        raise HTTPException(409, "no processing job is running")
+    await asyncio.to_thread(db.set_status, book_id, "cancelled", "processing cancelled — safe to reprocess")
+    return {"ok": True, "cancelled": cancelled}
+
+
 @app.post("/api/books/{book_id}/reprocess")
 async def api_reprocess(book_id: int, fresh: bool = False):
     """Re-run processing for an existing book. Default reuses the saved registry
@@ -544,18 +581,7 @@ async def api_bake_cancel(book_id: int):
     await asyncio.to_thread(db.bake_upsert, book_id, "cancelled")
     _cancel_local_jobs(book_id)
     # best-effort: cancel any still-open Batch API jobs so we stop paying for them
-    def _cancel_jobs():
-        from pipeline import gem
-        with db.conn() as c:
-            rows = c.execute("SELECT job_name, state FROM batch_jobs WHERE book_id=?",
-                             (book_id,)).fetchall()
-        for r in rows:
-            if r["job_name"] and r["state"] not in gem.BATCH_TERMINAL:
-                try:
-                    gem._client.batches.cancel(name=r["job_name"])
-                except Exception:  # noqa: BLE001
-                    pass
-    await asyncio.to_thread(_cancel_jobs)
+    await asyncio.to_thread(_cancel_batch_api_jobs, book_id)
     return {"ok": True}
 
 
@@ -573,7 +599,8 @@ def api_bake_status(book_id: int):
 
 def _epub_status(book_id: int) -> dict:
     job = db.epub_get(book_id)
-    ready = bool(job and job["status"] == "ready" and db.epub_path(book_id).exists())
+    # A cancelled rebuild deliberately keeps an older completed file downloadable.
+    ready = bool(job and job["status"] in ("ready", "cancelled") and db.epub_path(book_id).exists())
     have = {idx for idx, data in db.iter_scene_blobs(book_id) if data}
     total = db.get_book(book_id)["num_pages"] or 0
     return {
@@ -611,6 +638,20 @@ async def api_epub_build(book_id: int):
     await asyncio.to_thread(db.epub_upsert, book_id, "building", detail="starting…")
     await asyncio.to_thread(start_epub, book_id)
     return {"ok": True, **_epub_status(book_id)}
+
+
+@app.post("/api/books/{book_id}/epub/cancel")
+async def api_epub_cancel(book_id: int):
+    """Cancel the local EPUB worker, preserving source art and an old EPUB file."""
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    cancelled = await asyncio.to_thread(_cancel_local_jobs, book_id, {"epub"})
+    if not cancelled:
+        raise HTTPException(409, "no EPUB build is running")
+    # An EPUB worker may be waiting on or running a Batch API gap-fill bake.
+    await asyncio.to_thread(_cancel_batch_api_jobs, book_id)
+    await asyncio.to_thread(db.epub_upsert, book_id, "cancelled", detail="EPUB build cancelled")
+    return {"ok": True, "cancelled": cancelled}
 
 
 @app.get("/api/books/{book_id}/epub/file")

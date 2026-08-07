@@ -133,7 +133,9 @@ small buffer below an absolute financial limit.
 Long-running imports, bakes, and EPUB builds are recorded in the SQLite `jobs` table.
 The FastAPI lifespan handler marks in-flight work interrupted on startup, resumes
 eligible work, and terminates/reaps local workers during a clean server shutdown.
-Job state and failures are available in the book API response.
+Job state and failures are available in the book API response and the settings page.
+The settings page can cancel an active import or EPUB build; cancellation preserves the
+uploaded source, completed art, and any previous EPUB so it is safe to retry.
 
 **Cost note.** Segmentation no longer makes the model retype the book: it returns
 only each page's *start anchor* (a short verbatim snippet) and the page text is

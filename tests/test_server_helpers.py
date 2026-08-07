@@ -31,6 +31,35 @@ def test_valid_upload_requires_matching_signature(monkeypatch, tmp_path):
         module._valid_upload("book.epub", b"PK\x03\x04not really an epub")
 
 
+def test_cancel_only_selected_local_job(monkeypatch, tmp_path):
+    module = server(monkeypatch, tmp_path)
+    module.db.init()
+    bid = module.db.create_book("Title", "", "book.pdf", "watercolor", 200, "5",
+                                "application/pdf", b"%PDF-test")
+
+    class Proc:
+        def __init__(self):
+            self.terminated = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+    process, epub = Proc(), Proc()
+    module._children[("process", bid)] = process
+    module._children[("epub", bid)] = epub
+    module.db.job_start(bid, "process", 1)
+    module.db.job_start(bid, "epub", 2)
+
+    assert module._cancel_local_jobs(bid, {"process"}) == ["process"]
+    assert process.terminated
+    assert not epub.terminated
+    assert ("epub", bid) in module._children
+    assert {j["kind"]: j["status"] for j in module.db.jobs_for_book(bid)}["process"] == "cancelled"
+
+
 def test_upload_rate_limit(monkeypatch, tmp_path):
     monkeypatch.setenv("STORY_MAX_UPLOADS_PER_MINUTE", "2")
     module = server(monkeypatch, tmp_path)
