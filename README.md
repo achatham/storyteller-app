@@ -31,4 +31,16 @@ An LLM critic analyzes the pictures on several factors and trigggers a regenerat
 
 ### Running the Software
 
-Copy `.env.example` to `.env` and add your own Gemini API key from [AI Studio](http://aistudio.google.com/). Then run `docker compose up --build` and visit http://localhost:8000/ and upload an unencrypted EPUB file.
+Copy `.env.example` to `.env` and add your own Gemini API key from [AI Studio](http://aistudio.google.com/). Then run `docker compose up --build` and visit http://localhost:8200/ to upload an unencrypted EPUB or PDF.
+
+The Compose configuration binds to `127.0.0.1` by default because the application has no built-in accounts. This project is **not intended to be visible on the LAN**; retain that default unless you first add an authenticated TLS reverse proxy. Uploads are capped at 50 MiB by default; tune `STORY_MAX_BOOK_BYTES` only when the host has adequate RAM and disk space. Set `STORY_BOOK_BUDGET_USD` to a deliberate per-book Gemini-spend ceiling.
+
+### Development
+
+```sh
+python -m pip install -r requirements.txt
+pytest
+ruff check .
+```
+
+The test suite exercises database initialization, upload validation, and text/flow helpers without calling Gemini. Generated images and source books can be expensive and may be copyrighted; keep the persistent `data/` directory backed up and private.

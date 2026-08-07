@@ -22,21 +22,27 @@ a per-(book,page) lock.
 """
 import asyncio
 import hashlib
+import io
 import mimetypes
 import os
 import re
 import subprocess
 import sys
+import time
+import zipfile
+from collections import defaultdict, deque
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-mimetypes.add_type("application/manifest+json", ".webmanifest")
-
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from pipeline.config import STYLES
+
 from . import cover, db, flow, scene
+
+mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = Path(__file__).resolve().parent / "static"
@@ -61,23 +67,74 @@ WORK = Path(os.environ.get("STORY_WORK", str(ROOT / "output" / "work")))
 LOGS = Path(os.environ.get("STORY_LOGS", str(ROOT / "output" / "logs")))
 PREFETCH = int(os.environ.get("STORY_PREFETCH", "2"))
 GEN_CONCURRENCY = int(os.environ.get("STORY_GEN_CONCURRENCY", "3"))
+MAX_BOOK_BYTES = int(os.environ.get("STORY_MAX_BOOK_BYTES", str(50 * 1024 * 1024)))
+MAX_UPLOADS_PER_MINUTE = int(os.environ.get("STORY_MAX_UPLOADS_PER_MINUTE", "6"))
 
-app = FastAPI(title="Storyteller")
-app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
-
-
-@app.get("/sw.js")
-def service_worker():
-    # served from root so its scope covers the whole app (/read, /book, ...)
-    return Response((STATIC / "sw.js").read_text(), media_type="application/javascript")
+if MAX_BOOK_BYTES <= 0 or MAX_UPLOADS_PER_MINUTE <= 0:
+    raise RuntimeError("STORY_MAX_BOOK_BYTES and STORY_MAX_UPLOADS_PER_MINUTE must be positive")
 
 _sem = asyncio.Semaphore(GEN_CONCURRENCY)
 _locks: dict[tuple[int, int], asyncio.Lock] = {}
+_children: dict[tuple[str, int], subprocess.Popen] = {}
+_upload_attempts: dict[str, deque[float]] = defaultdict(deque)
 
 
-@app.on_event("startup")
-def _startup():
+def _launch(kind: str, book_id: int, args: list[str], env: dict, log_name: str) -> bool:
+    """Launch one durable job at a time per book/kind in this server process.
+
+    The database remains the source of truth across restarts; this guard avoids
+    accidental duplicate API clicks creating competing subprocesses meanwhile.
+    """
+    key = (kind, book_id)
+    old = _children.get(key)
+    if old and old.poll() is None:
+        return False
+    log_path = LOGS / log_name
+    with open(log_path, "ab") as logf:
+        _children[key] = subprocess.Popen(args, cwd=str(ROOT), env=env,
+                                          stdout=logf, stderr=logf)
+    db.job_start(book_id, kind, _children[key].pid)
+    return True
+
+
+def _cancel_local_jobs(book_id: int):
+    for key, proc in list(_children.items()):
+        if key[1] == book_id and proc.poll() is None:
+            proc.terminate()
+            db.job_finish(book_id, key[0], "cancelled", "cancelled by user")
+        _children.pop(key, None)
+
+
+def _check_upload_rate(request: Request):
+    client = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+    attempts = _upload_attempts[client]
+    while attempts and attempts[0] <= now - 60:
+        attempts.popleft()
+    if len(attempts) >= MAX_UPLOADS_PER_MINUTE:
+        raise HTTPException(429, "too many uploads; try again in a minute")
+    attempts.append(now)
+
+
+def _valid_upload(filename: str, data: bytes) -> str:
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".pdf" and data.startswith(b"%PDF-"):
+        return "application/pdf"
+    if suffix == ".epub" and data.startswith(b"PK\x03\x04"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                if "mimetype" in zf.namelist() and zf.read("mimetype") == b"application/epub+zip":
+                    return "application/epub+zip"
+        except (OSError, zipfile.BadZipFile):
+            pass
+    raise HTTPException(400, "upload must be a valid PDF or unencrypted EPUB file")
+
+
+def _resume_interrupted_work():
     db.init()
+    n_jobs = db.interrupt_running_jobs()
+    if n_jobs:
+        print(f"[server] marked {n_jobs} interrupted worker job(s)", flush=True)
     for d in (WORK, LOGS):
         d.mkdir(parents=True, exist_ok=True)
     # a generation interrupted by a restart leaves a 'generating' row with no
@@ -104,6 +161,55 @@ def _startup():
         print(f"[server] resumed interrupted EPUB build for book {bid}", flush=True)
 
 
+def _shutdown_local_jobs():
+    """Stop child workers before the server exits and leave durable diagnostics.
+
+    A restarted server's normal resume paths will pick eligible work up again;
+    waiting briefly avoids orphaned workers competing with that new process.
+    """
+    for (kind, book_id), proc in list(_children.items()):
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            db.job_finish(book_id, kind, "interrupted", "server shutting down")
+        _children.pop((kind, book_id), None)
+    _locks.clear()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    _resume_interrupted_work()
+    try:
+        yield
+    finally:
+        await asyncio.to_thread(_shutdown_local_jobs)
+
+
+app = FastAPI(title="Storyteller", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
+
+# The reverse proxy remains the authentication boundary, but these headers are
+# useful even on a trusted LAN and keep an accidental direct deployment safer.
+@app.middleware("http")
+async def harden_http(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    return response
+
+
+@app.get("/sw.js")
+def service_worker():
+    # served from root so its scope covers the whole app (/read, /book, ...)
+    return Response((STATIC / "sw.js").read_text(), media_type="application/javascript")
+
+
 # ---------------- lazy scene generation ----------------
 
 def _lock_for(book_id, idx) -> asyncio.Lock:
@@ -120,6 +226,7 @@ async def ensure_scene(book_id: int, idx: int) -> bytes:
     data = await asyncio.to_thread(db.scene_data, book_id, idx)
     if data:
         return data
+    key = (book_id, idx)
     async with _lock_for(book_id, idx):
         data = await asyncio.to_thread(db.scene_data, book_id, idx)
         if data:
@@ -132,6 +239,8 @@ async def ensure_scene(book_id: int, idx: int) -> bytes:
             await asyncio.to_thread(db.scene_set_status, book_id, idx, "failed",
                                     f"{type(ex).__name__}: {str(ex)[:200]}")
             raise
+        finally:
+            _locks.pop(key, None)
 
 
 async def _safe_ensure(book_id, idx):
@@ -178,9 +287,8 @@ def start_processing(book_id: int):
         "STORY_APP_DB": str(db.DB),
         "STORY_RUN": f"book:{book_id}",   # tag all processing usage to this book
     })
-    logf = open(LOGS / f"book_{book_id}.log", "ab")
-    subprocess.Popen([sys.executable, "-m", "webapp.process", str(book_id)],
-                     cwd=str(ROOT), env=env, stdout=logf, stderr=logf)
+    _launch("process", book_id, [sys.executable, "-m", "webapp.process", str(book_id)],
+            env, f"book_{book_id}.log")
 
 
 def start_bake(book_id: int):
@@ -190,9 +298,8 @@ def start_bake(book_id: int):
     env = dict(os.environ)
     env["STORY_APP_DB"] = str(db.DB)
     env["STORY_RUN"] = f"book:{book_id}"
-    logf = open(LOGS / f"bake_{book_id}.log", "ab")
-    subprocess.Popen([sys.executable, "-m", "webapp.batch_bake", str(book_id)],
-                     cwd=str(ROOT), env=env, stdout=logf, stderr=logf)
+    _launch("bake", book_id, [sys.executable, "-m", "webapp.batch_bake", str(book_id)],
+            env, f"bake_{book_id}.log")
 
 
 def start_epub(book_id: int):
@@ -202,9 +309,8 @@ def start_epub(book_id: int):
     env = dict(os.environ)
     env["STORY_APP_DB"] = str(db.DB)
     env["STORY_RUN"] = f"book:{book_id}"
-    logf = open(LOGS / f"epub_{book_id}.log", "ab")
-    subprocess.Popen([sys.executable, "-m", "webapp.make_epub", str(book_id)],
-                     cwd=str(ROOT), env=env, stdout=logf, stderr=logf)
+    _launch("epub", book_id, [sys.executable, "-m", "webapp.make_epub", str(book_id)],
+            env, f"epub_{book_id}.log")
 
 
 # ---------------- pages (UI) ----------------
@@ -313,20 +419,35 @@ def api_books():
 
 
 @app.post("/api/books")
-async def api_upload(file: UploadFile = File(...), title: str = Form(""),
+async def api_upload(request: Request, file: UploadFile = File(...), title: str = Form(""),
                      author: str = Form(""), style: str = Form("watercolor"),
                      words_per_page: int = Form(200), age: str = Form("5"),
                      illustration_mode: str = Form("lazy")):
     if style not in STYLES:
         raise HTTPException(400, f"unknown style {style!r}")
+    if words_per_page < 50 or words_per_page > 2_000:
+        raise HTTPException(400, "words_per_page must be between 50 and 2000")
+    if not age.isdigit() or not 0 <= int(age) <= 120:
+        raise HTTPException(400, "audience age must be a whole number between 0 and 120")
     if illustration_mode not in ("lazy", "batch"):
         raise HTTPException(400, f"unknown illustration_mode {illustration_mode!r}")
-    data = await file.read()
+    _check_upload_rate(request)
+    if not file.filename:
+        raise HTTPException(400, "file name is required")
+    if len(title) > 300 or len(author) > 300 or len(age) > 20:
+        raise HTTPException(400, "metadata field is too long")
+    chunks, total = [], 0
+    while chunk := await file.read(1024 * 1024):
+        total += len(chunk)
+        if total > MAX_BOOK_BYTES:
+            raise HTTPException(413, f"book exceeds the {MAX_BOOK_BYTES // (1024 * 1024)} MiB upload limit")
+        chunks.append(chunk)
+    data = b"".join(chunks)
     if not data:
         raise HTTPException(400, "empty file")
-    book_id = db.create_book(title.strip(), author.strip(), file.filename, style,
-                             words_per_page, age, file.content_type or "application/octet-stream",
-                             data)
+    mime = _valid_upload(file.filename, data)
+    book_id = db.create_book(title.strip(), author.strip(), Path(file.filename).name, style,
+                             words_per_page, age, mime, data)
     if illustration_mode != "lazy":
         db.set_illustration_mode(book_id, illustration_mode)
     await asyncio.to_thread(start_processing, book_id)
@@ -349,6 +470,7 @@ def api_book(book_id: int):
         "chapters": db.get_chapters(book_id),
         "scenes_done": db.scene_progress(book_id).get("done", 0),
         "illustration_mode": b["illustration_mode"] if "illustration_mode" in b.keys() else "lazy",
+        "jobs": db.jobs_for_book(book_id),
         "bake": (lambda bk: {"status": bk["status"], "round": bk["round"],
                              "total_pages": bk["total_pages"],
                              "done_pages": db.bps_counts(book_id).get("done", 0)}
@@ -358,6 +480,9 @@ def api_book(book_id: int):
 
 @app.delete("/api/books/{book_id}")
 def api_delete(book_id: int):
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    _cancel_local_jobs(book_id)
     db.delete_book(book_id)
     return {"ok": True}
 
@@ -417,6 +542,7 @@ async def api_bake_cancel(book_id: int):
     if not db.bake_get(book_id):
         raise HTTPException(404, "no bake for this book")
     await asyncio.to_thread(db.bake_upsert, book_id, "cancelled")
+    _cancel_local_jobs(book_id)
     # best-effort: cancel any still-open Batch API jobs so we stop paying for them
     def _cancel_jobs():
         from pipeline import gem
@@ -606,6 +732,15 @@ def api_book_cost(book_id: int):
     if not db.get_book(book_id):
         raise HTTPException(404, "no such book")
     report = costs.book_report(book_id)
+    raw_budget = os.environ.get("STORY_BOOK_BUDGET_USD", "").strip()
+    try:
+        budget = float(raw_budget) if raw_budget else None
+    except ValueError:
+        budget = None
+    if budget is not None and budget > 0:
+        report["budget_usd"] = round(budget, 2)
+        report["budget_remaining_usd"] = round(max(0, budget - report["total_usd"]), 4)
+        report["budget_exceeded"] = report["total_usd"] >= budget
 
     # How many of each page's current illustration succeeded on the Nth try, plus
     # the resulting images-per-page multiplier. Pages that never cleared the quality
@@ -840,7 +975,14 @@ async def api_scene_image(book_id: int, idx: int, request: Request):
 
 @app.put("/api/books/{book_id}/progress")
 async def api_set_progress(book_id: int, body: dict):
-    pos = int(body.get("position", 0))
+    book = db.get_book(book_id)
+    if not book:
+        raise HTTPException(404, "no such book")
+    try:
+        pos = int(body.get("position", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "position must be an integer")
+    pos = max(0, min(pos, max(0, (book["num_pages"] or 1) - 1)))
     db.set_progress(book_id, pos)
     db.log_reading(book_id, pos)
     return {"ok": True}

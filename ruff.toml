@@ -1,0 +1,12 @@
+target-version = "py312"
+line-length = 100
+
+[lint]
+select = ["E", "F", "I"]
+# The existing codebase intentionally uses compact semicolon assignments and
+# deferred imports; adopt import hygiene incrementally instead of failing CI on
+# unrelated legacy formatting.
+ignore = ["E501", "E402", "E702", "E741", "I001", "F401"]
+
+[lint.per-file-ignores]
+"tests/*" = ["E402"]

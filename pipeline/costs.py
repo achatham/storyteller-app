@@ -85,6 +85,26 @@ def cost_for(model: str, input_tokens: int, output_tokens: int,
     return cost * BATCH_DISCOUNT if batch else cost
 
 
+class BudgetExceeded(RuntimeError):
+    """The configured per-book API spend limit would be exceeded."""
+
+
+def _book_budget(run: str) -> float | None:
+    if not run.startswith("book:"):
+        return None
+    raw = os.environ.get("STORY_BOOK_BUDGET_USD", "").strip()
+    if not raw:
+        return None
+    budget = float(raw)
+    return budget if budget > 0 else None
+
+
+def _run_cost(run: str) -> float:
+    with _conn() as c:
+        row = c.execute("SELECT COALESCE(SUM(cost_usd),0) AS total FROM usage WHERE run=?", (run,)).fetchone()
+    return float(row[0] or 0)
+
+
 def record(model: str, kind: str, input_tokens: int, output_tokens: int,
            total_tokens: int | None = None, images: int = 0,
            run: str | None = None, batch: bool = False) -> float:
@@ -97,6 +117,9 @@ def record(model: str, kind: str, input_tokens: int, output_tokens: int,
     if run is None:
         run = _resolve_run()
     with _lock:
+        budget = _book_budget(run)
+        if budget is not None and _run_cost(run) + cost > budget:
+            raise BudgetExceeded(f"book budget ${budget:.2f} reached (next call ${cost:.4f})")
         with _conn() as c:
             c.execute(
                 "INSERT INTO usage(ts,run,model,kind,input_tokens,output_tokens,"

@@ -72,7 +72,10 @@ def main():
     except Exception as ex:   # noqa: BLE001
         traceback.print_exc()
         db.epub_upsert(book_id, "failed", detail=f"{type(ex).__name__}: {str(ex)[:200]}")
+        db.job_finish(book_id, "epub", "failed", f"{type(ex).__name__}: {str(ex)[:200]}")
         sys.exit(1)
+    else:
+        db.job_finish(book_id, "epub")
 
 
 if __name__ == "__main__":

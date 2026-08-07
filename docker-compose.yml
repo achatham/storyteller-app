@@ -5,14 +5,19 @@ services:
       # Built here, never pushed to a registry -- watchtower would resolve this
       # to library/storyteller-storyteller on Docker Hub and 401 every night.
       - com.centurylinklabs.watchtower.enable=false
+    # The proxy is the authentication boundary. Keep direct access local unless
+    # deliberately overriding STORY_BIND (e.g. a private LAN-only deployment).
     ports:
-      - "${STORY_PORT:-8000}:8000"
+      - "${STORY_BIND:-127.0.0.1}:${STORY_PORT:-8200}:8000"
     env_file:
       - .env          # must define GEMINI_API_KEY=...
     environment:
       STORY_PREFETCH: "4"          # pages to draw ahead while reading
       STORY_WARM_PAGES: "2"        # first pages drawn during import (instant open)
       STORY_GEN_CONCURRENCY: "3"   # max simultaneous image generations
+      STORY_MAX_BOOK_BYTES: "${STORY_MAX_BOOK_BYTES:-52428800}"  # reject uploads over 50 MiB
+      STORY_MAX_UPLOADS_PER_MINUTE: "${STORY_MAX_UPLOADS_PER_MINUTE:-6}" # per-client abuse guard
+      STORY_BOOK_BUDGET_USD: "${STORY_BOOK_BUDGET_USD:-}" # optional hard USD limit/book
       # All text steps default to STORY_TEXT_MODEL (gemini-3.5-flash). Text spend
       # is negligible next to image generation, so we favour the stronger model
       # for reliable variant picks + cast inclusion (set STORY_ANALYZE_MODEL etc.

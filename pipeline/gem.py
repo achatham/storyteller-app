@@ -35,6 +35,10 @@ def _record_usage(resp, model: str, kind: str, images: int = 0, batch: bool = Fa
         pout = (getattr(u, "candidates_token_count", 0) or 0) if u else 0
         tot = (getattr(u, "total_token_count", 0) or 0) if u else 0
         costs.record(model, kind, pin, pout, tot or (pin + pout), images=images, batch=batch)
+    except costs.BudgetExceeded:
+        # This is an intentional safety stop, not an accounting problem. Let the
+        # caller fail the job before it makes further paid requests.
+        raise
     except Exception as e:  # noqa: BLE001
         print(f"  [costs] record failed: {type(e).__name__}: {str(e)[:100]}", flush=True)
 

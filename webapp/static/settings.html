@@ -51,6 +51,7 @@
   <div class="panel">
     <h2>Cost so far</h2>
     <div class="total" id="total">…</div>
+    <div class="note" id="budget" style="display:none"></div>
     <div class="split">
       <div>text&nbsp; <b id="textc"></b></div>
       <div>images&nbsp; <b id="imgc"></b> <span class="pill" id="nimg"></span></div>
@@ -172,6 +173,12 @@ async function getJSON(url){
   $("#textc").textContent = usd(c.text_usd);
   $("#imgc").textContent = usd(c.image_usd);
   $("#nimg").textContent = c.images + " imgs";
+  if (c.budget_usd != null) {
+    const b = $("#budget"); b.style.display = "";
+    b.textContent = c.budget_exceeded
+      ? `Budget reached: ${usd(c.total_usd)} of ${usd(c.budget_usd)}. Further recorded Gemini calls are blocked.`
+      : `Per-book budget: ${usd(c.total_usd)} of ${usd(c.budget_usd)} used; ${usd(c.budget_remaining_usd)} remains.`;
+  }
   if (c.batch_saved_usd > 0) {
     $("#saved").textContent = usd(c.batch_saved_usd);
     $("#savedrow").style.display = "";

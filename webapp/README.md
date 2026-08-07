@@ -15,7 +15,15 @@ docker compose up --build
 
 `./data` (a mounted volume) holds the SQLite DB (`storyteller.db`), per-book
 scratch dirs, and processing logs, so uploaded books and generated art survive
-restarts.
+restarts. It is the source of truth: back it up before deleting a stack or its
+volume. The database contains original uploads, generated art, and rejected debug
+candidates, so treat it as private data.
+
+Compose binds to `127.0.0.1` by default. The app relies on an authenticated TLS
+reverse proxy for access from phones/tablets; set `STORY_BIND=0.0.0.0` only for an
+intentional trusted-LAN deployment. The server validates PDF/EPUB signatures,
+limits uploads to `STORY_MAX_BOOK_BYTES` (50 MiB by default), and rate-limits
+uploads per client. These are safety rails, not a substitute for proxy auth.
 
 ## HTTPS on phones/tablets (PWA install + keep-awake)
 
@@ -92,6 +100,9 @@ Reads `GEMINI_API_KEY` from `.env` (same as the CLI pipeline).
 | `STORY_WARM_PAGES` | `2` | first pages drawn during import (instant open) |
 | `STORY_PREFETCH` | `4` | pages drawn ahead while reading |
 | `STORY_GEN_CONCURRENCY` | `3` | max simultaneous image generations |
+| `STORY_MAX_BOOK_BYTES` | `52428800` | maximum PDF/EPUB upload size (50 MiB) |
+| `STORY_MAX_UPLOADS_PER_MINUTE` | `6` | per-client upload rate limit |
+| `STORY_BOOK_BUDGET_USD` | unset | optional hard USD cap for each book's recorded Gemini calls |
 | `STORY_SCENE_TRIES` | `3` | max image attempts per scene; if none pass the critic, a vision judge picks the best of them |
 | `STORY_SCENE_REVISE` | `1` | revise a broadly-good near-miss with an img2img edit; set `0` to always regenerate from scratch |
 | `STORY_WEBP_QUALITY` | `72` | lossy WebP quality for stored art (1–100) |
@@ -112,6 +123,17 @@ Reads `GEMINI_API_KEY` from `.env` (same as the CLI pipeline).
 
 Per-book choices (art style, illustration cadence, audience age) are set in the
 upload form. Token/image costs are recorded to `costs.db` (`python -m pipeline.costs`).
+Image generation can cost tens of dollars for a full book: review the chosen cadence,
+use batch mode when appropriate, and monitor the per-book cost page before baking. Set
+`STORY_BOOK_BUDGET_USD` to a deliberate hard ceiling if this host should never exceed a
+fixed per-book spend. The check is performed immediately before each recorded Gemini
+call; because API prices are estimates and usage arrives with the response, leave a
+small buffer below an absolute financial limit.
+
+Long-running imports, bakes, and EPUB builds are recorded in the SQLite `jobs` table.
+The FastAPI lifespan handler marks in-flight work interrupted on startup, resumes
+eligible work, and terminates/reaps local workers during a clean server shutdown.
+Job state and failures are available in the book API response.
 
 **Cost note.** Segmentation no longer makes the model retype the book: it returns
 only each page's *start anchor* (a short verbatim snippet) and the page text is

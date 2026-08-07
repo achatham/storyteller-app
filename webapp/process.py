@@ -587,7 +587,10 @@ def main():
     except Exception as ex:  # noqa: BLE001
         traceback.print_exc()
         db.set_status(book_id, "failed", f"{type(ex).__name__}: {str(ex)[:300]}")
+        db.job_finish(book_id, "process", "failed", f"{type(ex).__name__}: {str(ex)[:300]}")
         sys.exit(1)
+    else:
+        db.job_finish(book_id, "process")
 
 
 if __name__ == "__main__":

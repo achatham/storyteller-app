@@ -696,7 +696,10 @@ def main():
         traceback.print_exc()
         db.bake_upsert(book_id, "failed", detail=f"{type(ex).__name__}: {str(ex)[:300]}")
         db.set_status(book_id, "roster_review", f"bake failed: {str(ex)[:120]}")
+        db.job_finish(book_id, "bake", "failed", f"{type(ex).__name__}: {str(ex)[:300]}")
         sys.exit(1)
+    else:
+        db.job_finish(book_id, "bake")
 
 
 if __name__ == "__main__":

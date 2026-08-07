@@ -232,6 +232,22 @@ CREATE TABLE IF NOT EXISTS reading_log (
     events      INTEGER DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS reading_log_book ON reading_log(book_id, updated_at);
+CREATE INDEX IF NOT EXISTS scenes_book_status ON scenes(book_id, status);
+CREATE INDEX IF NOT EXISTS pages_book_chapter ON pages(book_id, chapter_idx, idx);
+-- Durable record of local worker subprocesses. PID is diagnostic only; lifecycle
+-- status, not a reused OS PID, is authoritative after a server restart.
+CREATE TABLE IF NOT EXISTS jobs (
+    book_id     INTEGER REFERENCES books(id) ON DELETE CASCADE,
+    kind        TEXT,       -- process|bake|epub
+    status      TEXT,       -- running|done|failed|cancelled|interrupted
+    pid         INTEGER,
+    detail      TEXT,
+    started_at  REAL,
+    finished_at REAL,
+    updated_at  REAL,
+    PRIMARY KEY (book_id, kind)
+);
+CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status, updated_at);
 """
 
 
@@ -246,8 +262,16 @@ def conn() -> sqlite3.Connection:
 
 
 def init():
+    """Initialize the current schema and apply idempotent legacy upgrades.
+
+    `schema_version` records the latest migration for operators and tests; the
+    column checks keep existing single-file installations upgrade-safe.
+    """
     with conn() as c:
         c.executescript(SCHEMA)
+        c.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
+        if not c.execute("SELECT 1 FROM schema_version").fetchone():
+            c.execute("INSERT INTO schema_version(version) VALUES (1)")
         # migrate older DBs that predate columns added above
         cols = {r["name"] for r in c.execute("PRAGMA table_info(books)")}
         if "seg_ver" not in cols:
@@ -260,6 +284,7 @@ def init():
         scols = {r["name"] for r in c.execute("PRAGMA table_info(scenes)")}
         if "trace" not in scols:   # per-attempt critique/revise log (JSON)
             c.execute("ALTER TABLE scenes ADD COLUMN trace TEXT")
+        c.execute("UPDATE schema_version SET version=1")
 
 
 # ---------------- books ----------------
@@ -330,9 +355,50 @@ def list_books() -> list[dict]:
         return [dict(r) for r in rows]
 
 
+# ---------------- durable worker jobs ----------------
+
+def job_start(book_id, kind, pid=None):
+    now = time.time()
+    with conn() as c:
+        c.execute("INSERT INTO jobs(book_id,kind,status,pid,detail,started_at,finished_at,updated_at) "
+                  "VALUES (?,?, 'running', ?, NULL, ?, NULL, ?) "
+                  "ON CONFLICT(book_id,kind) DO UPDATE SET status='running', pid=excluded.pid, "
+                  "detail=NULL, started_at=excluded.started_at, finished_at=NULL, updated_at=excluded.updated_at",
+                  (book_id, kind, pid, now, now))
+
+
+def job_finish(book_id, kind, status="done", detail=None):
+    if status not in ("done", "failed", "cancelled", "interrupted"):
+        raise ValueError(f"invalid job status: {status}")
+    now = time.time()
+    with conn() as c:
+        c.execute("UPDATE jobs SET status=?, detail=?, finished_at=?, updated_at=? "
+                  "WHERE book_id=? AND kind=?", (status, detail, now, now, book_id, kind))
+
+
+def jobs_for_book(book_id) -> list[dict]:
+    with conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM jobs WHERE book_id=? ORDER BY started_at DESC", (book_id,))]
+
+
+def interrupt_running_jobs() -> int:
+    """Mark jobs that died with the previous web-server process for diagnosis."""
+    now = time.time()
+    with conn() as c:
+        return c.execute("UPDATE jobs SET status='interrupted', detail='server restarted', "
+                         "finished_at=?, updated_at=? WHERE status='running'", (now, now)).rowcount
+
+
 def delete_book(book_id):
+    """Delete DB state and the regenerable EPUB artifact for one book."""
     with conn() as c:
         c.execute("DELETE FROM books WHERE id=?", (book_id,))
+    path = epub_path(book_id)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 IN_PROGRESS = ("queued", "extracting", "registry", "roster", "segmenting",
@@ -1128,6 +1194,12 @@ def epubs_pending() -> list[int]:
 
 
 # ---------------- progress ----------------
+
+def database_stats() -> dict:
+    """Small operational view for the API/UI without exposing database contents."""
+    files = [DB, DB.with_name(DB.name + "-wal"), DB.with_name(DB.name + "-shm")]
+    return {"path": str(DB), "bytes": sum(p.stat().st_size for p in files if p.exists())}
+
 
 def set_progress(book_id, position):
     with conn() as c:
