@@ -14,6 +14,7 @@
   GET  /api/books/{id}/pages/{i}/status  scene generation status
   PUT  /api/books/{id}/progress   save reading position (server-side) + log a session
   GET  /api/history               reading history (recent sessions across all books)
+  GET  /api/history/export        reading history as JSON for export (?start=&end=)
   GET  /history                   reading-history viewer page
 
 Scene images are generated on demand and prefetched N pages ahead (PREFETCH).
@@ -32,6 +33,7 @@ import time
 import zipfile
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
@@ -1034,3 +1036,82 @@ def api_history():
     """Reading history: recent sessions (which book, which pages) across the
     library, newest first."""
     return db.reading_history()
+
+
+# Accepted `start`/`end` spellings, loosest useful set: a bare date, a local
+# datetime, or raw epoch seconds. Bare dates are interpreted in the server's
+# local timezone, which is the one the reading actually happened in.
+_DATE_FORMATS = ("%Y-%m-%d", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S",
+                 "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S")
+
+
+def _parse_when(value: str | None, name: str, end_of_day: bool = False) -> float | None:
+    """Parse one bound of the export window into epoch seconds, or None if unset.
+    A bare date used as `end` means the *whole* of that day, so ?start=2026-08-01
+    &end=2026-08-09 reads the way a person means it: inclusive at both ends."""
+    if value is None or value == "":
+        return None
+    try:                                    # raw epoch seconds pass straight through
+        return float(value)
+    except ValueError:
+        pass
+    text = value.strip().replace("Z", "+00:00")
+    for fmt in _DATE_FORMATS:
+        try:
+            dt = datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        if end_of_day and fmt == "%Y-%m-%d":
+            dt += timedelta(days=1)         # exclusive upper bound = next midnight
+        return dt.timestamp()
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        raise HTTPException(
+            400, f"{name} must be YYYY-MM-DD, an ISO-8601 datetime, or epoch seconds")
+
+
+@app.get("/api/history/export")
+def api_history_export(start: str | None = None, end: str | None = None,
+                       limit: int = 5000):
+    """Reading history as self-contained JSON, for export into an external log.
+
+    ?start= and ?end= bound the window (YYYY-MM-DD, ISO-8601 datetime, or epoch
+    seconds); either may be omitted for an open end. Sessions overlapping the
+    window are included. Times are reported both as epoch seconds and as local
+    ISO-8601, so the consumer doesn't have to guess a timezone."""
+    lo = _parse_when(start, "start")
+    hi = _parse_when(end, "end", end_of_day=True)
+    if lo is not None and hi is not None and hi < lo:
+        raise HTTPException(400, "end must not be before start")
+    limit = max(1, min(limit, 50000))
+
+    sessions = []
+    for s in db.reading_history(limit=limit, start=lo, end=hi):
+        pages = s["num_pages"] or 0
+        sessions.append({
+            "book_id": s["book_id"],
+            "title": s["title"],
+            "author": s["author"],
+            "started_at": s["started_at"],
+            "ended_at": s["updated_at"],
+            "started_at_iso": _iso(s["started_at"]),
+            "ended_at_iso": _iso(s["updated_at"]),
+            "duration_seconds": round(max(0.0, s["updated_at"] - s["started_at"]), 3),
+            # positions are 0-based internally; export them as human page numbers
+            "start_page": s["start_pos"] + 1,
+            "end_page": s["end_pos"] + 1,
+            "pages_read": max(0, s["end_pos"] - s["start_pos"]) + 1,
+            "book_pages": pages,
+            "percent_complete": round((s["end_pos"] + 1) / pages * 100, 1) if pages else None,
+            "page_turns": s["events"],
+        })
+    return {
+        "start": _iso(lo), "end": _iso(hi),
+        "count": len(sessions), "truncated": len(sessions) == limit,
+        "sessions": sessions,
+    }
+
+
+def _iso(ts: float | None) -> str | None:
+    return None if ts is None else datetime.fromtimestamp(ts).astimezone().isoformat()

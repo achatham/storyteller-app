@@ -79,6 +79,10 @@
   #close { width:100%; }
   #bar { position:fixed; left:0; bottom:0; height:3px; background:var(--muted); z-index:20;
          transition:width .15s ease; }
+  #pct { position:fixed; right:10px; bottom:9px; z-index:20; color:var(--muted);
+         font-family:system-ui,sans-serif; font-size:.72rem; letter-spacing:1px;
+         background:rgba(255,253,248,.82); border-radius:8px; padding:2px 7px;
+         backdrop-filter:blur(3px); user-select:none; pointer-events:none; }
   #splash { position:fixed; inset:0; z-index:60; background:var(--bg); display:flex;
             flex-direction:column; align-items:center; justify-content:center; gap:16px;
             font-family:system-ui,sans-serif; color:var(--muted); text-align:center; padding:24px; }
@@ -101,6 +105,7 @@
   <div class="edge left">&#8249;</div>
   <div class="edge right">&#8250;</div>
   <div id="bar"></div>
+  <div id="pct"></div>
 
   <div id="menu" hidden>
     <div class="menucard">
@@ -224,10 +229,13 @@ function render(){
   $("#ch").textContent = ch ? ch.title : "";
   $("#title").textContent = p.title;
   $("#text").textContent = p.text;
-  $("#pos").textContent = `Page ${state.i+1} / ${DATA.pages.length}`;
+  const frac = (state.i+1) / DATA.pages.length;
+  const pct = Math.round(frac * 100);
+  $("#pos").textContent = `Page ${state.i+1} / ${DATA.pages.length} · ${pct}%`;
+  $("#pct").textContent = pct + "%";
   $("#prev").disabled = state.i === 0;
   $("#next").disabled = state.i === DATA.pages.length - 1;
-  $("#bar").style.width = ((state.i+1)/DATA.pages.length*100) + "%";
+  $("#bar").style.width = (frac*100) + "%";
   if (ch) $("#chap").value = ch.first_page;
   document.querySelector("main").scrollTop = 0;
   const r = document.querySelector(".read"); if (r) r.scrollTop = 0;

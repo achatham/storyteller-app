@@ -1254,13 +1254,26 @@ def log_reading(book_id, position):
                       (book_id, now, now, position, position))
 
 
-def reading_history(limit=200) -> list[dict]:
+def reading_history(limit=200, start=None, end=None) -> list[dict]:
     """Recent reading sessions across all books, newest first, with book title +
-    page count for display. Sessions whose book was deleted are dropped (JOIN)."""
+    page count for display. Sessions whose book was deleted are dropped (JOIN).
+
+    start/end are optional epoch-second bounds. A session is a stretch of time,
+    not an instant, so the window selects sessions that *overlap* it: one that
+    begins before `start` but runs past it still counts. `end` is exclusive."""
+    where, params = ["1=1"], []
+    if start is not None:
+        where.append("l.updated_at >= ?")
+        params.append(start)
+    if end is not None:
+        where.append("l.started_at < ?")
+        params.append(end)
+    params.append(limit)
     with conn() as c:
         rows = c.execute(
             "SELECT l.book_id, l.started_at, l.updated_at, l.start_pos, l.end_pos, "
-            "l.events, b.title AS title, b.num_pages AS num_pages "
+            "l.events, b.title AS title, b.author AS author, b.num_pages AS num_pages "
             "FROM reading_log l JOIN books b ON b.id=l.book_id "
-            "ORDER BY l.updated_at DESC LIMIT ?", (limit,)).fetchall()
+            f"WHERE {' AND '.join(where)} "
+            "ORDER BY l.updated_at DESC LIMIT ?", params).fetchall()
         return [dict(r) for r in rows]

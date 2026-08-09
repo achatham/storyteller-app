@@ -9,6 +9,10 @@ from fastapi import HTTPException
 def server(monkeypatch, tmp_path):
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("STORY_APP_DB", str(tmp_path / "storyteller.db"))
+    # db caches its path at import, so reload it first -- otherwise every test in
+    # this file shares whichever database the first one happened to create.
+    import webapp.db
+    importlib.reload(webapp.db)
     import webapp.server as module
     return importlib.reload(module)
 
@@ -75,3 +79,100 @@ def test_upload_rate_limit(monkeypatch, tmp_path):
     with pytest.raises(HTTPException) as exc:
         module._check_upload_rate(Request())
     assert exc.value.status_code == 429
+
+
+def test_parse_when_accepts_dates_datetimes_and_epochs(monkeypatch, tmp_path):
+    module = server(monkeypatch, tmp_path)
+    import datetime
+
+    assert module._parse_when(None, "start") is None
+    assert module._parse_when("", "start") is None
+    assert module._parse_when("1786303931", "start") == 1786303931.0
+
+    midnight = datetime.datetime(2026, 8, 1).timestamp()
+    assert module._parse_when("2026-08-01", "start") == midnight
+    assert module._parse_when("2026-08-01T09:30", "start") == midnight + 9.5 * 3600
+    assert module._parse_when("2026-08-01 09:30:15", "start") == midnight + 9.5 * 3600 + 15
+
+    # a bare date as the upper bound covers that whole day (exclusive next midnight)
+    assert module._parse_when("2026-08-01", "end", end_of_day=True) == midnight + 86400
+    # ...but an explicit time is taken literally
+    assert module._parse_when("2026-08-01T09:30", "end", end_of_day=True) == midnight + 9.5 * 3600
+
+    with pytest.raises(HTTPException) as exc:
+        module._parse_when("last tuesday", "start")
+    assert exc.value.status_code == 400
+
+
+def test_history_export_filters_by_date_range(monkeypatch, tmp_path):
+    module = server(monkeypatch, tmp_path)
+    module.db.init()
+    bid = module.db.create_book("Title", "Author", "book.pdf", "watercolor", 200, "5",
+                                "application/pdf", b"%PDF-test")
+    with module.db.conn() as c:
+        c.execute("UPDATE books SET num_pages=100 WHERE id=?", (bid,))
+
+    import datetime
+
+    def at(day, hour):
+        return datetime.datetime(2026, 8, day, hour).timestamp()
+
+    # three half-hour sessions on the 1st, 5th and 9th
+    for day, start_pos, end_pos in ((1, 0, 9), (5, 10, 24), (9, 25, 59)):
+        with module.db.conn() as c:
+            c.execute("INSERT INTO reading_log(book_id,started_at,updated_at,"
+                      "start_pos,end_pos,events) VALUES (?,?,?,?,?,?)",
+                      (bid, at(day, 12), at(day, 12) + 1800, start_pos, end_pos, 12))
+
+    assert module.api_history_export()["count"] == 3
+    assert module.api_history_export(start="2026-08-05")["count"] == 2
+    assert module.api_history_export(end="2026-08-05")["count"] == 2   # end date included
+    assert module.api_history_export(start="2026-08-05", end="2026-08-05")["count"] == 1
+    assert module.api_history_export(start="2026-08-02", end="2026-08-04")["count"] == 0
+
+    newest = module.api_history_export(start="2026-08-09")["sessions"][0]
+    assert newest["title"] == "Title"
+    assert (newest["start_page"], newest["end_page"]) == (26, 60)   # 0-based -> page numbers
+    assert newest["pages_read"] == 35
+    assert newest["duration_seconds"] == 1800
+    assert newest["percent_complete"] == 60.0
+    assert newest["started_at_iso"].startswith("2026-08-09T12:00:00")
+
+    with pytest.raises(HTTPException) as exc:
+        module.api_history_export(start="2026-08-09", end="2026-08-01")
+    assert exc.value.status_code == 400
+
+
+def test_history_export_covers_sessions_straddling_the_boundary(monkeypatch, tmp_path):
+    """A session running across midnight belongs to both days' windows, so an
+    export of either day still sees it."""
+    module = server(monkeypatch, tmp_path)
+    module.db.init()
+    bid = module.db.create_book("Title", "Author", "book.pdf", "watercolor", 200, "5",
+                                "application/pdf", b"%PDF-test")
+    import datetime
+    start = datetime.datetime(2026, 8, 4, 23, 45).timestamp()
+    with module.db.conn() as c:
+        c.execute("INSERT INTO reading_log(book_id,started_at,updated_at,"
+                  "start_pos,end_pos,events) VALUES (?,?,?,?,?,?)",
+                  (bid, start, start + 3600, 0, 20, 20))
+
+    assert module.api_history_export(start="2026-08-04", end="2026-08-04")["count"] == 1
+    assert module.api_history_export(start="2026-08-05", end="2026-08-05")["count"] == 1
+
+
+def test_history_export_flags_truncation(monkeypatch, tmp_path):
+    module = server(monkeypatch, tmp_path)
+    module.db.init()
+    bid = module.db.create_book("Title", "Author", "book.pdf", "watercolor", 200, "5",
+                                "application/pdf", b"%PDF-test")
+    import datetime
+    base = datetime.datetime(2026, 8, 1, 12).timestamp()
+    for n in range(3):
+        with module.db.conn() as c:
+            c.execute("INSERT INTO reading_log(book_id,started_at,updated_at,"
+                      "start_pos,end_pos,events) VALUES (?,?,?,?,?,?)",
+                      (bid, base + n * 7200, base + n * 7200 + 600, n, n + 1, 2))
+
+    assert module.api_history_export(limit=2)["truncated"] is True
+    assert module.api_history_export(limit=5)["truncated"] is False

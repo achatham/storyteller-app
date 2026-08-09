@@ -229,7 +229,12 @@ function goPage(n, force){
   page = Math.max(0, Math.min(pages-1, n));
   setX(-page*stride(), !force);   // force => jump (no page-turn animation)
   $("#bar").style.width = ((page+1)/pages*100) + "%";
-  $("#pageno").textContent = `${(META.chapters[CH]||{}).title||""} — ${page+1}/${pages}`;
+  // The bar and page count are chapter-local; the percentage is whole-book, so it
+  // agrees with the library's progress and with the single-page reader.
+  const pos = bookPos();
+  const pct = pos === null ? null : Math.round((pos+1)/META.num_pages*100);
+  $("#pageno").textContent = `${(META.chapters[CH]||{}).title||""} — ${page+1}/${pages}`
+      + (pct === null ? "" : ` · ${pct}%`);
   loadVisibleImages();
   save();
 }
@@ -292,17 +297,22 @@ function posToChapterFrac(pos){
 // (position / num_pages). This view paginates by chapter + reflowed page, so map
 // the current spot onto that index: chapter start + how far through the chapter we
 // are. Debounced so a flurry of page turns is one write.
-let progT = null;
-function reportProgress(){
-  if (!META || !META.num_pages) return;
+function bookPos(){
+  if (!META || !META.num_pages) return null;
   const chs = META.chapters || [];
   const i = chs.findIndex(c => c.idx === CH);
-  if (i < 0) return;
+  if (i < 0) return null;
   const start = chs[i].first_page || 0;
   const end = (i + 1 < chs.length) ? (chs[i + 1].first_page || META.num_pages) : META.num_pages;
   const span = Math.max(1, end - start);
   const frac = pages > 1 ? page / (pages - 1) : 1;     // 0 at chapter start, 1 at its last page
-  const pos = Math.min(META.num_pages - 1, Math.max(0, Math.round(start + frac * (span - 1))));
+  return Math.min(META.num_pages - 1, Math.max(0, Math.round(start + frac * (span - 1))));
+}
+
+let progT = null;
+function reportProgress(){
+  const pos = bookPos();
+  if (pos === null) return;
   clearTimeout(progT);
   progT = setTimeout(() => {
     fetch(API + "/progress", {method:"PUT", headers:{"Content-Type":"application/json"},
