@@ -229,6 +229,11 @@ CREATE TABLE IF NOT EXISTS reading_log (
     updated_at  REAL,
     start_pos   INTEGER,
     end_pos     INTEGER,
+    -- Furthest page reached during the session. end_pos is wherever the reader
+    -- happened to stop, which moves *backwards* when they page back to re-read;
+    -- keeping the high-water mark separately is what lets progress be reported
+    -- without it regressing mid-session.
+    max_pos     INTEGER,
     events      INTEGER DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS reading_log_book ON reading_log(book_id, updated_at);
@@ -284,6 +289,15 @@ def init():
         scols = {r["name"] for r in c.execute("PRAGMA table_info(scenes)")}
         if "trace" not in scols:   # per-attempt critique/revise log (JSON)
             c.execute("ALTER TABLE scenes ADD COLUMN trace TEXT")
+        lcols = {r["name"] for r in c.execute("PRAGMA table_info(reading_log)")}
+        if "max_pos" not in lcols:
+            c.execute("ALTER TABLE reading_log ADD COLUMN max_pos INTEGER")
+            # Best available backfill: pre-existing rows only recorded where the
+            # session began and ended, so the furthest known point is the later
+            # of the two. Sessions that peaked mid-way and paged back are
+            # under-counted, which is not recoverable from what was stored.
+            c.execute("UPDATE reading_log SET max_pos=MAX(start_pos, end_pos) "
+                      "WHERE max_pos IS NULL")
         c.execute("UPDATE schema_version SET version=1")
 
 
@@ -1246,12 +1260,16 @@ def log_reading(book_id, position):
                 c.execute("UPDATE reading_log SET updated_at=? WHERE id=?",
                           (now, r["id"]))
             else:
+                # max_pos only ever climbs, so paging back to re-read a passage
+                # doesn't erase how far the session actually got
                 c.execute("UPDATE reading_log SET end_pos=?, updated_at=?, "
-                          "events=events+1 WHERE id=?", (position, now, r["id"]))
+                          "max_pos=MAX(COALESCE(max_pos, start_pos), ?), "
+                          "events=events+1 WHERE id=?",
+                          (position, now, position, r["id"]))
         else:
             c.execute("INSERT INTO reading_log(book_id,started_at,updated_at,"
-                      "start_pos,end_pos,events) VALUES (?,?,?,?,?,1)",
-                      (book_id, now, now, position, position))
+                      "start_pos,end_pos,max_pos,events) VALUES (?,?,?,?,?,?,1)",
+                      (book_id, now, now, position, position, position))
 
 
 def reading_history(limit=200, start=None, end=None) -> list[dict]:
@@ -1272,6 +1290,7 @@ def reading_history(limit=200, start=None, end=None) -> list[dict]:
     with conn() as c:
         rows = c.execute(
             "SELECT l.book_id, l.started_at, l.updated_at, l.start_pos, l.end_pos, "
+            "COALESCE(l.max_pos, MAX(l.start_pos, l.end_pos)) AS max_pos, "
             "l.events, b.title AS title, b.author AS author, b.num_pages AS num_pages "
             "FROM reading_log l JOIN books b ON b.id=l.book_id "
             f"WHERE {' AND '.join(where)} "

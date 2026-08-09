@@ -1102,9 +1102,15 @@ def api_history_export(start: str | None = None, end: str | None = None,
             # positions are 0-based internally; export them as human page numbers
             "start_page": s["start_pos"] + 1,
             "end_page": s["end_pos"] + 1,
-            "pages_read": max(0, s["end_pos"] - s["start_pos"]) + 1,
+            # Where the session got to, which is not the same as where it stopped:
+            # paging back to re-read leaves end_page behind furthest_page.
+            "furthest_page": s["max_pos"] + 1,
+            # Span of the book touched in this sitting. Measured from the lowest
+            # to the highest page seen, so reading that doubles back still counts
+            # the ground it covered instead of collapsing to a single page.
+            "pages_read": s["max_pos"] - min(s["start_pos"], s["end_pos"]) + 1,
             "book_pages": pages,
-            "percent_complete": round((s["end_pos"] + 1) / pages * 100, 1) if pages else None,
+            "percent_complete": round((s["max_pos"] + 1) / pages * 100, 1) if pages else None,
             "page_turns": s["events"],
         })
     return {

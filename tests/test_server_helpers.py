@@ -208,3 +208,45 @@ def test_parse_when_uses_the_configured_timezone(monkeypatch, tmp_path):
         else:
             os.environ["TZ"] = previous
         time.tzset()
+
+
+def test_paging_back_does_not_erase_session_progress(monkeypatch, tmp_path):
+    """Re-reading a passage moves end_pos backwards. The session should still
+    report how far it actually got, and count the ground it covered."""
+    module = server(monkeypatch, tmp_path)
+    module.db.init()
+    bid = module.db.create_book("Title", "Author", "book.pdf", "watercolor", 200, "5",
+                                "application/pdf", b"%PDF-test")
+    with module.db.conn() as c:
+        c.execute("UPDATE books SET num_pages=100 WHERE id=?", (bid,))
+
+    # read forwards to page 50 (index 49), then page back to 40 to re-read
+    for pos in (30, 40, 49, 45, 39):
+        module.db.log_reading(bid, pos)
+
+    session = module.api_history_export()["sessions"][0]
+    assert session["start_page"] == 31
+    assert session["end_page"] == 40          # where they stopped
+    assert session["furthest_page"] == 50     # where they got to
+    assert session["pages_read"] == 20        # pages 31..50, not 1
+    assert session["percent_complete"] == 50.0   # from the high-water mark
+    assert session["page_turns"] == 5
+
+
+def test_history_backfills_max_pos_for_pre_existing_rows(monkeypatch, tmp_path):
+    """Rows written before max_pos existed still export sane numbers."""
+    module = server(monkeypatch, tmp_path)
+    module.db.init()
+    bid = module.db.create_book("Title", "Author", "book.pdf", "watercolor", 200, "5",
+                                "application/pdf", b"%PDF-test")
+    with module.db.conn() as c:
+        c.execute("UPDATE books SET num_pages=100 WHERE id=?", (bid,))
+        # simulate a legacy backwards session: started at 60, ended at 50
+        c.execute("INSERT INTO reading_log(book_id,started_at,updated_at,"
+                  "start_pos,end_pos,max_pos,events) VALUES (?,?,?,?,?,NULL,?)",
+                  (bid, 1786000000.0, 1786001800.0, 59, 49, 12))
+
+    session = module.api_history_export()["sessions"][0]
+    assert session["furthest_page"] == 60     # falls back to the later of the two
+    assert session["pages_read"] == 11        # pages 50..60
+    assert session["percent_complete"] == 60.0
