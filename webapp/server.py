@@ -1044,6 +1044,13 @@ def api_history():
 _DATE_FORMATS = ("%Y-%m-%d", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S",
                  "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S")
 
+# Pages per report above which a session is reporting a position jump rather than
+# reading. Measured against real history, sittings run about 0.65 pages/turn and
+# the one jump in it runs 11.5, so this sits well clear of both. Reported as a
+# flag rather than filtered here: whether a jump counts as reading is the
+# consumer's call, and dropping rows silently would hide them from every caller.
+JUMP_PAGES_PER_TURN = 3.0
+
 
 def _parse_when(value: str | None, name: str, end_of_day: bool = False) -> float | None:
     """Parse one bound of the export window into epoch seconds, or None if unset.
@@ -1080,7 +1087,11 @@ def api_history_export(start: str | None = None, end: str | None = None,
     seconds); either may be omitted for an open end. Sessions overlapping the
     window are included. Times are reported both as epoch seconds and as local
     ISO-8601 (offset included), and the response names the zone it used, so the
-    consumer never has to guess one."""
+    consumer never has to guess one.
+
+    Every session is returned; `looks_like_jump` marks the ones whose position
+    moved faster than reading can account for, so a caller can drop them without
+    this endpoint deciding on its behalf."""
     lo = _parse_when(start, "start")
     hi = _parse_when(end, "end", end_of_day=True)
     if lo is not None and hi is not None and hi < lo:
@@ -1090,6 +1101,8 @@ def api_history_export(start: str | None = None, end: str | None = None,
     sessions = []
     for s in db.reading_history(limit=limit, start=lo, end=hi):
         pages = s["num_pages"] or 0
+        covered = s["max_pos"] - min(s["start_pos"], s["end_pos"]) + 1
+        per_turn = covered / max(1, s["events"])
         sessions.append({
             "book_id": s["book_id"],
             "title": s["title"],
@@ -1108,10 +1121,16 @@ def api_history_export(start: str | None = None, end: str | None = None,
             # Span of the book touched in this sitting. Measured from the lowest
             # to the highest page seen, so reading that doubles back still counts
             # the ground it covered instead of collapsing to a single page.
-            "pages_read": s["max_pos"] - min(s["start_pos"], s["end_pos"]) + 1,
+            "pages_read": covered,
             "book_pages": pages,
             "percent_complete": round((s["max_pos"] + 1) / pages * 100, 1) if pages else None,
             "page_turns": s["events"],
+            # How far the position moved per report. Real reading sits near one
+            # page per turn; a big number means the position jumped rather than
+            # advanced -- opening to a restored spot, or the two-column view
+            # mapping a chapter change onto a page index. See JUMP_PAGES_PER_TURN.
+            "pages_per_turn": round(per_turn, 2),
+            "looks_like_jump": per_turn > JUMP_PAGES_PER_TURN,
         })
     return {
         "start": _iso(lo), "end": _iso(hi),

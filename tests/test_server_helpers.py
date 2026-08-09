@@ -250,3 +250,32 @@ def test_history_backfills_max_pos_for_pre_existing_rows(monkeypatch, tmp_path):
     assert session["furthest_page"] == 60     # falls back to the later of the two
     assert session["pages_read"] == 11        # pages 50..60
     assert session["percent_complete"] == 60.0
+
+
+def test_export_flags_position_jumps_without_dropping_them(monkeypatch, tmp_path):
+    """A chapter jump moves the position far faster than reading can. Those
+    sessions are flagged, not filtered -- whether they count is the caller's call."""
+    module = server(monkeypatch, tmp_path)
+    module.db.init()
+    bid = module.db.create_book("Title", "Author", "book.pdf", "watercolor", 200, "5",
+                                "application/pdf", b"%PDF-test")
+    with module.db.conn() as c:
+        c.execute("UPDATE books SET num_pages=400 WHERE id=?", (bid,))
+        # a real sitting: 20 pages over 22 reports
+        c.execute("INSERT INTO reading_log(book_id,started_at,updated_at,"
+                  "start_pos,end_pos,max_pos,events) VALUES (?,?,?,?,?,?,?)",
+                  (bid, 1786000000.0, 1786003600.0, 100, 119, 119, 22))
+        # a jump: 92 pages over 8 reports
+        c.execute("INSERT INTO reading_log(book_id,started_at,updated_at,"
+                  "start_pos,end_pos,max_pos,events) VALUES (?,?,?,?,?,?,?)",
+                  (bid, 1786100000.0, 1786100486.0, 0, 91, 91, 8))
+
+    sessions = module.api_history_export()["sessions"]
+    assert len(sessions) == 2                      # nothing is dropped
+    jump = next(s for s in sessions if s["pages_read"] == 92)
+    real = next(s for s in sessions if s["pages_read"] == 20)
+
+    assert jump["pages_per_turn"] == 11.5
+    assert jump["looks_like_jump"] is True
+    assert real["pages_per_turn"] == 0.91
+    assert real["looks_like_jump"] is False
