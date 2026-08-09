@@ -176,3 +176,35 @@ def test_history_export_flags_truncation(monkeypatch, tmp_path):
 
     assert module.api_history_export(limit=2)["truncated"] is True
     assert module.api_history_export(limit=5)["truncated"] is False
+
+
+def test_parse_when_uses_the_configured_timezone(monkeypatch, tmp_path):
+    """Bare dates resolve in the server's zone, which is why the container pins TZ.
+    Left on UTC, an evening's reading here lands under the following day."""
+    import os
+    import time
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    module = server(monkeypatch, tmp_path)
+    module.db.init()
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Los_Angeles"
+    time.tzset()
+    try:
+        pacific = ZoneInfo("America/Los_Angeles")
+        assert module._parse_when("2026-08-01", "start") == \
+            datetime(2026, 8, 1, tzinfo=pacific).timestamp()
+        # the upper bound still stretches to the end of that day, in the same zone
+        assert module._parse_when("2026-08-01", "end", end_of_day=True) == \
+            datetime(2026, 8, 2, tzinfo=pacific).timestamp()
+        # an evening session stays on the day it was actually read
+        evening = datetime(2026, 8, 1, 20, 30, tzinfo=pacific).timestamp()
+        assert module._iso(evening).startswith("2026-08-01T20:30:00-07:00")
+        assert module.api_history_export()["timezone"] == "America/Los_Angeles"
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()

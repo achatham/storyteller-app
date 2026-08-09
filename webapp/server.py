@@ -1079,7 +1079,8 @@ def api_history_export(start: str | None = None, end: str | None = None,
     ?start= and ?end= bound the window (YYYY-MM-DD, ISO-8601 datetime, or epoch
     seconds); either may be omitted for an open end. Sessions overlapping the
     window are included. Times are reported both as epoch seconds and as local
-    ISO-8601, so the consumer doesn't have to guess a timezone."""
+    ISO-8601 (offset included), and the response names the zone it used, so the
+    consumer never has to guess one."""
     lo = _parse_when(start, "start")
     hi = _parse_when(end, "end", end_of_day=True)
     if lo is not None and hi is not None and hi < lo:
@@ -1108,6 +1109,9 @@ def api_history_export(start: str | None = None, end: str | None = None,
         })
     return {
         "start": _iso(lo), "end": _iso(hi),
+        # Bare dates are resolved in this zone, so name it rather than making the
+        # caller infer it from an offset that shifts with daylight saving.
+        "timezone": os.environ.get("TZ") or time.strftime("%Z"),
         "count": len(sessions), "truncated": len(sessions) == limit,
         "sessions": sessions,
     }

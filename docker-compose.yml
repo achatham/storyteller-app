@@ -12,6 +12,10 @@ services:
     env_file:
       - .env          # must define GEMINI_API_KEY=...
     environment:
+      # Reading happens in local time, so the container reports it that way: a
+      # date-bounded history export otherwise splits an evening's reading across
+      # two days, since UTC midnight falls at 5pm here.
+      TZ: "${TZ:-America/Los_Angeles}"
       STORY_PREFETCH: "4"          # pages to draw ahead while reading
       STORY_WARM_PAGES: "2"        # first pages drawn during import (instant open)
       STORY_GEN_CONCURRENCY: "3"   # max simultaneous image generations
