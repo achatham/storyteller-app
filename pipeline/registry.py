@@ -20,6 +20,7 @@ The result, registry.json, is the backbone the per-section analyze + the shared
 canonical sheets both build on.
 """
 import json
+import re
 
 from . import gem
 from .extract import full_story_text
@@ -55,6 +56,7 @@ Rules:
 - VARIANTS = the distinct LOOKS an entity has across the book. Reason through the story in order and segment each character's appearance into the separate looks they actually have: start a new variant wherever their clothing, gear/weapons, age, grooming, or physical condition changes enough that drawing them the SAME in both places would be wrong. Give each variant a "when" span (chapters/scenes) and make the spans cover the whole book in reading order WITHOUT overlapping or being misattributed -- a look that only applies later must not claim the opening, and vice-versa.
 - The first look is simply the earliest segment; capture it like any other. Common triggers for a new variant: moving between different worlds or settings (e.g. everyday real-world clothes before entering a fantasy/secondary world, then that world's dress), donning a uniform/armor/disguise, aging, or a lasting injury.
 - Do not collapse genuinely different looks into one variant, and do not split looks that are essentially the same. A character whose appearance never meaningfully changes can have a single variant; a constant setting/prop may have an empty variants list.
+- A VARIANT IS A DURABLE LOOK, NOT A MOMENT. Only make a variant for how someone looks across a whole stretch of the story. A one-off item worn for a single scene -- a party hat, a costume, a paper crown, a single evening's finery -- is NOT a variant: it belongs to that one page's illustration, and baking it into a variant would put it on every page that variant covers. Never write a "delta" that hedges ("occasionally", "sometimes", "at one point", "for one scene"): if you find yourself hedging, the feature is a moment, so leave it out of the delta entirely and describe only what is true for the WHOLE span.
 - Aim for completeness on importance>=3 entities; you may include minor ones at importance 1-2 but do not pad.
 - Keep each text field short; richness is added in a later pass.
 
@@ -81,7 +83,7 @@ Return JSON only:
   "variants": [
     {{
       "id": "<echo the variant id you are resolving>",
-      "appearance": "<the FULL resolved appearance for this variant: the base look with THIS variant's delta applied, describing the character as a SINGLE figure at THIS one point only. Do NOT mention any other age/state or how they look at other times, and do NOT say they later 'grow into' or 'become' anything -- that belongs to other variants. One figure, one look.>",
+      "appearance": "<the FULL resolved appearance for this variant: the base look with THIS variant's delta applied, describing the character as a SINGLE figure at THIS one point only. Do NOT mention any other age/state or how they look at other times, and do NOT say they later 'grow into' or 'become' anything -- that belongs to other variants. One figure, one look. This appearance is drawn onto EVERY page the variant covers, so include ONLY what is true for the variant's whole span: if the delta mentions something occasional or worn for a single scene (a party hat, a costume, a one-evening accessory), LEAVE IT OUT of both appearance and sheet_prompt and describe the character's usual look instead.>",
       "sheet_prompt": "<a complete, style-AGNOSTIC reference-sheet image prompt for THIS variant, same neutral framing rules as base, no art-style words>"
     }}
   ]
@@ -215,7 +217,31 @@ def expand_one(entity: dict) -> dict:
         r = resolved.get(v["id"], {})
         v["appearance"] = r.get("appearance", "")
         v["sheet_prompt"] = r.get("sheet_prompt", "")
+        flag_momentary_variant(out, v)
     return out
+
+
+# A delta that hedges describes a MOMENT, not a look ("occasionally swapping his
+# pointed hat for a flowered bonnet"). Resolved into an appearance it becomes
+# unconditional, gets drawn onto the reference sheet, and then rides every page the
+# variant covers -- and the scene critic scores that as correct, because the sheet
+# says so. Cheap to detect, so say it loudly rather than silently shipping it.
+HEDGE_RE = re.compile(r"\b(occasionally|sometimes|at one point|at times|momentarily|"
+                      r"for one scene|on one occasion|now and then|at the feast)\b", re.I)
+
+
+def flag_momentary_variant(entity: dict, variant: dict) -> bool:
+    """Warn when a variant's delta hedges but the hedge survived into the appearance
+    the sheet is drawn from. Advisory only -- the roster is editable in the UI."""
+    delta = variant.get("delta") or ""
+    if not HEDGE_RE.search(delta):
+        return False
+    print(f"[registry] WARNING {entity.get('id')}/{variant.get('id')}: delta describes a "
+          f"MOMENTARY look ({HEDGE_RE.search(delta).group(0)!r}) -- a one-scene item baked "
+          f"into this variant will appear on every page it covers. delta: {delta[:160]}",
+          flush=True)
+    variant["momentary_warning"] = delta[:200]
+    return True
 
 
 def build(max_workers: int = 6) -> dict:
