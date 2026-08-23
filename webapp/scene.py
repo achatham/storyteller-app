@@ -16,7 +16,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from pipeline import gem, costs, analyze
+from pipeline import gem, costs, analyze, markup
 from pipeline.config import (STYLES, SHEET_IMAGE_MODEL, PAGE_IMAGE_MODEL, ROSTER_IMAGE_MODEL,
                              LITE_IMAGE_MODEL, MAX_REFS,
                              ANALYZE_MODEL, WEBP_QUALITY, SCENE_MAXW)
@@ -684,7 +684,7 @@ def _chapter_ahead(book_id: int, page: dict) -> str:
     chap = [p for p in db.get_pages(book_id) if p["chapter_idx"] == page["chapter_idx"]]
     chap.sort(key=lambda p: p["idx"])
     pos = next((k for k, p in enumerate(chap) if p["idx"] == page["idx"]), 0)
-    ahead = "\n\n".join(p["read_text"] for p in chap
+    ahead = "\n\n".join(markup.plain(p["read_text"]) for p in chap
                         if p["idx"] > page["idx"] and p.get("read_text"))
     if not ahead.strip():
         return "(This is the final moment of the chapter -- there is nothing later to spoil.)"
@@ -782,7 +782,7 @@ def _resolved_members(book_id, page, registry, chapter_cast):
         if cc.get("entity_id") in remap:
             cc["entity_id"] = remap[cc["entity_id"]]
     spread = {"illustration_brief": page["brief"], "setting": page["setting"],
-              "cast": page_cast, "read_text": page["read_text"]}
+              "cast": page_cast, "read_text": markup.plain(page["read_text"])}
     members = scene_members(spread, cast_index)
     have = {(m["entity_id"], m["variant_id"]) for m in members}
     reg_by_id = {e["id"]: e for e in registry.get("entities", [])}
@@ -869,7 +869,7 @@ def build_scene_context(book_id: int, idx: int) -> dict:
     def _view(m):
         return m.get("view")
 
-    states = _character_states(page["brief"], page["read_text"] or "", members)
+    states = _character_states(page["brief"], markup.plain(page["read_text"] or ""), members)
     for m in members:
         m["state"] = states.get(m.get("name", ""), "")
 
@@ -1039,7 +1039,7 @@ def critique_prompt(ctx: dict) -> str:
     return SCENE_CRITIQUE.format(
         brief=page["brief"], chars=ctx["char_desc"] or "(none)", style=ctx["style_text"],
         roster=ctx["roster"], chapter_ahead=ctx["chapter_ahead"],
-        source=(page["read_text"] or "")[:1200] or "(not available)")
+        source=markup.plain(page["read_text"] or "")[:1200] or "(not available)")
 
 
 def critique_prompt_lite(ctx: dict) -> str:

@@ -498,6 +498,15 @@ def add_page(book_id, idx, chapter_idx, title, read_text, setting, brief, cast,
                    json.dumps(cast, ensure_ascii=False), image_anchor))
 
 
+def update_page_text(book_id, idx, read_text):
+    """Replace one page's text in place. Only the text changes -- page numbering,
+    cast and any illustration already drawn for this page stay as they are (see
+    webapp/reflow.py, which re-applies the source book's formatting)."""
+    with conn() as c:
+        c.execute("UPDATE pages SET read_text=? WHERE book_id=? AND idx=?",
+                  (read_text, book_id, idx))
+
+
 def get_pages(book_id) -> list[dict]:
     with conn() as c:
         rows = c.execute(

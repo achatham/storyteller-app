@@ -25,6 +25,16 @@
   #flow .chtitle .ch { display:block; font-family:system-ui,sans-serif; font-size:.72rem;
           letter-spacing:2px; text-transform:uppercase; color:var(--muted); margin-bottom:.3em; }
   #flow p { font-size:calc(1.18rem * var(--fs,1)); line-height:1.62; margin:0 0 1em; text-align:justify; hyphens:auto; }
+  /* formatting kept from the book itself (see markup.js): section headings,
+     block quotes, verse. Headings stay with the text that follows them. */
+  #flow h2:not(.chtitle), #flow h3, #flow h4, #flow h5, #flow h6 {
+          font-size:calc(1.22rem * var(--fs,1)); font-weight:normal; text-align:center;
+          letter-spacing:1px; margin:.6em 0 .7em; break-after:avoid; color:#5c4b38; }
+  #flow h4, #flow h5, #flow h6 { font-size:calc(1rem * var(--fs,1)); text-transform:uppercase; }
+  #flow blockquote { margin:0 0 1em 1.2em; padding-left:.9em; border-left:2px solid var(--line); }
+  #flow blockquote p { margin:0 0 .5em; text-align:left; }
+  #flow code { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.92em; }
+  #flow hr.scene { border:0; border-top:1px solid var(--line); width:35%; margin:1.2em auto; }
   #flow figure { margin:0 0 1em; break-inside:avoid; aspect-ratio:3/2; border-radius:10px;
           overflow:hidden; background:#ece3d2; box-shadow:0 4px 16px rgba(0,0,0,.16); }
   #flow figure:not(:has(img.on)) { animation:phpulse 1.5s ease-in-out infinite; }
@@ -93,6 +103,7 @@
 </div></div>
 <div id="splash">Loading…</div>
 <script>window.BOOK = __BOOK_JSON__;</script>
+<script>__MARKUP_JS__</script>
 <script>
 // ─────────────────────────────────────────────────────────────────────────────
 //  INTRO — the welcome screen shown when the viewer first opens. EDIT FREELY.
@@ -173,7 +184,7 @@ function loadChapter(ci, toPage){
   const html = [`<h2 class="chtitle"><span class="ch">${esc(data.title)}</span></h2>`];
   for (const n of data.nodes){
     if (n.type === "text")
-      html.push(n.text.split(/\n\s*\n/).map(t => `<p>${esc(t.trim())}</p>`).join(""));
+      html.push(Markup.toHtml(n.text));   // the book's own italics/headings/verse
     else
       html.push(`<figure><img alt="${esc(n.alt||"")}" src="${n.src}" onload="this.classList.add('on')"></figure>`);
   }

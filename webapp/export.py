@@ -62,7 +62,12 @@ def export_book(book_id: int, out_dir, max_pages: int | None = None,
                  "style": book_style, "chapters": chapters_out}
     # inline the data; escape </ so book text can never break out of the <script>
     payload = json.dumps(book_json, ensure_ascii=False).replace("</", "<\\/")
-    html = (STATIC / "export.html").read_text().replace("__BOOK_JSON__", payload)
+    # the export is one self-contained file, so the shared markup renderer that the
+    # live readers load from /static is inlined here instead (substituted before the
+    # book text, which must never be able to introduce a token of its own)
+    html = ((STATIC / "export.html").read_text()
+            .replace("__MARKUP_JS__", (STATIC / "markup.js").read_text())
+            .replace("__BOOK_JSON__", payload))
     (out / "index.html").write_text(html, encoding="utf-8")
     (out / ".nojekyll").write_text("")   # let GitHub Pages serve files verbatim
 

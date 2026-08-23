@@ -212,11 +212,12 @@ def _epub_skeleton():
     spine document with just enough for the model to classify it."""
     from pipeline import extract
     from pipeline.config import PDF
+    from pipeline import markup
     units = extract._epub_units(PDF)          # [(archive_path, text)]
     toc = extract._epub_toc_titles(PDF)       # {archive_path: title}
     skel = []
     for i, (p, text) in enumerate(units):
-        head = " ".join(text.split())[:240]
+        head = " ".join(markup.plain(text).split())[:240]
         skel.append({"i": i, "file": p.rsplit("/", 1)[-1],
                      "toc_title": toc.get(p, ""), "words": len(text.split()),
                      "head": head})
@@ -255,8 +256,13 @@ def chunk_text(text: str, size: int = 1800) -> list[str]:
     return [c for c in chunks if c.strip()] or [text]
 
 
-_GUT_START = re.compile(r"\*\*\*\s*START OF TH(?:E|IS) PROJECT GUTENBERG EBOOK.*?\*\*\*", re.I | re.S)
-_GUT_END = re.compile(r"\*\*\*\s*END OF TH(?:E|IS) PROJECT GUTENBERG EBOOK.*?\*\*\*", re.I | re.S)
+# the banner's asterisks are stored escaped (they are literal text, not emphasis
+# -- see pipeline/markup.py), so match them with or without the backslashes
+_STARS = r"(?:\\?\*){3}"
+_GUT_START = re.compile(_STARS + r"\s*START OF TH(?:E|IS) PROJECT GUTENBERG EBOOK.*?" + _STARS,
+                        re.I | re.S)
+_GUT_END = re.compile(_STARS + r"\s*END OF TH(?:E|IS) PROJECT GUTENBERG EBOOK.*?" + _STARS,
+                      re.I | re.S)
 
 
 def _strip_gutenberg(text: str) -> str:

@@ -3,6 +3,8 @@ anchors. Shared by the live flow API (server.py) and the static exporter
 (export.py) so both produce identical reading layout."""
 import re
 
+from pipeline import markup
+
 from . import db
 
 
@@ -27,7 +29,10 @@ def image_offset(text: str, anchor: str | None) -> int:
     # glob any punctuation / closing quotes that still immediately follow, so a
     # trailing mark (e.g. .”) stays with the text above the picture, not below it.
     g = re.match(r"[.!?,;:…”’\"')\]]+", text[end:])
-    return end + g.end() if g else end
+    end = end + g.end() if g else end
+    # keep the picture out of the middle of an emphasis run, so neither the text
+    # above it nor the text below it is left holding half a marker
+    return markup.safe_split(text, end)
 
 
 def chapter_nodes(book_id, idx, src_for, include=None) -> list[dict]:

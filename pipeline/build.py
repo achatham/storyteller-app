@@ -11,6 +11,7 @@ import json
 
 from PIL import Image
 
+from . import markup
 from .config import OUT, REGISTRY, BOOK_AUTHOR
 from .run import resolve_cast, member_sheet
 
@@ -81,7 +82,7 @@ def main():
       <div class="text">
         <div class="pagenum">{s['id']}</div>
         <h2>{html.escape(s['title'])}</h2>
-        <p>{html.escape(s['read_text'])}</p>
+        {markup.to_html(s['read_text'])}
         <div class="meta">score {score} &middot; {s.get('content_note','')}</div>
         {detail}
       </div>

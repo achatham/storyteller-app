@@ -90,6 +90,29 @@ Reads `GEMINI_API_KEY` from `.env` (same as the CLI pipeline).
   coalesced by a per-page lock; `STORY_GEN_CONCURRENCY` (default 3) caps it.
 - **Progress** is stored server-side per book (`PUT /api/books/{id}/progress`), so
   opening a book picks up where you left off on any device.
+- **The book's own formatting is kept.** Extraction stores page text as *story
+  markup* — a tiny Markdown subset (`*italics*`, `**bold**`, `#` headings, `>`
+  quotes, `---` scene breaks, a trailing `\` for a real line break) defined in
+  `pipeline/markup.py`. Every reader renders it (`markup.to_html`, or its browser
+  twin `static/markup.js`, which the static export inlines); everything that feeds
+  text to a model strips it with `markup.plain`. Keep the Python and JS renderers
+  in step.
+
+### Reformatting a book processed before this
+
+Pages segmented earlier hold flat text. Reprocessing would recover the formatting
+but re-runs segmentation and **discards every illustration**; this re-extracts the
+stored source and swaps the formatted text into the existing pages instead — no
+model calls, no lost art:
+
+```sh
+docker compose exec storyteller python -m webapp.reflow <book_id> --dry-run
+docker compose exec storyteller python -m webapp.reflow <book_id>
+```
+
+A page is only rewritten when its words match the re-extracted text exactly, so a
+page it can't place is left as it was. Readers pick the new text up on reload; a
+saved offline copy needs re-saving.
 
 ## Config (env)
 

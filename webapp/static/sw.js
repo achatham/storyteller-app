@@ -12,7 +12,7 @@
 // saved book reads with zero reader-side offline logic.
 importScripts("/static/offline-idb.js");
 
-const CACHE = "storyteller-v20";   // bumped for the percent-read readout in both readers
+const CACHE = "storyteller-v21";   // bumped for the book-formatting renderer (markup.js)
 
 // The app shell, fetched at install time. Without this the cache only ever held
 // what happened to be requested while a previous worker was already in control --
@@ -24,6 +24,7 @@ const CACHE = "storyteller-v20";   // bumped for the percent-read readout in bot
 const SHELL = [
   "/",
   "/static/auth.js",
+  "/static/markup.js",
   "/static/offline-idb.js",
   "/static/offline.js",
   "/static/manifest.webmanifest",

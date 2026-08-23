@@ -13,11 +13,12 @@ is NOT an EPUB core media type -- Kindle and many older readers won't render it
 import argparse
 import html
 import io
-import re
 import zipfile
 from pathlib import Path
 
 from PIL import Image
+
+from pipeline import markup
 
 from . import db, flow
 
@@ -34,6 +35,15 @@ h1.chapter { font-size: 1.5em; margin: 1.4em 0 0.8em; text-align: center;
              font-weight: normal; }
 p { margin: 0 0 0.9em; text-indent: 1.4em; }
 p.first { text-indent: 0; }
+/* formatting kept from the source book (see pipeline/markup.py) */
+h2, h3, h4, h5, h6 { text-align: center; font-weight: normal; margin: 1.2em 0 0.7em; }
+h2 { font-size: 1.25em; } h3 { font-size: 1.1em; }
+h4, h5, h6 { font-size: 1em; letter-spacing: .08em; text-transform: uppercase; }
+h2 + p, h3 + p, h4 + p, blockquote + p, hr.scene + p { text-indent: 0; }
+blockquote { margin: 1em 2.2em; font-size: .95em; }
+blockquote p { text-indent: 0; margin: 0 0 0.5em; }
+code { font-family: monospace; font-size: .95em; }
+hr.scene { border: 0; margin: 1.4em auto; width: 30%; border-top: 1px solid #bbb; }
 figure { margin: 1.1em 0; text-align: center; page-break-inside: avoid; }
 figure img { max-width: 100%; height: auto; }
 .title-page { text-align: center; margin-top: 22%; }
@@ -49,15 +59,9 @@ def _esc(text: str) -> str:
 
 
 def _paragraphs(text: str) -> str:
-    """Same split as the reader/exporter: blank line separates paragraphs."""
-    parts = [p.strip() for p in re.split(r"\n\s*\n", text or "") if p.strip()]
-    out = []
-    for i, p in enumerate(parts):
-        cls = ' class="first"' if i == 0 else ""
-        # collapse single newlines inside a paragraph to spaces
-        body = _esc(re.sub(r"\s*\n\s*", " ", p))
-        out.append(f"<p{cls}>{body}</p>")
-    return "\n".join(out)
+    """Same rendering as the reader/exporter: the page's story markup as HTML
+    (paragraphs, headings, emphasis, quotes -- see pipeline/markup.py)."""
+    return markup.to_html(text, first_class="first")
 
 
 def _to_jpeg(data: bytes, max_w: int, quality: int) -> bytes:

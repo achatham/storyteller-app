@@ -14,7 +14,7 @@ import json
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from . import gem, sheets, costs
+from . import gem, sheets, costs, markup
 from .config import OUT, REGISTRY, ASSETS, ART_STYLE, LABEL
 from .config import MAX_REFS, PAGE_IMAGE_MODEL  # noqa: E402
 
@@ -226,7 +226,7 @@ def build_scene_prompt(spread: dict, members: list[dict], ref_members: list[dict
         f"Illustrate this scene for a children's picture book:\n{spread['illustration_brief']}\n\n"
         f"Setting: {spread.get('setting','')}\n\n"
     )
-    src = (spread.get("read_text") or "").strip()
+    src = markup.plain(spread.get("read_text") or "").strip()
     if src:
         prompt += (
             "For accuracy, here is the passage this picture accompanies. Illustrate ONLY the single "
@@ -276,7 +276,8 @@ def gen_scene(spread: dict, cast_index: dict, art_style: str, budget: gem.Budget
         log(f"[scene:{sid}] attempt {attempt} -> {cand.name} (budget {budget.remaining()} left)")
         crit = gem.critique_image(
             cand, SCENE_CRITIQUE.format(brief=spread["illustration_brief"],
-                                        source=(spread.get("read_text") or "")[:1200] or "(not available)",
+                                        source=markup.plain(spread.get("read_text") or "")[:1200]
+                                        or "(not available)",
                                         chapter_ahead="(not available)",
                                         chars=char_desc or "(none)", style=ART_STYLE, roster=roster),
             refs=ref_paths, ref_labels=[m["name"] for m in ref_members])

@@ -37,6 +37,16 @@
               font-family:system-ui,sans-serif; }
   .read h2 { font-size:1.5rem; margin:.15em 0 .5em; }
   .read p { font-size:clamp(1.15rem, 1rem + 1vw, 1.7rem); line-height:1.75; margin:0 0 1.2em; }
+  /* formatting kept from the book itself (see /static/markup.js) */
+  .read #text h2, .read #text h3, .read #text h4, .read #text h5, .read #text h6 {
+      font-size:clamp(1.1rem, .95rem + .7vw, 1.4rem); font-weight:normal; text-align:center;
+      letter-spacing:1px; margin:.2em 0 .7em; color:#5c4b38; }
+  .read #text h4, .read #text h5, .read #text h6 { text-transform:uppercase; font-size:1rem; }
+  .read blockquote { margin:0 0 1.2em 1.2em; padding-left:.9em; border-left:2px solid var(--line);
+      font-size:clamp(1.05rem, .95rem + .8vw, 1.5rem); }
+  .read blockquote p { margin:0 0 .5em; font-size:inherit; }
+  .read #text code { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.9em; }
+  .read hr.scene { border:0; border-top:1px solid var(--line); width:35%; margin:1.4em auto; }
 
   @media (orientation:landscape) {
     main { flex-direction:row; align-items:stretch; justify-content:center; overflow:hidden; }
@@ -99,7 +109,7 @@
     <div class="read">
       <div class="ch" id="ch"></div>
       <h2 id="title"></h2>
-      <p id="text"></p>
+      <div id="text"></div>
     </div>
   </main>
   <div class="edge left">&#8249;</div>
@@ -127,10 +137,18 @@
 </div>
 <div id="splash"><div class="ring"></div><span id="splashmsg">Loading…</span></div>
 <script src="/static/auth.js"></script>
+<script src="/static/markup.js"></script>
 <script src="/static/offline-idb.js"></script>
 <script src="/static/offline.js"></script>
 <script>
 const BOOK_ID = __BOOK_ID__;
+// Markup.toHtml renders the book's own formatting; an offline copy saved before
+// markup.js existed falls back to flat paragraphs rather than a blank page.
+function renderText(t){
+  if (window.Markup) return Markup.toHtml(t);
+  return (t||"").split(/\n\s*\n/).map(x =>
+    `<p>${x.trim().replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</p>`).join("");
+}
 const API = "/api/books/" + BOOK_ID;
 const $ = s => document.querySelector(s);
 let DATA = { title:"", pages:[], chapters:[] };
@@ -228,7 +246,9 @@ function render(){
       (DATA.chapters[DATA.chapters.indexOf(c)+1]?.first_page ?? 1e9) > state.i);
   $("#ch").textContent = ch ? ch.title : "";
   $("#title").textContent = p.title;
-  $("#text").textContent = p.text;
+  // the page's stored text carries the book's own formatting (italics, headings,
+  // verse line breaks); render it rather than dumping it into one flat <p>
+  $("#text").innerHTML = renderText(p.text);
   const frac = (state.i+1) / DATA.pages.length;
   const pct = Math.round(frac * 100);
   $("#pos").textContent = `Page ${state.i+1} / ${DATA.pages.length} · ${pct}%`;

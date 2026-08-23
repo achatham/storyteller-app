@@ -12,22 +12,16 @@ import zipfile
 from pathlib import Path
 from pypdf import PdfReader
 
+from . import markup
 from .config import PDF, PAGES, LABEL, BODY_PAGES, IS_EPUB, CHAPTERS
 
 
 # ---------------- EPUB ----------------
 
 def _xhtml_to_text(raw: str) -> str:
-    """Plain text from one XHTML document, preserving paragraph breaks."""
-    raw = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", raw)
-    raw = re.sub(r"(?i)</(p|div|h[1-6]|br|li|tr)\s*>", "\n", raw)
-    raw = re.sub(r"(?i)<br\s*/?>", "\n", raw)
-    raw = re.sub(r"<[^>]+>", " ", raw)
-    raw = _html.unescape(raw)
-    raw = re.sub(r"[ \t]+", " ", raw)
-    raw = re.sub(r"\n[ \t]+", "\n", raw)
-    raw = re.sub(r"\n{3,}", "\n\n", raw)
-    return raw.strip()
+    """One XHTML document as story markup (see pipeline/markup.py): paragraph
+    breaks plus the emphasis, headings and block quotes the source marks up."""
+    return markup.from_html(raw)
 
 
 def _norm(base: str, src: str) -> str:
@@ -151,8 +145,8 @@ def epub_chapters_titled(path: Path = PDF, min_words: int = 150) -> list[tuple[s
             continue
         n += 1
         if not title:
-            first = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
-            title = (first[:60] or f"Chapter {n}")
+            first = next((ln for ln in markup.plain(text).splitlines() if ln.strip()), "")
+            title = (first.strip()[:60] or f"Chapter {n}")
         out.append((title, text))
     return out
 
@@ -198,7 +192,7 @@ def chapter_text(first=PAGES[0], last=PAGES[1]) -> str:
         c0, c1 = CHAPTERS
         return "\n\n".join(chaps[c0 - 1:c1])
     pages = raw_pages(PDF, first, last)
-    return repair_spacing("\n".join(pages))
+    return markup.from_plain(repair_spacing("\n".join(pages)))
 
 
 def full_story_text() -> str:
@@ -211,7 +205,7 @@ def full_story_text() -> str:
     if last <= 0:
         last = len(reader.pages) + last
     pages = raw_pages(PDF, first, last)
-    return repair_spacing("\n".join(pages))
+    return markup.from_plain(repair_spacing("\n".join(pages)))
 
 
 if __name__ == "__main__":

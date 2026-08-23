@@ -5,7 +5,7 @@ into read-aloud spreads each with an illustration brief.
 import json
 import re
 
-from . import gem
+from . import gem, markup
 from .config import (OUT, LABEL, ART_STYLE, VIOLENCE_POLICY, REGISTRY,
                      BOOK_REF, TITLE_OUT, AUDIENCE_AGE, WORDS_PER_PAGE,
                      ANALYZE_MODEL)
@@ -126,6 +126,10 @@ def apply_anchors(chapter_text: str, bible: dict) -> dict:
             located.append((0, s))
             continue
         off = _find_anchor(chapter_text, s.get("start_anchor", ""), cursor)
+        if off is not None:
+            # don't break a page inside *an italicised phrase* -- both halves
+            # would keep one stray marker and render it literally
+            off = markup.safe_split(chapter_text, off)
         if off is not None and off > cursor:
             # the anchor matches the first WORD; pull the break back over an
             # opening quote/bracket glued to it so dialogue keeps its quote mark
