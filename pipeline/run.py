@@ -28,6 +28,14 @@ PASS_THRESHOLD = 4
 # MAX_REFS imported from config (STORY_MAX_REFS) -- pro takes more refs than flash
 WORKERS = 4
 LOCAL_IMPORTANCE = 3  # default rank for section-local characters
+# How much of the page's own text the generator and the critic each see. These used
+# to be 800 and 1200, which left the GENERATOR with less ground truth than its own
+# reviewer: a detail past char 800 (e.g. "just Ron in his paisley pyjamas", at 1078)
+# was invisible when drawing but visible when judging. A page is ~1-2k characters of
+# plain text, so passing the whole thing costs nothing next to one image call.
+SRC_CHARS = 4000
+CRIT_SRC_CHARS = 4000
+
 
 SCENE_CRITIQUE = """You are a strict art director reviewing one illustration for a children's \
 read-aloud picture book (audience: 5 years old).
@@ -232,8 +240,17 @@ def build_scene_prompt(spread: dict, members: list[dict], ref_members: list[dict
             "For accuracy, here is the passage this picture accompanies. Illustrate ONLY the single "
             "moment described in the brief above -- do NOT add other events from the passage. Use it "
             "just to get concrete, visible details right (who is present, what they hold or wear, "
-            f"whether anyone is bound, hurt, or carrying something):\n\"{src[:800]}\"\n\n"
+            f"whether anyone is bound, hurt, or carrying something):\n\"{src[:SRC_CHARS]}\"\n\n"
+            "The passage is GROUND TRUTH. The brief and the character descriptions below are "
+            "generated from it and can be wrong or out of date: where a description says a "
+            "character wears one thing but the passage says otherwise AT THIS MOMENT (e.g. the "
+            "passage puts them in pyjamas while the description shows school clothes), draw what "
+            "the PASSAGE says.\n\n"
         )
+    anchor = (spread.get("image_anchor") or "").strip()
+    if anchor:
+        prompt += (f"The picture belongs at this exact beat of the passage: \"{anchor}\". Any "
+                   "concrete visible detail in that phrase must be shown.\n\n")
     prompt += f"Characters present and their canonical looks:\n{char_desc}\n\n"
     if has_state:
         prompt += ("Each character's 'RIGHT NOW' note is that specific person's state at this moment "
@@ -276,7 +293,7 @@ def gen_scene(spread: dict, cast_index: dict, art_style: str, budget: gem.Budget
         log(f"[scene:{sid}] attempt {attempt} -> {cand.name} (budget {budget.remaining()} left)")
         crit = gem.critique_image(
             cand, SCENE_CRITIQUE.format(brief=spread["illustration_brief"],
-                                        source=markup.plain(spread.get("read_text") or "")[:1200]
+                                        source=markup.plain(spread.get("read_text") or "")[:CRIT_SRC_CHARS]
                                         or "(not available)",
                                         chapter_ahead="(not available)",
                                         chars=char_desc or "(none)", style=ART_STYLE, roster=roster),

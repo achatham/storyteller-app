@@ -72,7 +72,7 @@ def recompress_book(book_id) -> dict:
             "saved_kb": (before - after) // 1024}
 from pipeline.run import (resolve_cast, scene_members, build_scene_prompt,
                           roster_digest, SCENE_CRITIQUE, SCENE_CRITIQUE_SCHEMA,
-                          PASS_THRESHOLD)
+                          PASS_THRESHOLD, CRIT_SRC_CHARS)
 from . import db
 
 SCENE_TRIES = int(os.environ.get("STORY_SCENE_TRIES", "3"))  # max image attempts per scene
@@ -782,7 +782,8 @@ def _resolved_members(book_id, page, registry, chapter_cast):
         if cc.get("entity_id") in remap:
             cc["entity_id"] = remap[cc["entity_id"]]
     spread = {"illustration_brief": page["brief"], "setting": page["setting"],
-              "cast": page_cast, "read_text": markup.plain(page["read_text"])}
+              "cast": page_cast, "read_text": markup.plain(page["read_text"]),
+              "image_anchor": page.get("image_anchor") or ""}
     members = scene_members(spread, cast_index)
     have = {(m["entity_id"], m["variant_id"]) for m in members}
     reg_by_id = {e["id"]: e for e in registry.get("entities", [])}
@@ -1039,7 +1040,7 @@ def critique_prompt(ctx: dict) -> str:
     return SCENE_CRITIQUE.format(
         brief=page["brief"], chars=ctx["char_desc"] or "(none)", style=ctx["style_text"],
         roster=ctx["roster"], chapter_ahead=ctx["chapter_ahead"],
-        source=markup.plain(page["read_text"] or "")[:1200] or "(not available)")
+        source=markup.plain(page["read_text"] or "")[:CRIT_SRC_CHARS] or "(not available)")
 
 
 def critique_prompt_lite(ctx: dict) -> str:
