@@ -1185,7 +1185,9 @@ def _render_scene(book_id: int, idx: int, fast_critique: bool = False) -> bytes:
             # every attempt's critique was blocked -> store the last drawn image unscored
             # (an illustration beats a blank; the reader can redraw it if it looks off).
             data, score, chosen = last_cand, None, SCENE_TRIES
-            trace["fallback"] = "kept last candidate (critique blocked every attempt)"
+            trace["fallback"] = ("kept last candidate UNSCORED -- the critique call itself "
+                                 "was blocked/empty on every attempt, so this page was never "
+                                 "actually reviewed (scenes.score IS NULL)")
         else:
             # nothing to store: every attempt's IMAGE generation was blocked/empty too.
             raise RuntimeError(f"page {idx}: image generation was blocked/empty on every "
