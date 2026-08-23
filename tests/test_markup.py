@@ -84,3 +84,49 @@ def test_page_breaks_and_image_anchors_use_safe_split():
 
     pos = flow.image_offset(chapter, "this is all over")
     assert chapter[:pos].count("*") % 2 == 0
+
+
+def test_emphasis_that_spans_blocks_survives_as_emphasis():
+    # a whole song inside one <i>: every block must come out self-contained
+    text = markup.from_html("<i><p>Weasley is our King,</p>"
+                            "<p>He didn't let the Quaffle in,</p></i>")
+    assert text == "*Weasley is our King,*\n\n*He didn't let the Quaffle in,*"
+    assert markup.to_html(text).count("<em>") == 2
+
+
+def test_emphasis_that_spans_a_line_break_renders_as_one_run():
+    text = markup.from_html("<p><i>Weasley is our King,<br/>He didn't let it in,</i></p>")
+    assert markup.to_html(text) == ("<p><em>Weasley is our King,<br/>"
+                                    "He didn't let it in,</em></p>")
+
+
+def test_balance_repairs_a_run_a_cut_left_hanging():
+    # text sliced at boundaries chosen before this format existed (reflow)
+    assert markup.balance("It's *outrageous") == "It's *outrageous*"
+    assert markup.balance("outrageous!* she said") == "*outrageous!* she said"
+    assert markup.balance("a *b* and *c") == "a *b* and *c*"
+    assert markup.balance("nothing to repair") == "nothing to repair"
+    # each block is repaired on its own, and matched runs are left alone
+    assert markup.balance("*whole* one\n\n*half") == "*whole* one\n\n*half*"
+
+
+def test_bold_italic_is_one_run():
+    text = markup.from_html("<p><b><i>Just in case.</i></b></p>")
+    assert text == "***Just in case.***"
+    assert markup.to_html(text) == "<p><strong><em>Just in case.</em></strong></p>"
+    assert markup.balance(text) == text        # nothing hanging to repair
+
+
+def test_balance_repairs_inside_a_block_prefix():
+    # the marker belongs after the "> ", not in front of it
+    assert (markup.balance("> *Treat your taste buds\\\n> before it melts")
+            == "> *Treat your taste buds\\\n> before it melts*")
+    assert markup.balance("## *A heading cut in half") == "## *A heading cut in half*"
+
+
+def test_an_unpairable_marker_never_reaches_the_reader():
+    # source markup that interleaves runs across a tag boundary leaves one behind
+    assert markup.to_html("look at the* Daily Prophet *tomorrow") == \
+        "<p>look at the Daily Prophet tomorrow</p>"
+    # ...but a marker the book itself used stays, because it is escaped
+    assert markup.to_html(markup.from_html("<p>3 * 4</p>")) == "<p>3 * 4</p>"

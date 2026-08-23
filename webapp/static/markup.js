@@ -35,8 +35,13 @@ window.Markup = (function () {
     s = s.replace(/`([^`\n]+)`/g, "<code>$1</code>");
     // (no lookbehind: still unsupported on older iPad Safari, and a SyntaxError
     // here would take the whole reader down)
+    s = s.replace(/\*\*\*(\S|\S.*?\S)\*\*\*/g, "<strong><em>$1</em></strong>");
     s = s.replace(/\*\*(\S|\S.*?\S)\*\*/g, "<strong>$1</strong>");
     s = s.replace(/\*(\S|\S[^*\n]*?\S)\*/g, "<em>$1</em>");
+    // a marker nothing could pair with is junk (source markup that interleaves runs,
+    // or a slice cut mid-run); literal ones from the book are escaped, and escapes
+    // are held aside until restore(), so this only ever drops our own
+    s = s.replace(/[*`]/g, "");
     return restore(s);
   }
 
@@ -46,16 +51,21 @@ window.Markup = (function () {
   // ODD number of them, since a literal backslash from the book is stored doubled.
   const breaks = l => (l.length - l.replace(/\\+$/, "").length) % 2 === 1;
 
+  // The whole block goes through inline() in ONE pass, with breaks held as a
+  // placeholder rather than a newline, so an emphasis run covering several lines
+  // of a verse renders as emphasis instead of stray asterisks.
+  const BREAK = "\u0001";
+
   function linesHtml(lines) {
-    const out = [];
+    const parts = [];
     lines.forEach((line, i) => {
       let l = line.trim();
       const hard = breaks(l);
       if (hard) l = l.slice(0, -1).replace(/\s+$/, "");
-      out.push(inline(l));
-      if (i < lines.length - 1) out.push(hard ? "<br>" : " ");
+      parts.push(l);
+      if (i < lines.length - 1) parts.push(hard ? BREAK : " ");
     });
-    return out.join("");
+    return inline(parts.join("")).split(BREAK).join("<br>");
   }
 
   function blocks(text) {

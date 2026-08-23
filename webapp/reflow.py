@@ -117,7 +117,9 @@ def reflow_book(book_id: int, apply: bool = True) -> dict:
             continue
         span = _expand(fresh, m.start(), m.end())
         cursor = span[1]
-        slice_ = fresh[span[0]:span[1]].strip()
+        # the old page boundaries were chosen on unformatted text, so a slice can
+        # begin or end inside an emphasis run -- give the half-run its marker back
+        slice_ = markup.balance(fresh[span[0]:span[1]].strip())
         if _key(markup.plain(slice_)) != "".join(kept):   # never trust a fuzzy match
             skipped.append(p["idx"])
             continue

@@ -37,12 +37,15 @@ _ESCAPED = re.compile(r"\\([" + re.escape(_SPECIAL) + r"])")
 # an escaped character is pulled out of the stream entirely while we render, so
 # it can never take part in a marker match; \x00 cannot occur in book text
 _SENTINEL = "\x00"
+# stands in for a hard line break while a block is rendered as one string
+_BREAK = "\x01"
 _CODE = {c: chr(ord("a") + i) for i, c in enumerate(_SPECIAL)}
 _DECODE = {v: k for k, v in _CODE.items()}
 
 # inline runs, longest marker first so **bold** wins over *italic*
 _SPAN = re.compile(
-    r"\*\*(?=\S)(?:.+?)(?<=\S)\*\*"
+    r"\*\*\*(?=\S)(?:.+?)(?<=\S)\*\*\*"
+    r"|\*\*(?=\S)(?:.+?)(?<=\S)\*\*"
     r"|\*(?=\S)[^*\n]+?(?<=\S)\*"
     r"|`[^`\n]+`")
 
@@ -125,9 +128,15 @@ class _Reader(HTMLParser):
 
     # -- blocks -----------------------------------------------------------
     def _flush(self) -> None:
-        while self.open:                   # a run never survives its block
+        # A run never survives its block -- but the source may hold one open
+        # across several (a whole song in one <i>), so close it here and re-open
+        # it in the next block, leaving every block self-contained.
+        carry = [(tag, marker) for tag, marker, _at in self.open]
+        while self.open:
             self._close_inline()
         text, self.cur = self.cur, ""
+        for tag, marker in carry:
+            self._open_inline(tag, marker)
         lines = text.split("\n")
         lines = [ln.rstrip() if self.pre else ln.strip() for ln in lines]
         while lines and not lines[0].strip():
@@ -235,8 +244,14 @@ def _inline(s: str) -> str:
     """Render one line's inline markup to HTML (escaping the text first)."""
     s = _protect(_html.escape(s, quote=False))
     s = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", s)
+    s = re.sub(r"\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*", r"<strong><em>\1</em></strong>", s)
     s = re.sub(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", r"<strong>\1</strong>", s)
     s = re.sub(r"\*(?=\S)([^*\n]+?)(?<=\S)\*", r"<em>\1</em>", s)
+    # A marker still standing here is one nothing could pair with -- source markup
+    # that interleaves runs across a tag boundary, or a slice cut mid-run. A reader
+    # should never see it; a marker the BOOK used literally is escaped, and escapes
+    # are held aside until _restore, so this only ever drops our own.
+    s = re.sub(r"[*`]", "", s)
     return _restore(s)
 
 
@@ -248,17 +263,21 @@ def _breaks(line: str) -> bool:
 
 def _lines_html(lines: list[str]) -> str:
     """One block's lines. A plain newline is just how the source wrapped its text,
-    so it rejoins with a space; only a marked break becomes a <br/>."""
-    out = []
+    so it rejoins with a space; only a marked break becomes a <br/>.
+
+    The whole block goes through `_inline` in one pass -- with breaks held as a
+    placeholder rather than a newline -- so an emphasis run that covers several
+    lines of a verse still renders as emphasis instead of stray asterisks."""
+    parts = []
     for i, ln in enumerate(lines):
         ln = ln.strip()
         hard = _breaks(ln)
         if hard:
-            ln = ln[:-1]
-        out.append(_inline(ln.rstrip() if hard else ln))
+            ln = ln[:-1].rstrip()
+        parts.append(ln)
         if i < len(lines) - 1:
-            out.append("<br/>" if hard else " ")
-    return "".join(out)
+            parts.append(_BREAK if hard else " ")
+    return _inline("".join(parts)).replace(_BREAK, "<br/>")
 
 
 def blocks(text: str) -> list[list[str]]:
@@ -327,6 +346,37 @@ def plain(text: str) -> str:
 
 
 # ---------------- slicing ----------------
+
+def balance(text: str) -> str:
+    """Close (or re-open) a run that a cut left hanging, one block at a time.
+
+    `safe_split` keeps new cuts off a marker, but text sliced at boundaries chosen
+    before this format existed (see webapp/reflow.py) can start or end inside an
+    emphasis run. The half-run is real: give it its missing marker so this slice
+    renders the emphasis instead of an asterisk."""
+    out = []
+    for part in re.split(r"(\n\s*\n)", text or ""):
+        out.append(part if not part.strip() else _balance_block(part))
+    return "".join(out)
+
+
+def _balance_block(block: str) -> str:
+    # matched runs (and escaped markers) blanked out -- whatever marker is still
+    # visible is one this slice cut in half
+    blanked = _SPAN.sub(lambda m: " " * len(m.group(0)),
+                        _ESCAPED.sub("  ", block))
+    prefix, suffix = "", ""
+    for m in re.finditer(r"\*\*\*|\*\*|\*|`", blanked):
+        after = block[m.end():m.end() + 1]
+        if after and not after.isspace():
+            suffix += m.group(0)      # an opener: the run carries on past this slice
+        else:
+            prefix = m.group(0) + prefix   # a closer: the run began before it
+    if not prefix and not suffix:
+        return block
+    head = re.match(r"\s*(?:#{1,6}\s+|>\s?)?", block).end()
+    return block[:head] + prefix + block[head:] + suffix
+
 
 def safe_split(text: str, pos: int) -> int:
     """`pos` moved out of the middle of an inline run, so both halves of a cut
