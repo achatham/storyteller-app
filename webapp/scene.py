@@ -72,7 +72,8 @@ def recompress_book(book_id) -> dict:
             "saved_kb": (before - after) // 1024}
 from pipeline.run import (resolve_cast, scene_members, build_scene_prompt,
                           roster_digest, SCENE_CRITIQUE, SCENE_CRITIQUE_SCHEMA,
-                          PASS_THRESHOLD, CRIT_SRC_CHARS)
+                          PASS_THRESHOLD, CRIT_SRC_CHARS,
+                          SCENE_CRITIQUE_MINIMAL, SCENE_MINIMAL_SCHEMA)
 from . import db
 
 SCENE_TRIES = int(os.environ.get("STORY_SCENE_TRIES", "3"))  # max image attempts per scene
@@ -108,6 +109,22 @@ trace of it remains -- e.g. an extra limb is still visible>,
 FIX_VERIFY_SCHEMA = {"type": "object", "properties": {
     "resolved": {"type": "boolean"}, "still_present": {"type": "string"}},
     "required": ["resolved"]}
+
+
+def _minimal_score(data: bytes, td: Path, style_text: str) -> dict | None:
+    """Last-resort review for a page whose every critique attempt was filter-blocked.
+    Judges the picture alone -- anatomy, style, stray text -- with no story text or
+    character names in the prompt, which is what clears the child-safety filter. Returns
+    the critique dict (or None if even this is blocked); the caller must record that the
+    resulting score covers only part of what a full critique checks."""
+    p = td / "minimal.webp"
+    p.write_bytes(data)
+    try:
+        return gem.critique_image(p, SCENE_CRITIQUE_MINIMAL.format(style=style_text),
+                                  schema=SCENE_MINIMAL_SCHEMA, tries=2)
+    except Exception as ex:  # noqa: BLE001 -- nothing left to fall back to
+        print(f"[scene] minimal critique also blocked: {str(ex)[:110]}", flush=True)
+        return None
 
 
 def _adopt_brief_fix(ctx: dict, crit: dict, state: dict, trace: dict, idx: int) -> bool:
@@ -1219,12 +1236,23 @@ def _render_scene(book_id: int, idx: int, fast_critique: bool = False) -> bytes:
                     data, score, chosen = c["data"], c["score"], c["n"]
                     trace["judge_pick"] = {"attempt": chosen, "why": pick["why"]}
         elif last_cand is not None:
-            # every attempt's critique was blocked -> store the last drawn image unscored
-            # (an illustration beats a blank; the reader can redraw it if it looks off).
+            # Every attempt's critique was blocked. Before giving up on reviewing this page
+            # at all, try the picture-only critique -- it drops the story text and character
+            # names that trip the filter, so it usually gets through where nothing else does.
             data, score, chosen = last_cand, None, SCENE_TRIES
-            trace["fallback"] = ("kept last candidate UNSCORED -- the critique call itself "
-                                 "was blocked/empty on every attempt, so this page was never "
-                                 "actually reviewed (scenes.score IS NULL)")
+            crit = _minimal_score(last_cand, Path(td), ctx["style_text"])
+            if crit:
+                score = min(crit["physical"], crit["style_ok"], crit["no_stray_text"])
+                trace["critique_tier"] = "minimal"
+                trace["fallback"] = ("the full critique was blocked/empty on every attempt; "
+                                     "this score is from the picture-only critique and covers "
+                                     "anatomy, style and stray text ONLY -- story accuracy, "
+                                     "figure identity and spoilers were never checked")
+                trace["minimal_issues"] = crit.get("issues", [])
+            else:
+                trace["fallback"] = ("kept last candidate UNSCORED -- the critique call itself "
+                                     "was blocked/empty on every attempt, so this page was "
+                                     "never actually reviewed (scenes.score IS NULL)")
         else:
             # nothing to store: every attempt's IMAGE generation was blocked/empty too.
             raise RuntimeError(f"page {idx}: image generation was blocked/empty on every "

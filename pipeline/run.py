@@ -154,6 +154,39 @@ Empty when layer is 'none'.>"
   }}
 }}"""
 
+# Last-resort critique for a page the normal critique cannot grade AT ALL. Every tier of
+# critique_image can come back PROHIBITED_CONTENT-blocked -- the child imagery plus the
+# verbatim story passage trips Gemini's child-safety filter -- and the page is then stored
+# unscored and silently unreviewed (10 of the 399 pages of one book). This prompt carries no
+# story text, no roster, no brief and no character names, which clears the filter. The price
+# is that it judges only what is visible in the picture: story accuracy, figure identity and
+# spoilers are NOT checked, so a score from this tier must be labelled as the partial thing
+# it is rather than passed off as a full review.
+SCENE_CRITIQUE_MINIMAL = """You are an art director checking one finished illustration from a \
+children's picture book. You are judging the PICTURE ONLY -- you have not been given the story, \
+so do not guess at plot or characters.
+
+Return JSON only:
+{{"physical": <1-5: is every figure well-formed -- correct number of fingers, hands, limbs and \
+eyes, no fused/extra/missing/malformed parts, no melted faces, no impossible joints -- and is \
+everything properly supported and in scale, nothing floating or passing through solid objects? \
+Score 1-2 for any clear defect, 5 only when everything is well-formed>,
+  "style_ok": <1-5, does it match this intended art style: {style}>,
+  "no_stray_text": <1-5: 5 if there is no unwanted lettering; 1-2 for gibberish text, \
+watermarks, captions or floating words the picture does not call for>,
+  "issues": ["<short concrete visual problems, if any>"]}}"""
+
+SCENE_MINIMAL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "physical": {"type": "integer"},
+        "style_ok": {"type": "integer"},
+        "no_stray_text": {"type": "integer"},
+        "issues": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["physical", "style_ok", "no_stray_text"],
+}
+
 # Explicit response schema for the critique above (enforced by the API so the
 # structured fields the harness drives on -- verdict, edit_instruction,
 # reference_characters -- come back reliably).
