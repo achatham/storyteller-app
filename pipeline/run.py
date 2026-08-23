@@ -36,11 +36,17 @@ LOCAL_IMPORTANCE = 3  # default rank for section-local characters
 SRC_CHARS = 4000
 CRIT_SRC_CHARS = 4000
 
-
 SCENE_CRITIQUE = """You are a strict art director reviewing one illustration for a children's \
 read-aloud picture book (audience: 5 years old).
 
-THE ILLUSTRATION SHOULD DEPICT (the intended illustration for this moment):
+WHAT IS GROUND TRUTH: the SOURCE TEXT below is the book, and it is the only authority. The brief and \
+the character descriptions were generated FROM it by an earlier automated step and can be wrong. Where \
+they CONTRADICT the source text, the source text wins -- the image should follow the source, and you \
+must report the contradiction in "spec_error" rather than rewarding the image for obeying a faulty \
+instruction. Do NOT report a spec error merely because the brief is gentler, simpler or less detailed \
+than the source: only when it states something the source contradicts.
+
+THE ILLUSTRATION SHOULD DEPICT (the intended illustration for this moment -- generated, not authoritative):
 {brief}
 
 THE SOURCE TEXT this illustration accompanies (ground truth for the story moment -- the picture shows \
@@ -55,7 +61,9 @@ ONLY the moment above and must NOT depict, reveal or foreshadow anything that ha
 below -- doing so SPOILS a later surprise, reveal, arrival, death or transformation for the child:
 {chapter_ahead}
 
-CHARACTERS THAT SHOULD APPEAR (must match these descriptions):
+CHARACTERS THAT SHOULD APPEAR (generated descriptions -- authoritative for WHO each person is: face, \
+hair, build, identity. NOT authoritative for what they wear or carry at this moment, which the source \
+text decides):
 {chars}
 
 EVERY NAMED CHARACTER IN THIS BOOK (use ONLY to recognise background or secondary figures -- do NOT \
@@ -80,7 +88,11 @@ AND does the scene obey physical reality, with every figure and object properly 
 (nothing floating, defying gravity, badly out of scale, or passing through solid objects)? Score 1-2 for \
 any clear anatomical or physical defect, even on a small/background figure; 4 for minor awkwardness or \
 stiffness; 5 only when everything is well-formed and believably placed.>,
-  "consistency": <1-5, do characters match their descriptions and look like coherent recurring characters?>,
+  "consistency": <1-5, do characters look like coherent recurring characters -- the same recognisable \
+person from page to page (face, hair, build, defining features)? Judge the PERSON, not their outfit: do \
+NOT lower this because someone wears something the description does not mention, when the source text \
+says they wear it here (e.g. the description shows school clothes but the passage puts them in pyjamas -- \
+pyjamas are CORRECT and score 5). An outfit contradicting the SOURCE is an accuracy problem, not this.>,
   "figure_match": <1-5: are the characters in the image the RIGHT individuals? Compare the foreground cast \
 to their attached reference sheets, AND check any background or secondary figure that is clearly meant to \
 be one of the named book characters listed above. Judge IDENTITY/species only, not minor variation: pose, \
@@ -90,11 +102,15 @@ person/creature or has a wrong core identity (e.g. a Talking Mouse drawn as a ca
 missing/changed). Do NOT penalise generic unnamed extras (a random sailor, a crowd) who are not a specific \
 named character, and do NOT penalise minor differences. If there are no reference sheets AND no \
 recognisable named characters, score 5.>,
-  "accuracy": <1-5, does the image faithfully depict the intended moment (per the brief AND the source \
-text), including every concrete physical state or action true at that moment -- BOUND / roped / hands \
-tied, kneeling, holding a named object, a stated number of people? Be strict: if such a detail is \
-stated in the brief or source but missing or wrong in the image, score at most 2 even if the picture \
-is otherwise nice.>,
+  "accuracy": <1-5, does the image faithfully depict the intended moment AS THE SOURCE TEXT DESCRIBES \
+IT, including every concrete physical state or action true at that moment -- BOUND / roped / hands \
+tied, kneeling, holding a named object, wearing what the passage says they wear, a stated number of \
+people? Be strict: if such a detail is stated in the source but missing or wrong in the image, score at \
+most 2 even if the picture is otherwise nice. Judge against the SOURCE FIRST: if the brief or a \
+character description contradicts the source and the image followed THEM, that is an accuracy failure \
+(score at most 2) even though the image did as it was told -- and name it in "spec_error". Honour \
+stated rules of the story world: something the text says is INVISIBLE must not be drawn as a visible or \
+translucent shape, and someone the text says is hidden must not be visible.>,
   "style_ok": <1-5, matches the intended art style above?>,
   "no_stray_text": <1-5, is the image FREE of unwanted text? Score 5 if there is NO text, OR the only \
 text is something the scene genuinely calls for (a sign, a shop name, a book cover, a labelled object \
@@ -124,7 +140,18 @@ fix is a removal (e.g. an extra limb), say so plainly and do not describe keepin
 above) of characters whose canonical reference sheet should be attached to the edit -- e.g. a figure being \
 corrected to the right person/creature. Omit characters that are already correct; empty list if none needed>"],
   "fix_hint": "<one actionable sentence naming the single most important thing to fix -- used to guide a \
-from-scratch redraw when verdict is 'regenerate'>"
+from-scratch redraw when verdict is 'regenerate'>",
+  "spec_error": {{
+    "layer": "<exactly \'none\' when the instructions were fine. Otherwise exactly one of: 'brief' (the \
+brief above asks for something the source text contradicts), 'character' (a character description above \
+contradicts the source at this moment, e.g. wrong clothes), 'sheet' (an attached reference sheet carries \
+something that does not belong on this page, e.g. a one-scene hat drawn onto every page)>",
+    "contradiction": "<one sentence: what the SOURCE says, versus what the brief/description/sheet says. \
+Empty when layer is 'none'.>",
+    "suggested_fix": "<REQUIRED when layer is 'brief': the corrected brief, rewritten in full, saying \
+what should actually be drawn for this moment. For the other layers, one sentence naming what to change. \
+Empty when layer is 'none'.>"
+  }}
 }}"""
 
 # Explicit response schema for the critique above (enforced by the API so the
@@ -145,6 +172,18 @@ SCENE_CRITIQUE_SCHEMA = {
         "edit_instruction": {"type": "string"},
         "reference_characters": {"type": "array", "items": {"type": "string"}},
         "fix_hint": {"type": "string"},
+        # The return channel for "the instructions are wrong", as distinct from "the
+        # image is wrong". Without it the critic's only vocabulary is the latter, so a
+        # brief that asks for something the book contradicts gets faithfully enforced.
+        "spec_error": {
+            "type": "object",
+            "properties": {
+                "layer": {"type": "string", "enum": ["none", "brief", "character", "sheet"]},
+                "contradiction": {"type": "string"},
+                "suggested_fix": {"type": "string"},
+            },
+            "required": ["layer"],
+        },
     },
     "required": ["physical", "consistency", "figure_match", "accuracy", "style_ok",
                  "no_stray_text", "no_spoiler", "verdict", "issues"],

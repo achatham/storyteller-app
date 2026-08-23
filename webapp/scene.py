@@ -110,6 +110,34 @@ FIX_VERIFY_SCHEMA = {"type": "object", "properties": {
     "required": ["resolved"]}
 
 
+def _adopt_brief_fix(ctx: dict, crit: dict, state: dict, trace: dict, idx: int) -> bool:
+    """Act on the critic's "spec_error": the BRIEF asks for something the book
+    contradicts (a cloak the text calls invisible drawn as a visible sheet, clothes
+    the passage says they aren't wearing). Redrawing against that brief just
+    reproduces the error, and the critic then scores the reproduction as faithful --
+    which is how a single bad brief becomes a permanently wrong page. So swap in the
+    critic's corrected brief and redraw fresh against it.
+
+    Once per run: a second swap risks two critics trading rewrites until the tries run
+    out. Returns True when the caller should skip straight to the next attempt."""
+    se = crit.get("spec_error") or {}
+    fixed = (se.get("suggested_fix") or "").strip()
+    if se.get("layer") != "brief" or not fixed or state.get("brief_fixed"):
+        return False
+    state["brief_fixed"] = True
+    print(f"[scene] page {idx}: critic reports the BRIEF contradicts the source "
+          f"({se.get('contradiction','')!r}) -- redrawing against the corrected brief",
+          flush=True)
+    ctx["page"]["brief"] = fixed                     # critique_prompt + _judge_best
+    ctx["spread"]["illustration_brief"] = fixed      # build_scene_prompt
+    trace["spec_error"] = {"layer": "brief", "contradiction": se.get("contradiction", ""),
+                           "original_brief": ctx.get("original_brief", ""),
+                           "adopted_brief": fixed}
+    state["mode"], state["draft"], state["fix"] = "fresh", None, ""
+    state["pending_defect"] = None
+    return True
+
+
 def _verify_fix(cand_path, defect: str) -> dict:
     """Focused vision check: was `defect` actually removed from the revised image?
     Best-effort -- on any failure assume resolved (don't block on the checker)."""
@@ -722,7 +750,10 @@ def new_scene_state() -> dict:
             "edit_instr": "", "ref_chars": [], "cands": [],
             # safety-rewrite carry: a policy-safe prompt override (used verbatim by
             # build_round_request when set) + how many rewrites we've spent on this page.
-            "safe_prompt": "", "safety_tries": 0}
+            "safe_prompt": "", "safety_tries": 0,
+            # set once the critic's corrected brief has been adopted (see
+            # _adopt_brief_fix) so one page can't ping-pong between rewrites
+            "brief_fixed": False}
 
 
 def apply_verdict(state: dict, crit: dict, data: bytes, attempt: int,
@@ -1103,6 +1134,7 @@ def _render_scene(book_id: int, idx: int, fast_critique: bool = False) -> bytes:
     name_cache: dict = {}
     gen_id = db.next_gen_id(book_id, idx)   # debug history: this generation run
     trace = {"states": ctx["states"], "max_tries": SCENE_TRIES, "attempts": []}
+    ctx["original_brief"] = page["brief"]   # kept for the trace if the critic replaces it
 
     with tempfile.TemporaryDirectory() as td:
         # critique always sees this page's cast sheets (to catch a wrong figure)
@@ -1169,6 +1201,11 @@ def _render_scene(book_id: int, idx: int, fast_critique: bool = False) -> bytes:
             db.scene_attempt_add(book_id, idx, gen_id, attempt, mode, req["prompt"],
                                  _compress(data, DEBUG_MAXW, DEBUG_QUALITY),
                                  json.dumps(crit), res["min"], res["avg"])
+            # "the brief is wrong" can't be fixed by redrawing against that same brief,
+            # so adopt the critic's corrected one and start over rather than spending
+            # the remaining attempts re-enforcing the error.
+            if _adopt_brief_fix(ctx, crit, state, trace, idx):
+                continue
             if res["done"]:
                 break
 
