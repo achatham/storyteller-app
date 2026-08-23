@@ -5,6 +5,13 @@ services:
       # Built here, never pushed to a registry -- watchtower would resolve this
       # to library/storyteller-storyteller on Docker Hub and 401 every night.
       - com.centurylinklabs.watchtower.enable=false
+      # Ingress. caddy-vhost-sync turns these into the Caddy vhost for
+      # storyteller.294page.net; there is no entry in the Caddyfile. The port is
+      # the one INSIDE the container -- the published port moves with
+      # STORY_PORT and the syncer re-resolves it every tick.
+      - page.ingress.host=storyteller
+      - page.ingress.port=8000
+      - page.ingress.auth=family
     # The proxy is the authentication boundary. Keep direct access local unless
     # deliberately overriding STORY_BIND (e.g. a private LAN-only deployment).
     ports:
