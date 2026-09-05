@@ -767,6 +767,7 @@ def main(argv=None):
 
     reviewed = redrawn = 0
     deferred: list = []      # --batch: redraw plans collected for one bake at the end
+    stopped = False
 
     def on_window(rv):
         """Applied per window (not once at the end) so a long run streams its fixes and
@@ -792,6 +793,8 @@ def main(argv=None):
         rate = redrawn / reviewed if reviewed else 0
         print(f"[continuity] running redraw rate: {redrawn}/{reviewed} = {rate:.0%}", flush=True)
         if a.max_redraw_rate is not None and reviewed >= 2 * a.window and rate > a.max_redraw_rate:
+            nonlocal stopped
+            stopped = True
             print(f"[continuity] STOP: redraw rate {rate:.0%} exceeds {a.max_redraw_rate:.0%} "
                   "-- rethink before continuing", flush=True)
             return False
@@ -799,7 +802,12 @@ def main(argv=None):
 
     review_range(a.book_id, start, end, window=a.window, store=not a.no_store,
                  on_window=on_window)
-    if deferred:
+    if deferred and stopped:
+        # the guard fired: the plan corrections are written, but spend nothing on images
+        # until someone has looked at why the rate is high
+        print(f"[continuity] {len(deferred)} deferred redraw(s) NOT drawn (stopped by the "
+              "redraw-rate guard): " + ", ".join(str(r["idx"]) for r in deferred), flush=True)
+    elif deferred:
         with costs.run_as(f"book:{a.book_id}"):
             bake_redraws(a.book_id, deferred)
 
