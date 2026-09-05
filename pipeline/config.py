@@ -201,7 +201,7 @@ COVER_IMAGE_MODEL = os.environ.get("STORY_COVER_IMAGE_MODEL", SHEET_IMAGE_MODEL)
 LITE_IMAGE_MODEL = os.environ.get("STORY_LITE_IMAGE_MODEL", "gemini-3.1-flash-lite-image")
 # general default (used when a caller doesn't specify) = the page model
 IMAGE_MODEL = os.environ.get("STORY_IMAGE_MODEL", PAGE_IMAGE_MODEL)
-TEXT_MODEL = os.environ.get("STORY_TEXT_MODEL", "gemini-3.7-flash")
+TEXT_MODEL = os.environ.get("STORY_TEXT_MODEL", "gemini-3.8-flash")
 # Per-step text models (default to TEXT_MODEL). Low-sensitivity steps -- image
 # critique and the chapter-skeleton classification -- can be pointed at a cheaper
 # model (e.g. gemini-3.1-flash-lite) without much quality risk. Segmentation now
