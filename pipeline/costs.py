@@ -43,7 +43,9 @@ DB = Path(os.environ.get("STORY_COST_DB", str(ROOT / "output" / "costs.db")))
 # ~$0.134 (4K = 2000 tokens = ~$0.24). Reports recompute from stored token
 # counts, so editing these rates retroactively re-prices all past usage.
 PRICING = {
-    "gemini-3.5-flash":            {"in": 1.50, "out": 9.00},    # text + critique
+    # Intro pricing through 2026-12-31; rises to $1.50/$7.50 on 2027-01-01.
+    "gemini-3.7-flash":            {"in": 0.75, "out": 3.75},    # text + critique
+    "gemini-3.5-flash":            {"in": 1.50, "out": 9.00},    # (previous text model)
     "gemini-3.1-flash-lite":       {"in": 0.25, "out": 1.50},    # text (official)
     "gemini-3.1-pro-preview":      {"in": 2.00, "out": 12.00},
     "gemini-3-pro-image":          {"in": 2.00, "out": 120.00},  # pro image: ~$0.134/1K-2K img

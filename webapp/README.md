@@ -137,7 +137,7 @@ saved offline copy needs re-saving.
 | `STORY_COVER_IMAGE_MODEL` | = sheet model | the one cover illustration per book |
 | `STORY_COVER_SIZE` / `STORY_COVER_MAXW` / `STORY_COVER_QUALITY` | `2K` / `1024` / `82` | cover generation size, stored width, WebP quality |
 | `STORY_COVER_CAST` | `3` | max characters on a cover |
-| `STORY_TEXT_MODEL` | `gemini-3.5-flash` | default for all text steps |
+| `STORY_TEXT_MODEL` | `gemini-3.7-flash` | default for all text steps |
 | `STORY_ANALYZE_MODEL` | = text model | segmentation (page anchors + briefs) |
 | `STORY_REGISTRY_MODEL` | = text model | entity discovery/expansion (identity-critical) |
 | `STORY_REGISTRY_THINK` | `high` | thinking level for the registry step (minimal/low/medium/high) |
