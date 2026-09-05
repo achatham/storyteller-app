@@ -1,6 +1,7 @@
 # Storyteller
 
 **[Live demo →](https://achatham.github.io/storyteller-app/)**
+[_A Christmas Carol_](https://achatham.github.io/storyteller-app/books/a-christmas-carol/) · [_Treasure Island_](https://achatham.github.io/storyteller-app/books/treasure-island/)
 
 This is an AI-illustrated rendering of a book. It creates consistent images across a
 full story, with (mostly) the same characters and settings used across the pages.
