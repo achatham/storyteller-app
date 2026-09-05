@@ -23,6 +23,7 @@ import argparse
 import json
 import re
 import sys
+import time
 
 from pipeline import gem, costs, markup
 from pipeline.config import TEXT_MODEL, STYLES
@@ -405,11 +406,12 @@ def review_window(book_id: int, idxs: list[int], prior: dict | None = None,
 
 
 def review_range(book_id: int, start: int, end: int, window: int = WINDOW,
-                 store: bool = True, log=print) -> list[dict]:
+                 store: bool = True, log=print, on_window=None) -> list[dict]:
     """Review pages start..end (inclusive) in consecutive windows. Each window is
     told what earlier windows already proposed, so a setting invented for pages
     1-5 is reused (not re-proposed under another id) for pages 6-10. Each verdict
-    is stored as its own row (id in "review_id") so it can be applied separately."""
+    is stored as its own row (id in "review_id") so it can be applied separately.
+    `on_window(rv)` is called after each window; returning False stops the run."""
     idxs = [p["idx"] for p in db.get_pages(book_id) if start <= p["idx"] <= end]
     if not idxs:
         raise ValueError(f"book {book_id} has no pages in {start}-{end}")
@@ -431,6 +433,9 @@ def review_range(book_id: int, start: int, end: int, window: int = WINDOW,
         log(f"[continuity]   {len(rv['continuity_issues'])} issues, "
             f"{sum(1 for e in rv['page_edits'] if e['action'] != 'keep')} page edits, "
             f"+{len(rv['new_entities'])} entities, +{len(rv['new_variants'])} variants")
+        if on_window is not None and on_window(rv) is False:
+            log("[continuity] stopped early by the caller")
+            break
     return out
 
 
@@ -465,18 +470,53 @@ def merge_reviews(reviews: list[dict]) -> dict:
 
 # ---------------- applying a review ----------------
 
-def apply_review(book_id: int, review: dict, log=print) -> dict:
+# Root causes that live in the PLAN: redrawing against the same plan reproduces the
+# drift, so a page touched by one of these is worth an image generation even when the
+# picture itself is only mildly off. Everything else is image_noise / other.
+PLAN_CAUSES = {"missing_setting", "missing_prop", "missing_character", "wrong_variant",
+               "missing_variant", "brief", "cast"}
+SERIOUS_SEVERITY = 3
+
+
+def serious_pages(review: dict, min_severity: int = SERIOUS_SEVERITY,
+                  plan_causes: set = PLAN_CAUSES) -> set:
+    """Pages whose problems justify spending an image generation: touched by an issue
+    that breaks the story for a child (severity >= min_severity -- a spoiler, a
+    contradiction of the text) or one rooted in the plan (a wrong brief or cast, a
+    missing variant). Cosmetic drift below that bar -- a bench changing colour, a
+    wardrobe on the other side of a door -- is what the per-page critic already
+    tolerates; on the first Chamber of Secrets sample it made up two thirds of the
+    critic's revise/regenerate verdicts (15 of 30 pages), so chasing it page by page
+    is where the cost goes."""
+    out = set()
+    for i in review.get("continuity_issues", []):
+        try:
+            sev = int(i.get("severity") or 0)
+        except (TypeError, ValueError):
+            sev = 0
+        if sev >= min_severity or i.get("root_cause") in plan_causes:
+            out.update(p for p in i.get("pages", []) if isinstance(p, int))
+    return out
+
+
+def apply_review(book_id: int, review: dict, log=print, serious_only: bool = False) -> dict:
     """Write a review's recommendations into the book's PLAN: new entities and
     variants into the registry, corrected brief/setting/cast onto the pages. Nothing
     is drawn here -- the returned "redraws" list ([{idx, mode, seed}]) is the plan for
     the caller to execute (regenerate = clear + redraw; revise = img2img edit of the
     current picture, seeded with the critic's instruction). Only pages the critic
     marked revise/regenerate are in it. New sheets are drawn lazily the first time a
-    redrawn page references them."""
+    redrawn page references them.
+
+    serious_only: still write EVERY plan correction (registry additions, briefs, casts
+    -- they are free and fix any later redraw), but plan a redraw only for pages in
+    serious_pages(review); the critic's other revise/regenerate verdicts are kept as
+    they are and listed in "skipped"."""
+    keep_for = serious_pages(review) if serious_only else None
     registry = db.get_registry(book_id)
     reg_by_id = {e["id"]: e for e in registry.get("entities", [])}
     rep = {"entities_added": [], "variants_added": [], "pages_updated": [],
-           "redraws": [], "notes": []}
+           "redraws": [], "skipped": [], "notes": []}
     changed = False
     for e in review.get("new_entities", []):
         eid = _slug(e.get("id", ""))
@@ -542,6 +582,9 @@ def apply_review(book_id: int, review: dict, log=print) -> dict:
             rep["pages_updated"].append({"idx": idx, "brief": bool(brief),
                                          "setting": bool(setting), "cast": new_cast is not None})
         action = pe.get("action")
+        if action in ("revise", "regenerate") and keep_for is not None and idx not in keep_for:
+            rep["skipped"].append(idx)     # cosmetic drift: not worth an image generation
+            continue
         if action == "regenerate" or (action == "revise" and
                                       not (pe.get("edit_instruction") or "").strip()):
             rep["redraws"].append({"idx": idx, "mode": "regenerate"})
@@ -558,7 +601,8 @@ def apply_review(book_id: int, review: dict, log=print) -> dict:
         # drawn again. Spending an image generation on it would buy nothing.
     log(f"[continuity] applied: +{len(rep['entities_added'])} entities, "
         f"+{len(rep['variants_added'])} variants, {len(rep['pages_updated'])} pages updated, "
-        f"{len(rep['redraws'])} redraws planned")
+        f"{len(rep['redraws'])} redraws planned"
+        + (f", {len(rep['skipped'])} cosmetic verdicts skipped" if rep["skipped"] else ""))
     return rep
 
 
@@ -599,12 +643,17 @@ def _validate_cast(cast: list, old_cast: list, reg_by_id: dict, local_ids: set,
     return out
 
 
-def execute_redraws(book_id: int, redraws: list, log=print) -> list:
-    """Carry out a redraw plan synchronously (the CLI path): regenerate = clear the
-    scene and draw fresh; revise = seeded img2img of the current picture."""
+REDRAW_WORKERS = 3
+
+
+def execute_redraws(book_id: int, redraws: list, log=print, workers: int = REDRAW_WORKERS) -> list:
+    """Carry out a redraw plan (the CLI path), a few pages in parallel: regenerate =
+    clear the scene and draw fresh; revise = seeded img2img of the current picture.
+    Returns the indices that were redrawn."""
+    from concurrent.futures import ThreadPoolExecutor
     from . import scene
-    done = []
-    for r in redraws:
+
+    def one(r):
         idx = r["idx"]
         try:
             if r["mode"] == "revise":
@@ -613,15 +662,41 @@ def execute_redraws(book_id: int, redraws: list, log=print) -> list:
                     seed = dict(r["seed"], draft=cur)
                     log(f"[continuity] revising page {idx}: {seed['instruction'][:90]}…")
                     scene.generate_scene(book_id, idx, seed=seed)
-                    done.append(idx)
-                    continue
+                    return idx
             log(f"[continuity] redrawing page {idx} from scratch")
             db.delete_scene(book_id, idx)
             scene.generate_scene(book_id, idx)
-            done.append(idx)
+            return idx
         except Exception as ex:  # noqa: BLE001 -- one bad page shouldn't stop the rest
             log(f"[continuity] page {idx} redraw failed: {type(ex).__name__}: {str(ex)[:160]}")
-    return done
+            return None
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        return [i for i in ex.map(one, redraws) if i is not None]
+
+
+def bake_redraws(book_id: int, redraws: list, log=print) -> int:
+    """Carry out a redraw plan through the BATCH bake: stage every page (revise pages
+    keep their picture on show and become img2img edits; regenerate pages are drawn
+    fresh) and run the bake inline, blocking until it finishes. Half the image price
+    of execute_redraws, at batch latency -- worth it once a book's review adds up to
+    dozens of pages. If a bake is already running, waits for it first: its in-memory
+    page contexts would race the staging. Returns how many pages were staged."""
+    from . import batch_bake
+    if not redraws:
+        return 0
+    while (db.bake_get(book_id) or {}).get("status") == "baking":
+        log("[continuity] a bake is running -- waiting for it before staging the redraws")
+        time.sleep(15)
+    n = db.bake_stage_redraws(book_id, redraws)
+    log(f"[continuity] staged {n} page(s) for the batch bake "
+        f"({sum(1 for r in redraws if r['mode'] == 'revise')} revise, "
+        f"{sum(1 for r in redraws if r['mode'] != 'revise')} regenerate)")
+    db.set_illustration_mode(book_id, "batch")
+    db.bake_upsert(book_id, "baking", round=0, total_pages=db.get_book(book_id)["num_pages"])
+    db.set_status(book_id, "baking", "redrawing pages from the continuity review…")
+    batch_bake.run(book_id)
+    return n
 
 
 # ---------------- CLI ----------------
@@ -661,8 +736,20 @@ def main(argv=None):
     ap.add_argument("--pages", help="inclusive page range, e.g. 382-391 (default: whole book)")
     ap.add_argument("--window", type=int, default=WINDOW)
     ap.add_argument("--apply", action="store_true",
-                    help="write the recommendations into the registry/pages and redraw")
+                    help="write each window's recommendations into the registry/pages and "
+                         "redraw, as soon as that window is reviewed")
     ap.add_argument("--no-draw", action="store_true", help="with --apply: skip the redraws")
+    ap.add_argument("--batch", action="store_true",
+                    help="with --apply: collect every window's redraws and run them as ONE "
+                         "batch bake at the end (half the image price) instead of drawing "
+                         "each window's pages interactively as it is reviewed")
+    ap.add_argument("--serious-only", action="store_true",
+                    help="with --apply: redraw only pages with a severity-3 issue or a plan-level "
+                         "root cause (brief/cast/variant); still write every plan correction")
+    ap.add_argument("--max-redraw-rate", type=float, default=None,
+                    help="with --apply: stop (before applying more) once redraws / pages reviewed "
+                         "exceeds this fraction, e.g. 0.25 -- the 'more than a quarter of the "
+                         "book would be redrawn, rethink' guard")
     ap.add_argument("--no-store", action="store_true", help="don't save the review rows")
     ap.add_argument("--json", action="store_true", help="print the raw JSON verdicts")
     a = ap.parse_args(argv)
@@ -677,21 +764,44 @@ def main(argv=None):
         start, end = int(m.group(1)), int(m.group(2))
     else:
         start, end = pages[0]["idx"], pages[-1]["idx"]
-    reviews = review_range(a.book_id, start, end, window=a.window, store=not a.no_store)
-    for rv in reviews:
+
+    reviewed = redrawn = 0
+    deferred: list = []      # --batch: redraw plans collected for one bake at the end
+
+    def on_window(rv):
+        """Applied per window (not once at the end) so a long run streams its fixes and
+        the redraw-rate guard can stop it early instead of after the whole book."""
+        nonlocal reviewed, redrawn
         print(json.dumps(rv, indent=1, ensure_ascii=False) if a.json else format_review(rv))
-        print()
-    if a.apply:
-        merged = merge_reviews(reviews)
-        rep = apply_review(a.book_id, merged)
+        print(flush=True)
+        if not a.apply:
+            return True
+        rep = apply_review(a.book_id, rv, serious_only=a.serious_only)
         for n in rep["notes"]:
             print("  note:", n)
-        for rv in reviews:
-            if rv.get("review_id"):
-                db.review_mark_applied(a.book_id, rv["review_id"], rep)
+        if rv.get("review_id"):
+            db.review_mark_applied(a.book_id, rv["review_id"], rep)
+        reviewed += len(rv["pages"])
+        redrawn += len(rep["redraws"])
         if not a.no_draw and rep["redraws"]:
-            with costs.run_as(f"book:{a.book_id}"):
-                execute_redraws(a.book_id, rep["redraws"])
+            if a.batch:
+                deferred.extend(rep["redraws"])
+            else:
+                with costs.run_as(f"book:{a.book_id}"):
+                    execute_redraws(a.book_id, rep["redraws"])
+        rate = redrawn / reviewed if reviewed else 0
+        print(f"[continuity] running redraw rate: {redrawn}/{reviewed} = {rate:.0%}", flush=True)
+        if a.max_redraw_rate is not None and reviewed >= 2 * a.window and rate > a.max_redraw_rate:
+            print(f"[continuity] STOP: redraw rate {rate:.0%} exceeds {a.max_redraw_rate:.0%} "
+                  "-- rethink before continuing", flush=True)
+            return False
+        return True
+
+    review_range(a.book_id, start, end, window=a.window, store=not a.no_store,
+                 on_window=on_window)
+    if deferred:
+        with costs.run_as(f"book:{a.book_id}"):
+            bake_redraws(a.book_id, deferred)
 
 
 if __name__ == "__main__":

@@ -186,3 +186,50 @@ def test_init_migrates_a_legacy_continuity_table(tmp_path, monkeypatch):
         assert c.execute("SELECT report FROM continuity_reviews_old").fetchone()["report"] == "{}"
         cols = {r["name"] for r in c.execute("PRAGMA table_info(continuity_reviews)")}
         assert "json" in cols
+
+
+def test_serious_only_writes_the_plan_but_redraws_only_serious_pages(env):
+    db, cont, bid = env
+    review = {
+        "new_entities": [], "new_variants": [],
+        "continuity_issues": [
+            {"pages": [0], "issue": "bench colour", "root_cause": "image_noise", "severity": 1},
+            {"pages": [1], "issue": "Hedwig in cupboard", "root_cause": "brief", "severity": 2},
+            {"pages": [2], "issue": "bars spoil the plot", "root_cause": "image_noise", "severity": 3},
+        ],
+        "page_edits": [
+            {"idx": 0, "action": "revise", "problems": ["bench"], "edit_instruction": "green bench",
+             "cast": [{"entity_id": "kid", "variant_id": "pyjamas"}]},
+            {"idx": 1, "action": "regenerate", "problems": ["hedwig"], "brief": "No owl here."},
+            {"idx": 2, "action": "revise", "problems": ["bars"], "edit_instruction": "remove bars"},
+        ],
+    }
+    assert cont.serious_pages(review) == {1, 2}
+    rep = cont.apply_review(bid, review, log=lambda *_: None, serious_only=True)
+    assert {r["idx"]: r["mode"] for r in rep["redraws"]} == {1: "regenerate", 2: "revise"}
+    assert rep["skipped"] == [0]
+    # the cosmetic page's plan correction is still written
+    assert json.loads(db.get_page(bid, 0)["cast_json"]) == [{"entity_id": "kid", "variant_id": "pyjamas"}]
+    assert db.get_page(bid, 1)["brief"] == "No owl here."
+
+
+def test_stage_redraws_for_the_batch_bake(env):
+    db, cont, bid = env
+    redraws = [
+        {"idx": 0, "mode": "revise", "seed": {"instruction": "remove the bars", "ref_chars": ["Kid"],
+                                             "defect": "bars on window", "source": "continuity review"}},
+        {"idx": 1, "mode": "regenerate"},
+    ]
+    assert db.bake_stage_redraws(bid, redraws) == 2
+    # revise: picture stays on show, becomes the draft; regenerate: scene dropped
+    assert db.scene_data(bid, 0) == b"img0" and db.scene_data(bid, 1) is None
+    r0, r1 = db.bps_get(bid, 0), db.bps_get(bid, 1)
+    assert r0["status"] == "revising" and r0["draft_blob"] == b"img0"
+    carry = json.loads(r0["carry_json"])
+    assert carry["mode"] == "revise" and carry["edit_instr"] == "remove the bars"
+    assert carry["ref_chars"] == ["Kid"] and carry["pending_defect"] == "bars on window"
+    assert r1["status"] == "pending" and r1["carry_json"] is None
+    # the bake's seed pass must not re-skip the staged revise just because it has a scene
+    db.bps_init(bid, [0, 1, 2])
+    assert db.bps_skip_illustrated(bid) == 1          # only the untouched page 2
+    assert db.bps_actionable(bid) == [0, 1]

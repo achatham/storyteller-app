@@ -1093,10 +1093,12 @@ def bps_skip_illustrated(book_id) -> int:
     by a prior bake, is left untouched -- never redrawn). They still count toward
     done_pages. Pages the current bake just finished are already done=1, so the
     done=0 guard leaves them alone. Returns how many pages were skipped."""
+    # carry_json IS NULL: a page STAGED for a revise (bake_stage_redraws) keeps its
+    # current picture on show until the edit lands, so it has a scene AND must be drawn.
     with conn() as c:
         return c.execute(
             "UPDATE batch_page_state SET status='done', done=1, updated_at=? "
-            "WHERE book_id=? AND done=0 AND idx IN "
+            "WHERE book_id=? AND done=0 AND carry_json IS NULL AND idx IN "
             "(SELECT idx FROM scenes WHERE book_id=? AND status='done' AND length(data)>0)",
             (time.time(), book_id, book_id)).rowcount
 
@@ -1252,6 +1254,52 @@ def bake_reopen_pages(book_id, idxs: list[int]) -> int:
             f"draft_blob=NULL, carry_json=NULL, updated_at=? "
             f"WHERE book_id=? AND idx IN ({qs})", (now, book_id, *idxs)).rowcount
         c.execute(f"DELETE FROM scenes WHERE book_id=? AND idx IN ({qs})", (book_id, *idxs))
+        c.execute("DELETE FROM batch_jobs WHERE book_id=?", (book_id,))
+    return n
+
+
+def bake_stage_redraws(book_id, redraws: list) -> int:
+    """Queue a redraw plan (continuity.apply_review's "redraws": [{idx, mode, seed?}])
+    for the BATCH bake instead of drawing it page by page at interactive price. A
+    "regenerate" page is reopened like bake_reopen_pages (scene dropped, clean slate).
+    A "revise" page keeps its current picture on show and is reopened in the bake's
+    revise mode: the picture becomes the round's draft (draft_blob) and the critic's
+    instruction / reference names / defect ride in carry_json -- the same fields
+    PageRun.restore reads, so build_round_request produces the identical img2img edit
+    the interactive seeded path would. Returns how many pages were staged."""
+    if not redraws:
+        return 0
+    now = time.time()
+    n = 0
+    with conn() as c:
+        for r in redraws:
+            idx = r["idx"]
+            c.execute("INSERT OR IGNORE INTO batch_page_state(book_id,idx,status,round,"
+                      "attempt,done,updated_at) VALUES (?,?,'pending',0,0,0,?)",
+                      (book_id, idx, now))
+            draft = carry = None
+            if r.get("mode") == "revise":
+                seed = r.get("seed") or {}
+                cur = c.execute("SELECT data FROM scenes WHERE book_id=? AND idx=? AND "
+                                "status='done'", (book_id, idx)).fetchone()
+                draft = cur["data"] if cur and cur["data"] else None
+                if draft is not None and (seed.get("instruction") or "").strip():
+                    carry = json.dumps({
+                        "mode": "revise", "edit_instr": seed["instruction"].strip(),
+                        "ref_chars": [x for x in seed.get("ref_chars", []) if isinstance(x, str)],
+                        "pending_defect": (seed.get("defect") or "").strip()
+                                          or seed["instruction"].strip(),
+                        "escalate": False, "safe_prompt": "", "safety_tries": 0,
+                        "seed_source": seed.get("source", "continuity review")})
+                else:
+                    draft = None              # nothing to edit -> draw it fresh instead
+            if carry is None:
+                c.execute("DELETE FROM scenes WHERE book_id=? AND idx=?", (book_id, idx))
+            c.execute("UPDATE batch_page_state SET status=?, done=0, round=0, attempt=0, "
+                      "gen_id=NULL, best_blob=NULL, best_score=NULL, best_attempt=NULL, "
+                      "draft_blob=?, carry_json=?, updated_at=? WHERE book_id=? AND idx=?",
+                      ("revising" if carry else "pending", draft, carry, now, book_id, idx))
+            n += 1
         c.execute("DELETE FROM batch_jobs WHERE book_id=?", (book_id,))
     return n
 

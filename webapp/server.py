@@ -1004,14 +1004,26 @@ async def _revise_scene(book_id: int, idx: int, seed: dict):
 async def api_continuity_apply(book_id: int, review_id: int, body: dict | None = Body(None)):
     """Write a review's recommendations into the registry + pages, then redraw the
     affected pages in the background (revise = seeded edit of the current picture,
-    regenerate = fresh draw). Body {draw: false} applies the plan changes only."""
+    regenerate = fresh draw). Body {draw: false} applies the plan changes only;
+    {serious_only: true} redraws only pages with a severity-3 or plan-rooted issue;
+    {batch: true} runs the redraws through the batch bake (half the image price)."""
     r = db.review_get(book_id, review_id)
     if not r:
         raise HTTPException(404, "no such review")
     draw = (body or {}).get("draw", True)
-    rep = await asyncio.to_thread(continuity.apply_review, book_id, r["review"])
+    serious_only = bool((body or {}).get("serious_only", False))
+    batch = bool((body or {}).get("batch", False))
+    if batch and draw and (b := db.bake_get(book_id)) and b["status"] == "baking":
+        raise HTTPException(409, "a bake is already running; wait for it or cancel it first")
+    rep = await asyncio.to_thread(continuity.apply_review, book_id, r["review"],
+                                  print, serious_only)
     rep["drawn"] = []
-    if draw:
+    if draw and batch and rep["redraws"]:
+        # half-price path: stage the edits into the bake's per-page state and run it
+        await asyncio.to_thread(db.bake_stage_redraws, book_id, rep["redraws"])
+        await _launch_bake(book_id, db.get_book(book_id))
+        rep["drawn"] = [rd["idx"] for rd in rep["redraws"]]
+    elif draw:
         for rd in rep["redraws"]:
             if rd["mode"] == "revise":
                 asyncio.create_task(_revise_scene(book_id, rd["idx"], rd["seed"]))

@@ -199,12 +199,20 @@ def _build_page_run(book_id, idx):
         log(f"page {idx} context failed: {ex}")
         db.bps_save(book_id, idx, status="failed")
         return None
-    if row and row["gen_id"]:      # resume: keep the same debug gen + prior state
-        pr.gen_id = row["gen_id"]
+    if row and (row["gen_id"] or row["carry_json"] or row["draft_blob"] is not None):
+        # resume (keep the same debug gen + prior state), or a page STAGED with a
+        # revise seed (db.bake_stage_redraws): its current picture is the draft and
+        # the critic's instruction is the edit -- the batched form of generate_scene(seed=)
         pr.restore(row)
+        pr.gen_id = row["gen_id"] or db.next_gen_id(book_id, idx)
     else:
         pr.gen_id = db.next_gen_id(book_id, idx)
     pr.trace = {"states": pr.ctx["states"], "max_tries": MAX_ROUNDS, "attempts": []}
+    if pr.attempt == 0 and pr.state["draft"] is not None and pr.state["edit_instr"]:
+        pr.trace["seed"] = {"instruction": pr.state["edit_instr"],
+                            "defect": pr.state["pending_defect"],
+                            "source": (json.loads(row["carry_json"]) if row and row["carry_json"]
+                                       else {}).get("seed_source", "revise")}
     return pr
 
 
