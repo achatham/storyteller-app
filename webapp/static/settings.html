@@ -261,8 +261,7 @@ async function pollOutstanding(){
     const row = $("#outrow");
     if (o.known && o.total > 0){
       $("#outstanding").textContent =
-        `${o.total.toLocaleString()} request${o.total>1?"s":""} `
-        + `(${o.image.toLocaleString()} image / ${o.text.toLocaleString()} text) `
+        `${o.total.toLocaleString()} image request${o.total>1?"s":""} `
         + `in ${o.jobs} batch job${o.jobs>1?"s":""}`;
       row.style.display = "";
     } else {

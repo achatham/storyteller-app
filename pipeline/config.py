@@ -175,6 +175,55 @@ STYLES = {
         "cartoon, NOT flat illustration."
     ),
 }
+# What "well-formed anatomy" means differs by style: a Pixar-like head or a stop-motion
+# figure's stubby limbs are the design, not a defect. The sheet critic scores anatomy
+# against the guide for the book's style; styles not listed use the naturalistic default.
+STYLE_ANATOMY_DEFAULT = (
+    "This style draws people and creatures with believable, naturalistic proportions for "
+    "their stated age and species: head, torso and limbs in realistic relation, hands with "
+    "five fingers, joints bending the right way. Expressive faces are fine; an oversized "
+    "head, stubby or overlong limbs, extra or missing fingers or limbs, or a twisted joint "
+    "is a defect here.")
+STYLE_ANATOMY = {
+    "claymation": (
+        "Stop-motion clay figures are intentionally chunky: large rounded heads, short stubby "
+        "limbs, simplified hands (three or four fingers), oversized eyes. Score all of that as "
+        "correct. Penalise only sculpting errors: a head or limb lopsided where the design is "
+        "not, merged or melted features, a body that could not stand."),
+    "stylized_3d": (
+        "Animated-feature stylisation is expected: enlarged heads and eyes, slim or exaggerated "
+        "limbs, simplified hands -- the appealing Pixar-like canon. Score that as correct. "
+        "Penalise broken rigging: joints bent the wrong way, mismatched limb lengths, extra "
+        "fingers, a cross-eyed or asymmetric face."),
+    "bold_picturebook": (
+        "Simplified graphic shapes ARE the style: dot eyes, mitten hands, stick-like limbs, a "
+        "big round head are all correct. Penalise only what breaks even a simple drawing: a "
+        "missing or doubled limb, a head not attached to the body, features that don't line up."),
+    "crayon_childlike": (
+        "A talented child's drawing is the style: naive proportions, mitten hands, big heads "
+        "and simple limbs are correct. Penalise only a missing or doubled limb, a head not "
+        "attached to the body, or a face whose features don't line up."),
+    "cut_paper_collage": (
+        "Cut-paper figures are flat simplified shapes: chunky limbs, round heads, hands as "
+        "simple mitts are correct. Penalise a missing or doubled limb, a head floating off the "
+        "body, or features that don't line up."),
+    "vintage_midcentury": (
+        "Mid-century stylisation is expected: simplified, elongated or rounded shapes, tiny "
+        "feet, dot eyes. Score that as correct; penalise a missing or doubled limb, a detached "
+        "head, or features that don't line up."),
+    "anime_storybook": (
+        "Anime stylisation is expected: large expressive eyes, small nose and mouth, slim build, "
+        "long legs. Score that as correct; penalise malformed hands (wrong finger count), limbs "
+        "in broken perspective, misaligned facial features."),
+    "cel_shaded": (
+        "Animation stylisation is expected: large eyes, simplified noses, slim or exaggerated "
+        "builds. Score that as correct; penalise malformed hands (wrong finger count), limbs in "
+        "broken perspective, misaligned facial features."),
+    "modern_comic": (
+        "Comic stylisation is expected: heroic or exaggerated builds, simplified faces, dynamic "
+        "poses. Score that as correct; penalise malformed hands (wrong finger count), limbs of "
+        "mismatched length, joints bent the wrong way, misaligned facial features."),
+}
 STYLE = os.environ.get("STORY_STYLE", "watercolor")
 if STYLE not in STYLES:
     raise SystemExit(

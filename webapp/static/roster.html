@@ -75,6 +75,9 @@
   .dlg button.cancel { background:var(--bg); color:var(--ink); }
   .dlg .status { font-size:.82rem; color:var(--muted); min-height:1em; }
   .dlg .status.err { color:#9b3d2e; }
+  .dlg .pages { font-size:.9rem; color:var(--muted, #666); margin:6px 0 2px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .dlg .pages button { font:inherit; font-size:.9rem; padding:5px 10px; border-radius:8px; border:1px solid var(--accent); background:var(--bg); color:var(--accent); cursor:pointer; }
+  .dlg .pages button:disabled { opacity:.55; cursor:default; }
 </style>
 </head><body>
 <header>
@@ -112,6 +115,7 @@
   </div>
 
   <div class="status" id="ovstatus"></div>
+  <div class="pages" id="ovpages" hidden><span id="ovpagestext"></span> <button id="ovredraw">Redraw them</button></div>
   <div class="row">
     <button class="cancel" id="ovcancel">Cancel</button>
     <button class="go" id="ovgo">Render fix</button>
@@ -187,9 +191,50 @@ function openEditor(eid, vid, name){
   setStatus("");
   setMode("tweak");
   $("#ovgo").disabled = false;
+  $("#ovpages").hidden = true;
   $("#ov").hidden = false;
   $("#ovtext").focus();
 }
+
+// After a sheet changes, offer to redraw just the pages drawn against it (the bake's
+// incremental path, so the images are batched) instead of the whole book.
+let pagesInfo = null;
+async function offerRedrawPages(){
+  if (!cur) return;
+  const mine = cur;
+  try {
+    pagesInfo = await getJSON(sheetUrl(cur.eid, cur.vid) + "/pages");
+  } catch (ex) { return; }
+  if (cur !== mine) return;
+  const n = pagesInfo.illustrated.length, t = pagesInfo.pages.length;
+  const box = $("#ovpages");
+  if (!t){ box.hidden = true; return; }
+  $("#ovpagestext").textContent = n
+    ? `This sheet is used by ${t} page${t>1?"s":""}, ${n} already illustrated against the old version.`
+    : `This sheet is used by ${t} page${t>1?"s":""}; none illustrated yet, so they'll use the new one.`;
+  const b = $("#ovredraw");
+  b.hidden = !n;
+  b.disabled = pagesInfo.baking;
+  b.textContent = pagesInfo.baking ? "Redraw them (wait for the running bake)" : `Redraw ${n} page${n>1?"s":""}`;
+  box.hidden = false;
+}
+async function redrawPages(){
+  if (!cur || !pagesInfo) return;
+  const b = $("#ovredraw");
+  b.disabled = true;
+  setStatus("Reopening those pages and starting the bake…");
+  try {
+    const r = await fetch(sheetUrl(cur.eid, cur.vid) + "/redraw-pages", { method:"POST" });
+    const j = await r.json().catch(()=>({}));
+    if (!r.ok) throw new Error(j.detail || ("HTTP "+r.status));
+    setStatus(`Redrawing ${j.pages} page${j.pages!==1?"s":""} in the background — watch progress on the book's settings page.`);
+    $("#ovpages").hidden = true;
+  } catch (ex) {
+    setStatus("Failed: " + ex.message, true);
+    b.disabled = false;
+  }
+}
+$("#ovredraw").onclick = redrawPages;
 function closeEditor(){ $("#ov").hidden = true; cur = null; }
 function setStatus(msg, err){ const s = $("#ovstatus"); s.textContent = msg || ""; s.classList.toggle("err", !!err); }
 
@@ -233,6 +278,7 @@ async function submitEdit(){
     if (!r.ok){ const e = await r.json().catch(()=>({})); throw new Error(e.detail || ("HTTP "+r.status)); }
     refreshSheet();
     setStatus("Done — updated. Edit again or close.");
+    offerRedrawPages();
   } catch (ex) {
     setStatus("Failed: " + ex.message, true);
   } finally {
@@ -253,6 +299,7 @@ async function submitScratch(){
     if (!r.ok){ const e = await r.json().catch(()=>({})); throw new Error(e.detail || ("HTTP "+r.status)); }
     refreshSheet();
     setStatus("Done — regenerated & saved. Tweak the prompt and go again if needed.");
+    offerRedrawPages();
   } catch (ex) {
     setStatus("Failed: " + ex.message, true);
   } finally {

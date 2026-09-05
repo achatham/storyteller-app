@@ -17,7 +17,7 @@ from pathlib import Path
 from PIL import Image
 
 from pipeline import gem, costs, analyze, markup
-from pipeline.config import (STYLES, SHEET_IMAGE_MODEL, PAGE_IMAGE_MODEL, ROSTER_IMAGE_MODEL,
+from pipeline.config import (STYLES, STYLE_ANATOMY, STYLE_ANATOMY_DEFAULT, SHEET_IMAGE_MODEL, PAGE_IMAGE_MODEL, ROSTER_IMAGE_MODEL,
                              LITE_IMAGE_MODEL, MAX_REFS,
                              ANALYZE_MODEL, WEBP_QUALITY, SCENE_MAXW)
 
@@ -155,11 +155,12 @@ def _adopt_brief_fix(ctx: dict, crit: dict, state: dict, trace: dict, idx: int) 
     return True
 
 
-def _verify_fix(cand_path, defect: str) -> dict:
-    """Focused vision check: was `defect` actually removed from the revised image?
-    Best-effort -- on any failure assume resolved (don't block on the checker)."""
+def _verify_fix(cand, defect: str) -> dict:
+    """Focused vision check: was `defect` actually removed from the revised image
+    (Path or bytes)? Best-effort -- on any failure assume resolved (don't block on
+    the checker). Shared with the bake."""
     try:
-        return gem.critique_image(cand_path, FIX_VERIFY.format(defect=defect),
+        return gem.critique_image(cand, FIX_VERIFY.format(defect=defect),
                                   schema=FIX_VERIFY_SCHEMA)
     except Exception as ex:  # noqa: BLE001
         print(f"[scene] fix-verify failed: {ex}", flush=True)
@@ -175,6 +176,9 @@ THE SCENE SHOULD SHOW:
 {brief}
 
 Return JSON only: {{"best": <the 1-based number of the best candidate>, "why": "<short reason>"}}"""
+JUDGE_SCHEMA = {"type": "object", "properties": {
+    "best": {"type": "integer"}, "why": {"type": "string"}}, "required": ["best"]}
+
 SHEET_TRIES = 2  # reference sheets are drawn once + cached, so a reroll is cheap insurance
 SHEET_PASS = 4   # min(clean_sheet, match) needed to accept a sheet
 
@@ -182,18 +186,59 @@ SHEET_CRITIQUE = """You are reviewing a CANONICAL REFERENCE SHEET for a children
 It should depict, on a plain neutral background, this single subject:
 {desc}
 
+ART STYLE and what counts as well-formed anatomy IN THIS STYLE (judge against this, not
+against realism): {anatomy}
+
 Return JSON only:
 {{
   "clean_sheet": <1-5: is there EXACTLY ONE subject, drawn ONCE? Score 1 if it is duplicated,
                   mirrored or doubled (e.g. two heads/faces, a twin copy, the same feature at
                   both ends), or there are extra subjects, text labels or a busy background>,
   "match": <1-5: does it match the description above?>,
+  "anatomy": <1-5: is the subject well-formed FOR THIS ART STYLE, per the guide above? The
+              style's own stylisation is correct by definition; a defect is what breaks the
+              figure even within that style (malformed or wrong-count limbs/fingers, features
+              that don't line up, joints bent wrong, a lopsided head where the design isn't).
+              For an object or place: coherent structure and perspective. Score 1-2 if a
+              child would notice something is "off">,
   "issues": ["..."],
   "fix_hint": "<one sentence telling the artist how to fix the biggest problem>"
 }}"""
+SHEET_CRITIQUE_SCHEMA = {"type": "object", "properties": {
+    "clean_sheet": {"type": "integer"}, "match": {"type": "integer"},
+    "anatomy": {"type": "integer"},
+    "issues": {"type": "array", "items": {"type": "string"}},
+    "fix_hint": {"type": "string"}}, "required": ["clean_sheet", "match", "anatomy"]}
 
 
-def _draw_sheet(prompt, refs, aspect, desc):
+def anatomy_guide(style_text: str) -> str:
+    """The anatomy conventions the sheet critic should judge against for a book's art
+    style: the style description itself plus the per-style guide (STYLE_ANATOMY, keyed
+    by style; the naturalistic default for styles without one). Looked up from the
+    style TEXT because that is what every sheet-drawing path already carries."""
+    key = next((k for k, v in STYLES.items() if v == style_text), None)
+    guide = STYLE_ANATOMY.get(key, STYLE_ANATOMY_DEFAULT)
+    return (f"{style_text}\n{guide}" if style_text else guide)
+
+
+def critique_sheet(image, desc: str, style_text: str = "", tries: int = 4) -> dict:
+    """Single-subject critic for one reference sheet (Path or bytes). Returns the
+    critique dict with `score` = min(clean_sheet, match, anatomy) (what SHEET_PASS is
+    judged on) and `avg` filled in. Anatomy was added after two Chamber of Secrets
+    sheets (Hermione, Lockhart) passed with badly-off proportions: a sheet is copied
+    into every page that casts the character, so a malformed one is the most expensive
+    mistake the roster can make. It is judged relative to the book's art style (a
+    claymation figure's stubby limbs are the design), see anatomy_guide. Shared by the
+    interactive draw and the batch roster."""
+    crit = gem.critique_image(image, SHEET_CRITIQUE.format(desc=desc or "(the subject)",
+                                                           anatomy=anatomy_guide(style_text)),
+                              schema=SHEET_CRITIQUE_SCHEMA, tries=tries)
+    parts = [crit.get("clean_sheet", 0), crit.get("match", 0), crit.get("anatomy", 0)]
+    crit["score"], crit["avg"] = min(parts), round(sum(parts) / len(parts), 2)
+    return crit
+
+
+def _draw_sheet(prompt, refs, aspect, desc, style_text=""):
     """Draw a reference sheet with a single-subject critic + retry, keeping the best
     of SHEET_TRIES attempts. Catches the model's habit of mirroring/doubling a subject
     (e.g. a figurehead at both ends -> 'two heads'). Returns (best_bytes, trace) where
@@ -227,9 +272,8 @@ def _draw_sheet(prompt, refs, aspect, desc):
                 continue
             drawn += 1
             try:
-                crit = gem.critique_image(cand, SHEET_CRITIQUE.format(desc=desc or "(the subject)"))
-                cs, mt = crit.get("clean_sheet", 0), crit.get("match", 0)
-                score, avg = min(cs, mt), round((cs + mt) / 2, 2)
+                crit = critique_sheet(cand, desc, style_text)
+                score, avg = crit["score"], crit["avg"]
             except Exception as ex:  # noqa: BLE001 -- never fail a sheet on a critic error
                 print(f"[scene] sheet critique failed: {ex}", flush=True)
                 attempts.append({"attempt": attempt, "prompt": p, "data": data,
@@ -429,7 +473,7 @@ def _ensure_sheet(book_id, member, style_text, style_ref=None) -> bytes | None:
                                  "outfit/moment: keep the SAME facial identity, hair and build; "
                                  "change only the clothing/age/form described above.")
                 prompt = base + ("\n\n" + " ".join(notes) if notes else "")
-                data, trace = _draw_sheet(prompt, refs or None, img_aspect, appearance)
+                data, trace = _draw_sheet(prompt, refs or None, img_aspect, appearance, style_text)
         except Exception as ex:  # noqa: BLE001
             print(f"[scene] sheet {eid}/{vid} failed: {ex}", flush=True)
             return None
@@ -485,7 +529,7 @@ def _ensure_view_sheet(book_id, member, style_text, view, style_ref=None) -> byt
                 refs = [style_ref]
                 prompt += ("\n\nThe attached image is a STYLE REFERENCE: match its art style, "
                            "medium and colour palette exactly, but do NOT copy its subject.")
-            data, trace = _draw_sheet(prompt, refs, "3:2", desc)
+            data, trace = _draw_sheet(prompt, refs, "3:2", desc, style_text)
         except Exception as ex:  # noqa: BLE001
             print(f"[scene] view '{view}' sheet {eid} failed: {ex}", flush=True)
             return _ensure_sheet(book_id, member, style_text, style_ref)   # fallback
@@ -594,7 +638,8 @@ def redraw_sheet_from_prompt(book_id, entity_id, variant_id, sheet_prompt,
             refs.append(style_ref)
             base += "\n\n" + _STYLE_REF_NOTE.format(n=len(refs))
         try:
-            data, trace = _draw_sheet(base, refs or None, img_aspect, appearance or sheet_prompt)
+            data, trace = _draw_sheet(base, refs or None, img_aspect, appearance or sheet_prompt,
+                                      style_text)
         except Exception as ex:  # noqa: BLE001
             print(f"[scene] sheet redraw {entity_id}/{variant_id} failed: {ex}", flush=True)
             return {"ok": False, "error": str(ex)}
@@ -908,6 +953,46 @@ def plan_page_sheets(book_id: int, idx: int) -> list[dict]:
     return plan
 
 
+def sheet_key(member: dict) -> tuple[str, str]:
+    """(entity_id, variant_id) under which `member`'s reference sheet is stored: a
+    view member (a named spot inside a setting) lives under the synthetic '__v_<slug>'
+    variant that _ensure_view_sheet draws it as."""
+    vid = "__v_" + _view_slug(member["view"]) if member.get("view") else member["variant_id"]
+    return member["entity_id"], vid
+
+
+def refresh_sheet_refs(ctx: dict) -> int:
+    """Re-read a page context's reference sheets from the roster. build_scene_context
+    copies the sheet bytes in once; the bake keeps one context per page for every
+    round, so without this a sheet fixed in the roster mid-bake would keep being drawn
+    (and critiqued) against its old version. Returns how many sheets changed."""
+    changed = 0
+    fresh = []
+    for m, old in zip(ctx["ref_members"], ctx["ref_bytes"]):
+        data = db.get_sheet(ctx["book_id"], *sheet_key(m)) or old
+        changed += data != old
+        fresh.append(data)
+    ctx["ref_bytes"] = fresh
+    return changed
+
+
+def pages_using_sheet(book_id: int, entity_id: str, variant_id: str, workers: int = 6) -> list[int]:
+    """Indices of the pages whose illustration is drawn against the sheet
+    (entity_id, variant_id) -- the exact per-page sheet plan, not just the cast list.
+    Read-only (no draws). Used to redraw only the pages a fixed sheet affects."""
+    from concurrent.futures import ThreadPoolExecutor
+    idxs = [p["idx"] for p in db.get_pages(book_id)]
+
+    def uses(idx):
+        try:
+            return any(sheet_key(m) == (entity_id, variant_id) for m in plan_page_sheets(book_id, idx))
+        except Exception:  # noqa: BLE001 -- an unplannable page can't be using the sheet
+            return False
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return [idx for idx, hit in zip(idxs, ex.map(uses, idxs)) if hit]
+
+
 def build_scene_context(book_id: int, idx: int) -> dict:
     """Everything needed to render page `idx`, computed once and shared by the lazy
     path and the batch bake: resolved cast, per-character states, the reference
@@ -1112,21 +1197,14 @@ def critique_prompt_lite(ctx: dict) -> str:
         roster=ctx["roster"], chapter_ahead="(omitted)", source="(omitted)")
 
 
-def _judge_best(cands: list, brief: str, td: Path) -> dict | None:
-    """Vision critic picks the best of several candidates (bytes) when none cleared
-    the bar. Returns {"best": idx0based, "why": str} or None. Shared with the bake."""
+def _judge_best(cands: list, brief: str) -> dict | None:
+    """Vision critic picks the best of several candidates ({"n","data",...}) when none
+    cleared the bar. Returns {"best": idx0based, "why": str} or None. Shared with the bake."""
     if len(cands) <= 1:
         return None
-    paths = []
-    for c in cands:
-        cp = Path(td) / f"judge{c['n']}.webp"
-        cp.write_bytes(c["data"])
-        paths.append(cp)
     try:
-        verdict = gem.judge_images(paths, JUDGE_BEST.format(brief=brief),
-                                   schema={"type": "object", "properties": {
-                                       "best": {"type": "integer"}, "why": {"type": "string"}},
-                                       "required": ["best"]})
+        verdict = gem.judge_images([c["data"] for c in cands], JUDGE_BEST.format(brief=brief),
+                                   schema=JUDGE_SCHEMA)
         pick = int(verdict.get("best", 0)) - 1
         if 0 <= pick < len(cands):
             return {"best": pick, "why": verdict.get("why", "")}
@@ -1246,7 +1324,7 @@ def _render_scene(book_id: int, idx: int, fast_critique: bool = False,
             data, score, chosen = state["best"]
             # If nothing cleared the bar, let a vision critic pick the best candidate.
             if score < PASS_THRESHOLD:
-                pick = _judge_best(state["cands"], page["brief"], Path(td))
+                pick = _judge_best(state["cands"], page["brief"])
                 if pick:
                     c = state["cands"][pick["best"]]
                     data, score, chosen = c["data"], c["score"], c["n"]

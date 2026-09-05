@@ -3,9 +3,11 @@
 A single shared Budget caps the number of image-generation calls across the
 whole run (the user asked for a hard ceiling of 100 candidates).
 
-Batch helpers (batch_submit / batch_poll) drive Google's Batch API, which bills
-at a flat 50% of interactive pricing but runs asynchronously (target <=24h). They
-back the "illustrate the whole book" bake in the webapp.
+Batch helpers (batch_generate_images / batch_wait / batch_image_results) drive
+Google's Batch API for IMAGE generation only: it bills at a flat 50% of interactive
+pricing but runs asynchronously (target <=24h, typically minutes). Text steps
+(critique, verify, judge) are never batched -- they cost cents, and a queued text
+job would stall the whole pipeline for a negligible saving.
 """
 import base64
 import io
@@ -20,8 +22,7 @@ from google import genai
 from google.genai import types
 
 from . import costs
-from .config import (IMAGE_SIZE, IMAGE_MODEL, TEXT_MODEL, SHEET_IMAGE_MODEL,
-                     PAGE_IMAGE_MODEL, CRITIQUE_MODEL, WEBP_QUALITY)
+from .config import IMAGE_SIZE, IMAGE_MODEL, TEXT_MODEL, CRITIQUE_MODEL, WEBP_QUALITY
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -267,11 +268,18 @@ def generate_image(prompt: str, refs: list[Path] | None = None, out_path: Path |
     raise ImageRefused(_block_reason(resp))
 
 
-def critique_image(image_path: Path, brief: str, refs: list[Path] | None = None,
+def _pil(src):
+    """Open an image for a request from raw bytes or a Path/str."""
+    from PIL import Image
+    return Image.open(io.BytesIO(src) if isinstance(src, (bytes, bytearray)) else src)
+
+
+def critique_image(image, brief: str, refs: list | None = None,
                    ref_labels: list[str] | None = None, schema: dict | None = None,
                    model: str = CRITIQUE_MODEL, tries: int = 4,
                    lite_brief: str | None = None) -> dict:
-    """Vision-model critique of a generated image against its brief.
+    """Vision-model critique of a generated image against its brief. `image` and each
+    of `refs` may be a Path or raw bytes (the bake holds candidates in memory).
 
     If `refs` are given they are attached AFTER the judged image as the canonical
     reference sheets for the named characters (labelled, in order via `ref_labels`),
@@ -288,7 +296,6 @@ def critique_image(image_path: Path, brief: str, refs: list[Path] | None = None,
          imagery, are what trip Gemini's PROHIBITED_CONTENT child-safety filter, so
          this tier reliably gets a score for a page the full prompt won't grade
          (at the cost of spoiler/detail grounding). Only used if `lite_brief` given."""
-    from PIL import Image
     cfg = types.GenerateContentConfig(
         response_mime_type="application/json",
         response_schema=schema,
@@ -299,7 +306,7 @@ def critique_image(image_path: Path, brief: str, refs: list[Path] | None = None,
         contents = [text]
         if use_refs and refs:
             contents.append("THE IMAGE TO JUDGE:")
-        contents.append(Image.open(image_path))
+        contents.append(_pil(image))
         if use_refs and refs:
             contents.append(
                 "CANONICAL CHARACTER REFERENCE SHEETS follow -- each shows what one named "
@@ -308,7 +315,7 @@ def critique_image(image_path: Path, brief: str, refs: list[Path] | None = None,
             for i, r in enumerate(refs):
                 label = ref_labels[i] if ref_labels and i < len(ref_labels) else f"character {i + 1}"
                 contents.append(f"--- Reference: {label} ---")
-                contents.append(Image.open(r))
+                contents.append(_pil(r))
         return contents
 
     def _go(contents):
@@ -333,22 +340,21 @@ def critique_image(image_path: Path, brief: str, refs: list[Path] | None = None,
     raise last
 
 
-def judge_images(image_paths: list[Path], prompt: str, schema: dict | None = None,
+def judge_images(images: list, prompt: str, schema: dict | None = None,
                  model: str = CRITIQUE_MODEL) -> dict:
-    """Show the model several candidate images (labelled Candidate 1..N) alongside
-    `prompt`, and return its JSON verdict (e.g. which candidate is best)."""
-    from PIL import Image
+    """Show the model several candidate images (Paths or bytes, labelled Candidate
+    1..N) alongside `prompt`, and return its JSON verdict (e.g. which candidate is best)."""
     contents = [prompt]
-    for i, p in enumerate(image_paths):
+    for i, p in enumerate(images):
         contents.append(f"--- Candidate {i + 1} ---")
-        contents.append(Image.open(p))
+        contents.append(_pil(p))
     cfg = types.GenerateContentConfig(
         response_mime_type="application/json", response_schema=schema, temperature=0.2)
 
     def _go():
         resp = _client.models.generate_content(model=model, contents=contents, config=cfg)
         _record_usage(resp, model, "critique")
-        return _coerce_json(resp.text)
+        return _coerce_json(resp.text, _block_reason(resp))
 
     return _retry(_go, what="judge_images")
 
@@ -360,9 +366,7 @@ def vision_json(contents: list, schema: dict | None = None, model: str = CRITIQU
     (`contents` = strs and image BYTES, in order). The general form of critique_image /
     judge_images for reviews that interleave several labelled images with their
     text -- e.g. the continuity critic, which looks at five consecutive pages at once."""
-    from PIL import Image
-    parts = [Image.open(io.BytesIO(c)) if isinstance(c, (bytes, bytearray)) else c
-             for c in contents]
+    parts = [_pil(c) if isinstance(c, (bytes, bytearray)) else c for c in contents]
     kwargs = dict(response_mime_type="application/json", response_schema=schema,
                   temperature=temperature)
     if thinking_level:
@@ -377,51 +381,42 @@ def vision_json(contents: list, schema: dict | None = None, model: str = CRITIQU
     return _retry(_go, what="vision_json")
 
 
-# ---------------- batch API ----------------
+# ---------------- batch API (image generation only) ----------------
 # The Batch API takes a JSONL file of {"key","request"} lines and, asynchronously,
-# produces a JSONL file of {"key","response"} lines. We reconstruct each response
-# into a normal SDK GenerateContentResponse so downstream code (image extraction,
-# _coerce_json, usage recording) is identical to the interactive path.
+# produces a JSONL file of {"key","response"} lines. Only image generation goes
+# through it: the responses are reconstructed into a minimal stand-in for the SDK
+# response so image extraction / block-reason / usage recording match the
+# interactive generate_image path.
 
-def image_part(src) -> dict:
-    """A Gemini content Part carrying an inline image, for a batch request.
-    `src` is raw bytes or a Path/str to a webp/png/jpeg file."""
-    data = bytes(src) if isinstance(src, (bytes, bytearray)) else Path(src).read_bytes()
+POLL_SECONDS = int(os.environ.get("STORY_BATCH_POLL", "20"))
+
+# Terminal batch states (no further polling will change them).
+BATCH_DONE = "JOB_STATE_SUCCEEDED"
+BATCH_TERMINAL = {"JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED",
+                  "JOB_STATE_CANCELLED", "JOB_STATE_EXPIRED"}
+
+
+def _image_part(data: bytes) -> dict:
     return {"inline_data": {"mime_type": "image/webp",
-                            "data": base64.b64encode(data).decode("ascii")}}
+                            "data": base64.b64encode(bytes(data)).decode("ascii")}}
 
 
-def text_part(text: str) -> dict:
-    return {"text": text}
-
-
-def image_gen_config(aspect: str = "3:2", size: str = IMAGE_SIZE) -> dict:
-    """generation_config for an image request in a batch (mirrors generate_image)."""
-    return {"response_modalities": ["TEXT", "IMAGE"],
-            "image_config": {"aspect_ratio": aspect, "image_size": size}}
-
-
-def json_config(schema: dict | None = None, temperature: float = 0.3) -> dict:
-    """generation_config for a JSON (critique/verify/judge) request in a batch."""
-    cfg = {"response_mime_type": "application/json", "temperature": temperature}
-    if schema:
-        cfg["response_schema"] = schema
-    return cfg
-
-
-def batch_submit(requests: list[dict], model: str,
-                 display_name: str = "storyteller-batch") -> str:
-    """Submit a batch job and return its job name. Each request is a dict:
-        {"key": str, "parts": [<part>...], "generation_config": {...}}
-    where parts come from text_part()/image_part(). Uses a JSONL file upload so
-    large inline-image payloads (a whole book of scenes) are not capped."""
+def batch_generate_images(requests: list[dict], model: str,
+                          display_name: str = "storyteller-batch") -> str:
+    """Submit one image-generation batch and return its job name. Each request is
+        {"key": str, "prompt": str, "ref_bytes": [webp bytes...], "aspect": "3:2"}
+    -- the same inputs generate_image takes. Uploaded as a JSONL file so a whole
+    book of inline reference images is not capped by a request-size limit."""
     with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False,
                                      encoding="utf-8") as tf:
         path = tf.name
         for r in requests:
+            parts = [{"text": r["prompt"]}] + [_image_part(b) for b in r.get("ref_bytes") or []]
+            cfg = {"response_modalities": ["TEXT", "IMAGE"],
+                   "image_config": {"aspect_ratio": r.get("aspect", "3:2"),
+                                    "image_size": IMAGE_SIZE}}
             line = {"key": str(r["key"]),
-                    "request": {"contents": [{"parts": r["parts"]}],
-                                "generation_config": r.get("generation_config") or {}}}
+                    "request": {"contents": [{"parts": parts}], "generation_config": cfg}}
             tf.write(json.dumps(line) + "\n")
 
     def _go():
@@ -439,15 +434,21 @@ def batch_submit(requests: list[dict], model: str,
             pass
 
 
-# Terminal batch states (no further polling will change them).
-BATCH_DONE = "JOB_STATE_SUCCEEDED"
-BATCH_TERMINAL = {"JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED",
-                  "JOB_STATE_CANCELLED", "JOB_STATE_EXPIRED"}
-
-
 def batch_state(job_name: str) -> str:
     """Current state string of a batch job (e.g. JOB_STATE_RUNNING)."""
     return _client.batches.get(name=job_name).state.name
+
+
+def batch_wait(job_name: str, on_state=None) -> str:
+    """Poll a job to a terminal state and return it. `on_state(state)` is called on
+    every poll so the caller can mirror progress (e.g. into batch_jobs)."""
+    while True:
+        st = batch_state(job_name)
+        if on_state:
+            on_state(st)
+        if st in BATCH_TERMINAL:
+            return st
+        time.sleep(POLL_SECONDS)
 
 
 def active_batch_jobs(scan_limit: int = 200) -> set | None:
@@ -495,10 +496,10 @@ class _Usage:
 class BatchResponse:
     """A minimal stand-in for an SDK GenerateContentResponse, built from a batch
     result-file JSON object (REST camelCase). Exposes exactly the attributes the
-    rest of gem.py reads (.parts, .text, .usage_metadata) so batch results flow
-    through the same image-extraction / _coerce_json / usage-recording code paths.
-    Hand-rolled rather than model_validate() so a newly-added API field (e.g.
-    usageMetadata.serviceTier) never breaks parsing."""
+    rest of gem.py reads (.parts, .text, .usage_metadata, block/finish reason) so
+    batch results flow through the same image-extraction / _block_reason / usage-
+    recording code paths. Hand-rolled rather than model_validate() so a newly-added
+    API field (e.g. usageMetadata.serviceTier) never breaks parsing."""
 
     def __init__(self, obj: dict):
         cands = obj.get("candidates") or []
@@ -518,16 +519,9 @@ class BatchResponse:
         return joined or None
 
 
-def _response_from_json(obj: dict) -> "BatchResponse":
-    """Wrap a result-file JSON response so callers use .text / .parts /
-    .usage_metadata exactly as for an interactive response."""
-    return BatchResponse(obj)
-
-
-def batch_results(job_name: str) -> dict:
-    """{key: GenerateContentResponse | None} for a SUCCEEDED job. Handles both the
-    file destination (our submit path) and an inline destination. A per-request
-    error yields None for that key. Call only once batch_state() is SUCCEEDED."""
+def _batch_responses(job_name: str) -> dict:
+    """{key: BatchResponse | None} for a SUCCEEDED job (None = that request errored).
+    Handles both the file destination (our submit path) and an inline destination."""
     job = _client.batches.get(name=job_name)
     if job.state.name != BATCH_DONE:
         raise RuntimeError(f"batch {job_name} not done: {job.state.name}")
@@ -554,7 +548,7 @@ def batch_results(job_name: str) -> dict:
             out[key] = None
         else:
             try:
-                out[key] = _response_from_json(obj["response"])
+                out[key] = BatchResponse(obj["response"])
             except Exception as e:  # noqa: BLE001
                 print(f"  [batch] parse failed for key {key}: {type(e).__name__}: {str(e)[:120]}",
                       flush=True)
@@ -562,12 +556,10 @@ def batch_results(job_name: str) -> dict:
     return out
 
 
-def response_image_bytes(resp, quality: int = WEBP_QUALITY) -> bytes | None:
-    """Extract the first inline image from a response and return WebP bytes
-    (same encoding generate_image uses). None if the response carries no image."""
+def _response_image_bytes(resp, quality: int = WEBP_QUALITY) -> bytes | None:
+    """The first inline image of a response as WebP bytes (the encoding
+    generate_image uses), or None if it carries no image."""
     from PIL import Image
-    if resp is None:
-        return None
     for part in resp.parts or []:
         if getattr(part, "inline_data", None) is not None:
             pil = Image.open(io.BytesIO(part.inline_data.data)).convert("RGB")
@@ -577,36 +569,18 @@ def response_image_bytes(resp, quality: int = WEBP_QUALITY) -> bytes | None:
     return None
 
 
-def record_batch_usage(resp, model: str, kind: str, images: int = 0):
-    """Record one batch response's token usage at the 50% batch rate."""
-    _record_usage(resp, model, kind, images=images, batch=True)
-
-
-def critique_parts(brief: str, image: bytes, ref_bytes: list | None = None,
-                   ref_labels: list | None = None) -> list:
-    """Content parts for a batch scene-critique, matching critique_image's layout:
-    the judged image first, then the labelled canonical reference sheets. Keep in
-    sync with critique_image._build()."""
-    parts = [text_part(brief)]
-    if ref_bytes:
-        parts.append(text_part("THE IMAGE TO JUDGE:"))
-    parts.append(image_part(image))
-    if ref_bytes:
-        parts.append(text_part(
-            "CANONICAL CHARACTER REFERENCE SHEETS follow -- each shows what one named "
-            "character is supposed to look like. Compare the figures in the image above "
-            "against them to judge `figure_match`:"))
-        for i, b in enumerate(ref_bytes):
-            label = ref_labels[i] if ref_labels and i < len(ref_labels) else f"character {i + 1}"
-            parts.append(text_part(f"--- Reference: {label} ---"))
-            parts.append(image_part(b))
-    return parts
-
-
-def judge_parts(prompt: str, images: list) -> list:
-    """Content parts for a batch best-of judge (matches judge_images layout)."""
-    parts = [text_part(prompt)]
-    for i, b in enumerate(images):
-        parts.append(text_part(f"--- Candidate {i + 1} ---"))
-        parts.append(image_part(b))
-    return parts
+def batch_image_results(job_name: str, model: str) -> dict:
+    """Collect a SUCCEEDED image batch: {key: webp bytes | ImageRefused | None}.
+    bytes = the generated image; an ImageRefused instance (not raised) = the model
+    answered but produced no image, carrying the block reason so the caller can
+    rewrite a policy-refused prompt exactly as it does for generate_image; None =
+    the request itself errored. Every answered request is billed at the batch rate."""
+    out: dict = {}
+    for key, resp in _batch_responses(job_name).items():
+        if resp is None:
+            out[key] = None
+            continue
+        _record_usage(resp, model, "image", images=1, batch=True)
+        img = _response_image_bytes(resp)
+        out[key] = img if img else ImageRefused(_block_reason(resp))
+    return out

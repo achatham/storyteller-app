@@ -7,11 +7,16 @@ several variants stay one identity:
     wave 2: the remaining variants, each generated with its entity's freshly-drawn
             anchor sheet attached as an identity reference (same face/build).
 
-Each wave is GENERATE (image batch) -> CRITIQUE (single-subject text batch) -> keep
-the best, with one reroll (SHEET_TRIES) for sheets that miss the bar. A blocked or
-empty critique is treated as "keep the drawn sheet unscored" rather than dropping
-it, so a sheet the critic won't grade still lands (the same failure that stranded
-46 Harry-Potter pages in the first bake).
+Each wave is GENERATE (one image batch) -> CRITIQUE (interactive single-subject
+critic, in parallel) -> keep the best, with one reroll (SHEET_TRIES) for sheets
+that miss the bar. A sheet is SAVED the moment it is settled -- it passed, or the
+critic couldn't grade it (kept unscored rather than dropped, the same rule as
+pages) -- so the roster page fills in as soon as the first image batch lands
+instead of after the last straggler's reroll.
+
+Only the image generation is batched. The critique used to be a second batch job
+per attempt, which held every finished sheet in memory until a text job that saves
+cents came back -- once for two hours.
 
 Only real (character/prop/setting) sheets are batched here. 'View' sheets (a named
 spot inside a setting, variant ids starting with '__') and any sheet the batch
@@ -23,23 +28,15 @@ standalone subprocess -- it executes inside the book-processing worker, which is
 already a long-running background process, and polls the batch jobs to completion.
 """
 import os
-import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
 from pipeline import gem, costs
-from pipeline.config import IMAGE_SIZE, CRITIQUE_MODEL, ROSTER_IMAGE_MODEL, WEBP_QUALITY
+from pipeline.config import ROSTER_IMAGE_MODEL, WEBP_QUALITY
 
-from . import db, scene
+from . import batchjob, db, scene
 
-POLL_SECONDS = int(os.environ.get("STORY_BATCH_POLL", "20"))
 PLAN_WORKERS = int(os.environ.get("STORY_ROSTER_PLAN_WORKERS", "6"))
-
-SHEET_CRITIQUE_SCHEMA = {"type": "object", "properties": {
-    "clean_sheet": {"type": "integer"}, "match": {"type": "integer"},
-    "issues": {"type": "array", "items": {"type": "string"}},
-    "fix_hint": {"type": "string"}}, "required": ["clean_sheet", "match"]}
-
 
 # Roster jobs share the page rounds' batch_jobs bookkeeping, under a round of their
 # own so the (book, round, kind) key can't collide with a page round.
@@ -48,43 +45,6 @@ ROSTER_ROUND = -1
 
 def _skey(eid: str, vid: str) -> str:
     return f"{eid}|{vid}"
-
-
-def _await(book_id, kind, job_name: str) -> str:
-    while True:
-        st = gem.batch_state(job_name)
-        if st in gem.BATCH_TERMINAL:
-            db.bjob_set_state(book_id, ROSTER_ROUND, kind, st)
-            return st
-        time.sleep(POLL_SECONDS)
-
-
-def _submit_or_reattach(book_id, kind, reqs, model, display, coarse, log) -> str:
-    """Reuse a job already submitted for this roster step instead of paying for the
-    same batch twice.
-
-    A batch job runs server-side, so killing the bake (a restart, a redeploy) doesn't
-    cancel it -- and the roster used to submit blind on resume, duplicating a whole
-    wave's spend for anything in flight. Page rounds have had this since they landed;
-    the roster was the gap.
-
-    A job that ended FAILED/CANCELLED/EXPIRED is not reattached: there are no results
-    to collect, so the only useful move is a fresh submit."""
-    existing = db.bjob_get(book_id, ROSTER_ROUND, kind)
-    if existing and existing["job_name"] and existing["state"] != gem.BATCH_DONE and \
-            existing["state"] in gem.BATCH_TERMINAL:
-        log(f"[roster] {kind}: last job {existing['job_name']} ended "
-            f"{existing['state']} -- submitting a fresh one")
-        existing = None
-    if existing and existing["job_name"]:
-        db.batch_req_add(book_id, existing["job_name"], coarse, len(reqs))
-        log(f"[roster] {kind}: reattaching {existing['job_name']} ({existing['state']})")
-        return existing["job_name"]
-    job = gem.batch_submit(reqs, model=model, display_name=display)
-    db.bjob_upsert(book_id, ROSTER_ROUND, kind, job, "JOB_STATE_PENDING")
-    db.batch_req_add(book_id, job, coarse, len(reqs))
-    log(f"[roster] {kind}: submitted {job} ({len(reqs)} reqs)")
-    return job
 
 
 def _collect(book_id, log) -> dict:
@@ -115,6 +75,21 @@ def _collect(book_id, log) -> dict:
     return {k: m for k, m in needed.items() if not db.has_sheet(book_id, k[0], k[1])}
 
 
+def _save_slot(book_id, s) -> int:
+    """Store a slot's best candidate as the sheet (+ its debug history). Returns 1
+    if saved, 0 if the slot never produced an image."""
+    if s["best"] is None:
+        return 0
+    m = s["m"]
+    data = scene._compress(s["best"][0], 0, WEBP_QUALITY)   # sheets feed gen -> keep res
+    db.save_sheet(book_id, m["entity_id"], m["variant_id"], data)
+    scene._save_sheet_history(book_id, m["entity_id"], m["variant_id"],
+                              m.get("appearance", ""),
+                              {"attempts": s["attempts"], "chosen": s["best"][2]})
+    s["saved"] = True
+    return 1
+
+
 def _draw_wave(book_id, w, wave, style_text, style_ref_bytes, use_anchor, log) -> int:
     """Generate + critique + save one wave of sheets, keeping the best of up to
     SHEET_TRIES attempts each. `use_anchor` attaches a same-entity sibling sheet as
@@ -125,19 +100,19 @@ def _draw_wave(book_id, w, wave, style_text, style_ref_bytes, use_anchor, log) -
     slots: dict = {}
     for m in wave:
         slots[_skey(m["entity_id"], m["variant_id"])] = {
-            "m": m, "best": None, "attempts": [], "fix": "",
+            "m": m, "best": None, "attempts": [], "fix": "", "saved": False,
             "safe_prompt": "", "safety_tries": 0}
+    saved = 0
 
     # extra attempts beyond SHEET_TRIES cover slots whose draw was policy-refused and
     # rewritten (a refused attempt produced no candidate, so it shouldn't cost a try).
     for attempt in range(1, scene.SHEET_TRIES + scene.SAFETY_REWRITES + 1):
-        todo = [k for k, s in slots.items()
-                if s["best"] is None or (s["best"][1] or 0) < scene.SHEET_PASS]
+        todo = [k for k, s in slots.items() if not s["saved"]]
         if not todo:
             break
 
         # --- GENERATE (image batch) ---
-        gen_reqs = []
+        reqs = []
         for k in todo:
             s = slots[k]
             m = s["m"]
@@ -151,90 +126,61 @@ def _draw_wave(book_id, w, wave, style_text, style_ref_bytes, use_anchor, log) -
             prompt = base + (f"\n\nIMPORTANT FIX FROM LAST ATTEMPT: {s['fix']}"
                              if s["fix"] else "")
             s["_prompt"], s["_desc"] = prompt, r["desc"]
-            gen_reqs.append({"key": k,
-                             "parts": [gem.text_part(prompt)]
-                                      + [gem.image_part(b) for b in r["ref_bytes"]],
-                             "generation_config": gem.image_gen_config(aspect=r["aspect"],
-                                                                       size=IMAGE_SIZE)})
-        if not gen_reqs:
+            reqs.append({"key": k, "prompt": prompt, "ref_bytes": r["ref_bytes"],
+                         "aspect": r["aspect"]})
+        if not reqs:
             break
-        gkind = f"w{w}:gen:a{attempt}"
-        gjob = _submit_or_reattach(book_id, gkind, gen_reqs, ROSTER_IMAGE_MODEL,
-                                   f"roster b{book_id} gen a{attempt}", "image", log)
-        if _await(book_id, gkind, gjob) != gem.BATCH_DONE:
-            log(f"[roster] gen batch {gjob} did not succeed; stopping wave")
+        results = batchjob.run_image_batch(book_id, ROSTER_ROUND, f"w{w}:gen:a{attempt}", reqs,
+                                           ROSTER_IMAGE_MODEL, f"roster b{book_id} gen a{attempt}",
+                                           log=lambda m: log(f"[roster] {m}"))
+        if results is None:
+            log("[roster] gen batch did not succeed; stopping wave")
             break
         cands = {}
-        for k, resp in gem.batch_results(gjob).items():
+        for k, res in results.items():
             # A reattached job answers the request set it was submitted with, which a
             # resume can have re-planned around (sheets saved since are dropped from
             # the wave). Ignore anything we're no longer drawing.
-            if resp is None or k not in slots:
-                continue
-            gem.record_batch_usage(resp, ROSTER_IMAGE_MODEL, "image", images=1)
-            img = gem.response_image_bytes(resp)
-            if img:
-                cands[k] = img
-                continue
-            # blocked/empty draw: on a policy refusal, rewrite this slot's prompt so the
-            # next attempt regenerates a policy-safe version (e.g. a distressed child).
-            reason = gem._block_reason(resp)
             s = slots.get(k)
-            if s is not None and gem.is_policy_refusal(reason) and s["safety_tries"] < scene.SAFETY_REWRITES:
-                s["safe_prompt"] = gem.rewrite_prompt_safely(s.get("_prompt", ""), reason)
+            if s is None or res is None:
+                continue
+            if isinstance(res, (bytes, bytearray)):
+                cands[k] = bytes(res)
+            elif res.policy and s["safety_tries"] < scene.SAFETY_REWRITES:
+                # policy refusal: rewrite this slot's prompt so the next attempt
+                # regenerates a policy-safe version (e.g. a distressed child).
+                s["safe_prompt"] = gem.rewrite_prompt_safely(s["_prompt"], res.reason)
                 s["safety_tries"] += 1
-                log(f"[roster] {k}: image blocked [{reason}] -- rewrote prompt for next attempt")
+                log(f"[roster] {k}: image blocked [{res.reason}] -- rewrote prompt for next attempt")
 
-        # --- CRITIQUE (single-subject text batch) ---
-        crits = {}
-        crit_reqs = [{"key": k,
-                      "parts": [gem.text_part(scene.SHEET_CRITIQUE.format(
-                                    desc=slots[k].get("_desc") or "(the subject)")),
-                                gem.image_part(cands[k])],
-                      "generation_config": gem.json_config(SHEET_CRITIQUE_SCHEMA, temperature=0.3)}
-                     for k in cands]
-        if crit_reqs:
-            ckind = f"w{w}:crit:a{attempt}"
-            cjob = _submit_or_reattach(book_id, ckind, crit_reqs, CRITIQUE_MODEL,
-                                       f"roster b{book_id} crit a{attempt}", "text", log)
-            if _await(book_id, ckind, cjob) == gem.BATCH_DONE:
-                for k, resp in gem.batch_results(cjob).items():
-                    if resp is None or k not in slots:
-                        continue
-                    gem.record_batch_usage(resp, CRITIQUE_MODEL, "critique")
-                    try:
-                        crits[k] = gem._coerce_json(resp.text, gem._block_reason(resp))
-                    except Exception as ex:  # noqa: BLE001 -- blocked/empty: keep sheet unscored
-                        log(f"[roster] critique parse failed for {k}: {ex}")
+        # --- CRITIQUE (interactive, parallel) ---
+        crits = batchjob.run_text_parallel(
+            book_id, cands, lambda k, img: scene.critique_sheet(img, slots[k]["_desc"], style_text),
+            log=lambda m: log(f"[roster] {m}"), what="sheet critique")
 
-        # --- APPLY: score, keep best, set the reroll fix hint ---
+        # --- APPLY: score, keep best, save what is settled ---
         for k, img in cands.items():
             s = slots[k]
             crit = crits.get(k)
-            if crit is not None:
-                cs, mt = crit.get("clean_sheet", 0), crit.get("match", 0)
-                score, avg = min(cs, mt), round((cs + mt) / 2, 2)
+            score = crit["score"] if crit else None   # None: unscorable -> keep, don't reroll
+            if crit:
                 s["fix"] = crit.get("fix_hint", "")
-            else:
-                score, avg = None, None   # unscored: don't reroll harder, just keep it
-            s["attempts"].append({"attempt": attempt, "prompt": s.get("_prompt", ""),
-                                  "data": img, "critique": crit, "min": score, "avg": avg})
+            s["attempts"].append({"attempt": attempt, "prompt": s["_prompt"], "data": img,
+                                  "critique": crit, "min": score,
+                                  "avg": crit["avg"] if crit else None})
             if s["best"] is None or (score or 0) > (s["best"][1] or -1):
                 s["best"] = (img, score, attempt)
+            if score is None or score >= scene.SHEET_PASS:
+                saved += _save_slot(book_id, s)
 
-    # --- SAVE best of each slot ---
-    saved = 0
+    # --- SAVE the best of every slot that never settled ---
     for k, s in slots.items():
+        if s["saved"]:
+            continue
         if s["best"] is None:
             log(f"[roster] {k}: no candidate produced -- left for interactive fallback")
             continue
-        m = s["m"]
-        data = scene._compress(s["best"][0], 0, WEBP_QUALITY)   # sheets feed gen -> keep res
-        db.save_sheet(book_id, m["entity_id"], m["variant_id"], data)
-        scene._save_sheet_history(book_id, m["entity_id"], m["variant_id"],
-                                  m.get("appearance", ""),
-                                  {"attempts": s["attempts"], "chosen": s["best"][2]})
-        saved += 1
+        saved += _save_slot(book_id, s)
     return saved
 
 

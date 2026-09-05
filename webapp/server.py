@@ -565,14 +565,19 @@ async def api_bake(book_id: int, fresh: bool = False, retry_failed: bool = False
         prev = await asyncio.to_thread(db.bake_get, book_id)
         if prev and prev["status"] != "baking":
             await asyncio.to_thread(db.bake_clear, book_id)
+    await _launch_bake(book_id, b)
+    return {"ok": True}
+
+
+async def _launch_bake(book_id: int, b: dict):
+    """Mark the book baking and start the bake worker. round=0: a user-initiated
+    (re)start runs the round loop from the top. Crash resume (server startup ->
+    start_bake) leaves the pointer untouched instead."""
     await asyncio.to_thread(db.set_illustration_mode, book_id, "batch")
-    # round=0: a user-initiated (re)start runs the round loop from the top. Crash
-    # resume (server startup -> start_bake) leaves the pointer untouched instead.
     await asyncio.to_thread(db.bake_upsert, book_id, "baking", round=0,
                             total_pages=b["num_pages"])
     await asyncio.to_thread(db.set_status, book_id, "baking", "illustrating the whole book…")
     await asyncio.to_thread(start_bake, book_id)
-    return {"ok": True}
 
 
 @app.post("/api/books/{book_id}/bake/cancel")
@@ -755,8 +760,8 @@ def api_sheet(book_id: int, entity_id: str, variant_id: str, request: Request):
 
 @app.get("/api/books/{book_id}/batch")
 async def api_batch_outstanding(book_id: int):
-    """How many Batch API requests are still in flight for this book (image vs text),
-    for the cost page's outstanding-requests indicator. Decided against the LIVE batch
+    """How many Batch API image requests are still in flight for this book, for the
+    cost page's outstanding-requests indicator. Decided against the LIVE batch
     job list; returns {"known": false} if the API can't be reached so the UI stays quiet
     instead of showing a false zero."""
     from pipeline import gem
@@ -1067,6 +1072,40 @@ async def api_sheet_edit(book_id: int, entity_id: str, variant_id: str, body: di
     if not res.get("ok"):
         raise HTTPException(400, res.get("error", "edit failed"))
     return res
+
+
+@app.get("/api/books/{book_id}/sheet/{entity_id}/{variant_id}/pages")
+async def api_sheet_pages(book_id: int, entity_id: str, variant_id: str):
+    """Which pages are drawn against this reference sheet, and how many of them are
+    already illustrated -- so a sheet fix can offer to redraw exactly those pages."""
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    pages = await asyncio.to_thread(scene.pages_using_sheet, book_id, entity_id, variant_id)
+    illustrated = [i for i in pages if db.scene_status(book_id, i) == "done"]
+    bake = db.bake_get(book_id)
+    return {"pages": pages, "illustrated": illustrated,
+            "baking": bool(bake and bake["status"] == "baking")}
+
+
+@app.post("/api/books/{book_id}/sheet/{entity_id}/{variant_id}/redraw-pages")
+async def api_sheet_redraw_pages(book_id: int, entity_id: str, variant_id: str):
+    """Redraw ONLY the illustrated pages that use this sheet (after the sheet was
+    fixed), through the whole-book bake's incremental path so the images are batched.
+    Pages that don't use the sheet are untouched. 409 while a bake is running -- its
+    in-memory page contexts would race the reopen."""
+    b = db.get_book(book_id)
+    if not b:
+        raise HTTPException(404, "no such book")
+    bake = db.bake_get(book_id)
+    if bake and bake["status"] == "baking":
+        raise HTTPException(409, "a bake is already running; wait for it or cancel it first")
+    pages = await asyncio.to_thread(scene.pages_using_sheet, book_id, entity_id, variant_id)
+    targets = [i for i in pages if db.scene_status(book_id, i) == "done"]
+    if not targets:
+        return {"ok": True, "pages": 0, "detail": "no illustrated page uses this sheet"}
+    n = await asyncio.to_thread(db.bake_reopen_pages, book_id, targets)
+    await _launch_bake(book_id, b)
+    return {"ok": True, "pages": n}
 
 
 @app.get("/api/books/{book_id}/pages/{idx}/history")

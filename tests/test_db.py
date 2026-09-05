@@ -69,3 +69,30 @@ def test_library_orders_by_last_read_then_upload(tmp_path, monkeypatch):
 
     db.set_progress(newer, 1)               # another device reads a different book
     assert [b["title"] for b in db.list_books()] == ["newer", "older", "unread"]
+
+
+def test_bake_reopen_pages_redraws_only_those_pages(tmp_path, monkeypatch):
+    monkeypatch.setenv("STORY_APP_DB", str(tmp_path / "storyteller.db"))
+    import webapp.db as db
+    importlib.reload(db)
+    db.init()
+    bid = db.create_book("Title", "", "book.epub", "watercolor", 200, "5",
+                         "application/epub+zip", b"epub")
+    for idx in range(4):
+        db.add_page(bid, idx, 0, f"p{idx}", "text", "room", "brief", [])
+        db.scene_store(bid, idx, b"img", 4.5)
+    # a finished bake: every page done
+    db.bps_init(bid, [0, 1, 2, 3])
+    assert db.bps_skip_illustrated(bid) == 4
+    db.bjob_upsert(bid, 0, "gen:flash", "batches/old", "JOB_STATE_SUCCEEDED")
+
+    assert db.bake_reopen_pages(bid, [1, 3]) == 2
+    assert db.bps_actionable(bid) == [1, 3]
+    assert db.scene_status(bid, 1) is None and db.scene_status(bid, 3) is None
+    assert db.scene_status(bid, 0) == "done" and db.scene_status(bid, 2) == "done"
+    assert db.bjob_get(bid, 0, "gen:flash") is None   # relaunch submits fresh jobs
+    # a relaunched bake's seed pass must not re-skip the reopened pages
+    db.bps_init(bid, [0, 1, 2, 3])
+    assert db.bps_skip_illustrated(bid) == 0
+    assert db.bps_actionable(bid) == [1, 3]
+    assert db.bake_reopen_pages(bid, []) == 0

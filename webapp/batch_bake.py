@@ -1,24 +1,30 @@
-"""Illustrate a whole book with the Batch API (~50% cheaper than the interactive
-per-page path), run as its own subprocess:
+"""Illustrate a whole book with the Batch API for the IMAGES (~50% cheaper than the
+interactive per-page path), run as its own subprocess:
 
     python -m webapp.batch_bake <book_id>
 
-Batch mode is asynchronous, so the tight per-image critique/revise loop of
-webapp/scene.py becomes ROUNDS across every page:
+Batch image generation is asynchronous, so the tight per-image critique/revise loop
+of webapp/scene.py becomes ROUNDS across every page:
 
     roster    -> draw the reference sheets in the BACKGROUND (batch_roster), saving
                  wave 1 (anchors) before wave 2 (variants) so sheets land mid-draw
     admit     -> each round, admit any page whose OWN sheets are all present (so it
                  starts illustrating without waiting for the whole roster); once the
                  roster finishes, force-admit the rest (missing sheets drawn interactively)
-    round r   -> GENERATE batch (image model)   : one draft per still-open page
-                 CRITIQUE batch (text model)     : score + verdict per draft
-                 VERIFY   batch (text model)     : carry-forward fix check (revises)
+    round r   -> GENERATE: one image batch per image model, one draft per open page
+                 SCORE:    interactive critique (+ fix-verify for revises) of every
+                           draft, in parallel -- the same gem.critique_image call, with
+                           the same blocked-critique fallback tiers, as the lazy path
                  apply the SAME accept/revise/regenerate bookkeeping as the lazy path
     tail      -> once the roster is drawn and < INTERACTIVE_TAIL pages remain, finish
-                 them with the interactive renderer (batch per-round latency isn't worth
+                 them with the interactive renderer (a batch round's latency isn't worth
                  it for a handful of pages)
-    finalise  -> best-of judge for pages that never passed; store every page image
+    finalise  -> best-of judge (interactive) for pages that never passed; store every
+                 page image
+
+Only image generation is batched. Text steps cost cents, and each queued text job
+used to add a full Batch API wait per round (once 114 minutes for a $0.06 saving),
+so critique/verify/judge run interactively and in parallel instead.
 
 Pages stream in as their sheets become ready rather than waiting for a full roster
 phase, so the reader (which shows pages progressively during a bake) gets its first
@@ -40,18 +46,19 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 
 from pipeline import gem, costs
-from pipeline.config import CRITIQUE_MODEL, IMAGE_SIZE
-
-from . import batch_roster, db, scene
-from .scene import (build_scene_context, build_round_request, apply_verdict,
-                    new_scene_state, critique_prompt, critique_prompt_lite,
-                    _attempt_trace, _compress,
-                    SCENE_TRIES, SAFETY_REWRITES, PASS_THRESHOLD, DEBUG_MAXW, DEBUG_QUALITY,
-                    SCENE_MAXW, JUDGE_BEST, SCENE_CRITIQUE_SCHEMA,
-                    FIX_VERIFY, FIX_VERIFY_SCHEMA)
 from pipeline.config import WEBP_QUALITY
 
-POLL_SECONDS = int(os.environ.get("STORY_BATCH_POLL", "20"))
+from . import batch_roster, batchjob, db, scene
+from .scene import (build_scene_context, build_round_request, apply_verdict,
+                    new_scene_state, critique_prompt, critique_prompt_lite,
+                    _attempt_trace, _compress, _verify_fix, _judge_best,
+                    SCENE_TRIES, SAFETY_REWRITES, DEBUG_MAXW, DEBUG_QUALITY,
+                    SCENE_MAXW, SCENE_CRITIQUE_SCHEMA)
+
+# Per-tier attempts for a page critique. The lazy path uses 4 (4/8/16s backoff); in a
+# bake a blocked critique is persistent, not transient (the fallback tiers + next
+# round's regeneration are what recover it), so don't burn minutes of backoff per page.
+CRITIQUE_TRIES = int(os.environ.get("STORY_BAKE_CRITIQUE_TRIES", "2"))
 PREPARE_WORKERS = int(os.environ.get("STORY_BATCH_PREPARE_WORKERS", "6"))
 # Stragglers the batch critic never scored can be escalated to the interactive
 # render. OFF by default: measured on Harry Potter, the critique block is a hard,
@@ -67,9 +74,6 @@ INTERACTIVE_WORKERS = int(os.environ.get("STORY_BAKE_INTERACTIVE_WORKERS", "4"))
 # faster (full price, full critique/revise loop). 0 disables the cutover (batch to the end).
 INTERACTIVE_TAIL = int(os.environ.get("STORY_BAKE_INTERACTIVE_TAIL", "20"))
 MAX_ROUNDS = SCENE_TRIES
-
-JUDGE_SCHEMA = {"type": "object", "properties": {
-    "best": {"type": "integer"}, "why": {"type": "string"}}, "required": ["best"]}
 
 
 def log(msg):
@@ -148,8 +152,8 @@ def _seed(book_id):
 
 
 class _RosterThread:
-    """Draws the batch roster in the BACKGROUND so page rounds overlap it (~50% cheaper
-    than interactive, and pages don't wait for a full roster phase). draw_roster saves
+    """Draws the batch roster in the BACKGROUND so page rounds overlap it (images ~50%
+    cheaper than interactive, and pages don't wait for a full roster phase). draw_roster saves
     wave 1 (anchors) before wave 2 (variants), so pages needing only anchors go ready --
     and start generating -- while wave 2 is still drawing. `finished` flips true on
     completion OR failure; that's when the run loop force-admits any remaining pages,
@@ -242,32 +246,6 @@ def _admit(book_id, runs, plan_cache, force) -> int:
 
 # ---------------- batch job helpers ----------------
 
-def _submit_or_reattach(book_id, r, kind, model, reqs, display):
-    """Reuse an already-submitted job for this (round, kind) if present (resume),
-    else submit a new one. Returns the job name."""
-    coarse = "image" if kind.startswith("gen:") else "text"
-    existing = db.bjob_get(book_id, r, kind)
-    if existing and existing["job_name"]:
-        db.batch_req_add(book_id, existing["job_name"], coarse, len(reqs))
-        log(f"r{r} {kind}: reattaching {existing['job_name']} ({existing['state']})")
-        return existing["job_name"]
-    job = gem.batch_submit(reqs, model=model, display_name=display)
-    db.bjob_upsert(book_id, r, kind, job, "JOB_STATE_PENDING")
-    db.batch_req_add(book_id, job, coarse, len(reqs))
-    log(f"r{r} {kind}: submitted {job} ({len(reqs)} reqs, model={model})")
-    return job
-
-
-def _await(book_id, r, kind, job_name) -> str:
-    """Poll a job to a terminal state, mirroring the state into batch_jobs."""
-    while True:
-        st = gem.batch_state(job_name)
-        db.bjob_set_state(book_id, r, kind, st)
-        if st in gem.BATCH_TERMINAL:
-            return st
-        time.sleep(POLL_SECONDS)
-
-
 def _cancelled(book_id) -> bool:
     row = db.bake_get(book_id)
     return bool(row and row["status"] == "cancelled")
@@ -279,143 +257,78 @@ def _run_generate(book_id, r, runs, open_idxs):
     """GENERATE step: one image batch per model (fresh + escalated-revise pages can
     need different models). Fills pr.cand / pr.req / pr.mode for each open page."""
     groups: dict = {}
+    refreshed = 0
     for idx in open_idxs:
         pr = runs[idx]
+        # a sheet fixed in the roster since this page was admitted (or since last round)
+        # must be what this round draws and is critiqued against
+        refreshed += scene.refresh_sheet_refs(pr.ctx)
+        pr.name_cache.clear()
         pr.req = build_round_request(pr.ctx, pr.state, pr.name_cache)
         pr.mode = pr.req["mode"]
         pr.attempt += 1
         pr.cand = None
         groups.setdefault(pr.req["model"], []).append(idx)
+    if refreshed:
+        log(f"r{r}: picked up {refreshed} roster sheet(s) edited since the last round")
 
     for model, idxs in groups.items():
         short = model.split("-image")[0].split("-")[-1] or "img"
         kind = f"gen:{short}"
-        reqs = [{"key": str(idx),
-                 "parts": [gem.text_part(runs[idx].req["prompt"])]
-                          + [gem.image_part(b) for b in runs[idx].req["ref_bytes"]],
-                 "generation_config": gem.image_gen_config(aspect="3:2", size=IMAGE_SIZE)}
-                for idx in idxs]
-        job = _submit_or_reattach(book_id, r, kind, model, reqs, f"bake b{book_id} r{r} {kind}")
-        st = _await(book_id, r, kind, job)
-        if st != gem.BATCH_DONE:
-            log(f"r{r} {kind}: {st} -- pages retry next round")
+        reqs = [{"key": str(idx), "prompt": runs[idx].req["prompt"],
+                 "ref_bytes": runs[idx].req["ref_bytes"], "aspect": "3:2"} for idx in idxs]
+        results = batchjob.run_image_batch(book_id, r, kind, reqs, model,
+                                           f"bake b{book_id} r{r} {kind}", log=log)
+        if results is None:
+            log(f"r{r} {kind}: no results -- pages retry next round")
             continue
-        results = gem.batch_results(job)
         for idx in idxs:
-            resp = results.get(str(idx))
-            if resp is None:
+            res = results.get(str(idx))
+            if res is None:
                 continue
-            gem.record_batch_usage(resp, model, "image", images=1)
-            img = gem.response_image_bytes(resp)
-            if img:
-                runs[idx].cand = img
+            if isinstance(res, (bytes, bytearray)):
+                runs[idx].cand = bytes(res)
                 continue
             # No image: a blocked/empty generation. On a content-policy refusal, rewrite
             # the prompt so the NEXT round regenerates a policy-safe version -- via the
             # same state["safe_prompt"] field build_round_request reads on both paths.
             # Persisted to carry_json so a crash-resume keeps the rewrite. A transient
             # empty just leaves cand=None and retries the same prompt next round.
-            reason = gem._block_reason(resp)
             st = runs[idx].state
-            if gem.is_policy_refusal(reason) and st["safety_tries"] < SAFETY_REWRITES:
-                st["safe_prompt"] = gem.rewrite_prompt_safely(runs[idx].req["prompt"], reason)
+            if res.policy and st["safety_tries"] < SAFETY_REWRITES:
+                st["safe_prompt"] = gem.rewrite_prompt_safely(runs[idx].req["prompt"], res.reason)
                 st["safety_tries"] += 1
                 runs[idx].save(status="pending")
-                log(f"page {idx}: image blocked [{reason}] -- rewrote prompt for next round")
+                log(f"page {idx}: image blocked [{res.reason}] -- rewrote prompt for next round")
 
 
-def _run_critique(book_id, r, runs, open_idxs) -> dict:
-    """CRITIQUE step: one text batch judging each freshly generated draft against its
-    brief + reference sheets. Returns {idx: critique dict}."""
-    reqs = []
-    for idx in open_idxs:
-        pr = runs[idx]
-        if pr.cand is None:
-            continue
-        reqs.append({"key": str(idx),
-                     "parts": gem.critique_parts(critique_prompt(pr.ctx), pr.cand,
-                                                 ref_bytes=pr.ctx["ref_bytes"],
-                                                 ref_labels=pr.ctx["ref_labels"]),
-                     "generation_config": gem.json_config(SCENE_CRITIQUE_SCHEMA, temperature=0.3)})
-    if not reqs:
-        return {}
-    job = _submit_or_reattach(book_id, r, "critique", CRITIQUE_MODEL, reqs,
-                              f"bake b{book_id} r{r} critique")
-    st = _await(book_id, r, "critique", job)
-    if st != gem.BATCH_DONE:
-        log(f"r{r} critique: {st}")
-        return {}
-    out = {}
-    for idx, resp in gem.batch_results(job).items():
-        if resp is None:
-            continue
-        gem.record_batch_usage(resp, CRITIQUE_MODEL, "critique")
-        try:
-            out[int(idx)] = gem._coerce_json(resp.text, gem._block_reason(resp))
-        except Exception as ex:  # noqa: BLE001
-            log(f"r{r} critique parse failed for page {idx}: {ex}")
-    # LITE re-critique: pages that drew an image but got no parseable critique are
-    # usually a PROHIBITED_CONTENT block on the embedded story text -- retry them in
-    # one more batch with that text stripped + image only (no child reference
-    # sheets), which reliably clears the child-safety filter and gets a real score.
-    blocked = [idx for idx in open_idxs if runs[idx].cand is not None and idx not in out]
-    if blocked:
-        lite_reqs = [{"key": str(idx),
-                      "parts": gem.critique_parts(critique_prompt_lite(runs[idx].ctx), runs[idx].cand),
-                      "generation_config": gem.json_config(SCENE_CRITIQUE_SCHEMA, temperature=0.3)}
-                     for idx in blocked]
-        ljob = _submit_or_reattach(book_id, r, "critique_lite", CRITIQUE_MODEL, lite_reqs,
-                                   f"bake b{book_id} r{r} critique-lite")
-        if _await(book_id, r, "critique_lite", ljob) == gem.BATCH_DONE:
-            n = 0
-            for idx, resp in gem.batch_results(ljob).items():
-                if resp is None:
-                    continue
-                gem.record_batch_usage(resp, CRITIQUE_MODEL, "critique")
-                try:
-                    out[int(idx)] = gem._coerce_json(resp.text, gem._block_reason(resp))
-                    n += 1
-                except Exception as ex:  # noqa: BLE001
-                    log(f"r{r} lite critique still failed for page {idx}: {ex}")
-            log(f"r{r} lite critique recovered {n}/{len(blocked)} blocked page(s)")
-    return out
-
-
-def _run_verify(book_id, r, runs, open_idxs, crits) -> dict:
-    """VERIFY step: for pages whose current attempt was a revise targeting a specific
-    defect, confirm that defect is gone. Returns {idx: fix_ok bool} (default True)."""
-    reqs = []
-    for idx in open_idxs:
-        pr = runs[idx]
-        if pr.cand is None or idx not in crits:
-            continue
+def _score_round(book_id, r, runs, open_idxs) -> dict:
+    """SCORE step: critique every freshly generated draft against its brief + reference
+    sheets, and for a revise targeting a specific defect, verify that defect is gone.
+    Interactive and parallel -- the very same gem.critique_image call as the lazy path,
+    including its fallback tiers (full -> image-only -> lite prompt without the story
+    passages) for the child-safety PROHIBITED_CONTENT block on the embedded text.
+    Returns {idx: {"crit", "fix_ok", "verify"}}; a page whose critique failed every
+    tier is absent (its candidate stays unscored and it regenerates next round)."""
+    def score(idx, pr):
+        crit = gem.critique_image(pr.cand, critique_prompt(pr.ctx), refs=pr.ctx["ref_bytes"],
+                                  ref_labels=pr.ctx["ref_labels"], schema=SCENE_CRITIQUE_SCHEMA,
+                                  tries=CRITIQUE_TRIES, lite_brief=critique_prompt_lite(pr.ctx))
+        fix_ok, v = True, None
         if pr.mode == "revise" and pr.state["pending_defect"]:
-            reqs.append({"key": str(idx),
-                         "parts": [gem.text_part(FIX_VERIFY.format(defect=pr.state["pending_defect"])),
-                                   gem.image_part(pr.cand)],
-                         "generation_config": gem.json_config(FIX_VERIFY_SCHEMA, temperature=0.3)})
-    if not reqs:
-        return {}
-    job = _submit_or_reattach(book_id, r, "verify", CRITIQUE_MODEL, reqs,
-                              f"bake b{book_id} r{r} verify")
-    st = _await(book_id, r, "verify", job)
-    if st != gem.BATCH_DONE:
-        return {}
-    out = {}
-    for idx, resp in gem.batch_results(job).items():
-        if resp is None:
-            continue
-        gem.record_batch_usage(resp, CRITIQUE_MODEL, "critique")
-        try:
-            v = gem._coerce_json(resp.text, gem._block_reason(resp))
-            out[int(idx)] = bool(v.get("resolved", True))
-            runs[int(idx)]._verify = v
-        except Exception:  # noqa: BLE001
-            out[int(idx)] = True
+            v = _verify_fix(pr.cand, pr.state["pending_defect"])
+            fix_ok = bool(v.get("resolved", True))
+        return {"crit": crit, "fix_ok": fix_ok, "verify": v}
+
+    todo = {idx: runs[idx] for idx in open_idxs if runs[idx].cand is not None}
+    out = batchjob.run_text_parallel(book_id, todo, score, log=lambda m: log(f"r{r} {m}"),
+                                     what="critique")
+    if len(out) < len(todo):
+        log(f"r{r}: {len(todo) - len(out)} page(s) could not be scored this round")
     return out
 
 
-def _apply_round(book_id, r, runs, open_idxs, crits, verifies):
+def _apply_round(book_id, r, runs, open_idxs, scored):
     """Fold this round's critiques into each page's state, record the attempt to the
     debug history, and finalise any page that just passed (store its image now so the
     reader can show it while the bake continues).
@@ -428,12 +341,10 @@ def _apply_round(book_id, r, runs, open_idxs, crits, verifies):
     to_save = []
     for idx in open_idxs:
         pr = runs[idx]
-        if pr.cand is None or idx not in crits:
+        if pr.cand is None or idx not in scored:
             continue   # no usable candidate this round -> leave prior saved state, retry next round
-        crit = crits[idx]
-        fix_ok = verifies.get(idx, True)
-        if pr.mode == "revise" and pr.state["pending_defect"] and idx in verifies:
-            v = getattr(pr, "_verify", {})
+        crit, fix_ok, v = scored[idx]["crit"], scored[idx]["fix_ok"], scored[idx]["verify"]
+        if v is not None:
             crit["fix_verified"] = {"defect": pr.state["pending_defect"], "resolved": fix_ok,
                                     "still_present": v.get("still_present", "")}
         res = apply_verdict(pr.state, crit, pr.cand, pr.attempt, fix_ok)
@@ -459,9 +370,7 @@ def run_round(book_id, r, runs, open_idxs) -> int:
     db.bake_upsert(book_id, "baking", round=r,
                    done_pages=db.bps_counts(book_id).get("done", 0))
     _run_generate(book_id, r, runs, open_idxs)
-    crits = _run_critique(book_id, r, runs, open_idxs)
-    verifies = _run_verify(book_id, r, runs, open_idxs, crits)
-    _apply_round(book_id, r, runs, open_idxs, crits, verifies)
+    _apply_round(book_id, r, runs, open_idxs, _score_round(book_id, r, runs, open_idxs))
     # round fully applied: advance the resume pointer so a later restart won't redo it
     db.bake_upsert(book_id, "baking", round=r + 1,
                    done_pages=db.bps_counts(book_id).get("done", 0))
@@ -577,36 +486,20 @@ def _drain_interactive(book_id):
 def finalise(book_id, runs):
     """Finish every page that never passed. First escalate pages the batch critic never
     scored to the interactive render (fresh regeneration usually unblocks them); then a
-    best-of judge picks the strongest candidate of each remaining scored straggler and
-    stores it. Anything still un-scored falls back to its last drawn image in
+    best-of judge (interactive, parallel) picks the strongest candidate of each remaining
+    scored straggler and stores it. Anything still un-scored falls back to its last drawn image in
     _finalise_page -- an illustration beats a blank. Passed pages were stored in-round."""
     stragglers = [i for i in db.bps_actionable(book_id) if i in runs]
     if ESCALATE_INTERACTIVE:
         _escalate_interactive(book_id, stragglers, runs)
         stragglers = [i for i in db.bps_actionable(book_id) if i in runs]   # drop the resolved
-    judgeable = [i for i in stragglers if len(runs[i].state["cands"]) > 1]
+    judgeable = {i: runs[i] for i in stragglers if len(runs[i].state["cands"]) > 1}
     picks = {}
-    if judgeable:
-        reqs = [{"key": str(i),
-                 "parts": gem.judge_parts(JUDGE_BEST.format(brief=runs[i].ctx["page"]["brief"]),
-                                          [c["data"] for c in runs[i].state["cands"]]),
-                 "generation_config": gem.json_config(JUDGE_SCHEMA, temperature=0.2)}
-                for i in judgeable]
-        job = _submit_or_reattach(book_id, MAX_ROUNDS, "judge", CRITIQUE_MODEL, reqs,
-                                  f"bake b{book_id} judge")
-        if _await(book_id, MAX_ROUNDS, "judge", job) == gem.BATCH_DONE:
-            for idx, resp in gem.batch_results(job).items():
-                if resp is None:
-                    continue
-                gem.record_batch_usage(resp, CRITIQUE_MODEL, "critique")
-                try:
-                    v = gem._coerce_json(resp.text, gem._block_reason(resp))
-                    pick = int(v.get("best", 0)) - 1
-                    cands = runs[int(idx)].state["cands"]
-                    if 0 <= pick < len(cands):
-                        picks[int(idx)] = {"attempt": cands[pick]["n"], "why": v.get("why", "")}
-                except Exception:  # noqa: BLE001
-                    pass
+    for i, pick in batchjob.run_text_parallel(
+            book_id, judgeable, lambda i, pr: _judge_best(pr.state["cands"], pr.ctx["page"]["brief"]),
+            log=log, what="best-of judge").items():
+        if pick:
+            picks[i] = {"attempt": runs[i].state["cands"][pick["best"]]["n"], "why": pick["why"]}
     for i in stragglers:
         _finalise_page(book_id, runs[i], judged=picks.get(i))
 
@@ -664,7 +557,7 @@ def run(book_id: int):
             if not open_idxs:
                 if roster.finished:
                     break                     # roster done and nothing left to generate
-                time.sleep(POLL_SECONDS)       # sheets still drawing -- wait, then re-admit
+                time.sleep(gem.POLL_SECONDS)   # sheets still drawing -- wait, then re-admit
                 continue
             run_round(book_id, r, runs, open_idxs)
             r += 1

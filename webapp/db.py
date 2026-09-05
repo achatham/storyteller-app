@@ -1175,36 +1175,32 @@ def bjob_set_state(book_id, round, kind, state):
                   "AND kind=?", (state, time.time(), book_id, round, kind))
 
 
-def batch_req_add(book_id, job_name, kind, n_reqs):
-    """Record a submitted Batch API job + how many requests it carries, for the
-    outstanding-requests indicator. `kind` is coarse: 'image' or 'text'. Idempotent
-    per job (a resume that reattaches the same job just re-asserts the count)."""
+def batch_req_add(book_id, job_name, n_reqs):
+    """Record a submitted Batch API job + how many image requests it carries, for the
+    outstanding-requests indicator. Idempotent per job (a resume that reattaches the
+    same job just re-asserts the count). Only images are ever batched, so `kind` is
+    always 'image' (the column predates that)."""
     with conn() as c:
         c.execute("INSERT INTO batch_reqs(job_name,book_id,kind,n_reqs,created_at) "
-                  "VALUES (?,?,?,?,?) ON CONFLICT(job_name) DO UPDATE SET "
-                  "n_reqs=excluded.n_reqs, kind=excluded.kind",
-                  (job_name, book_id, kind, n_reqs, time.time()))
+                  "VALUES (?,?,'image',?,?) ON CONFLICT(job_name) DO UPDATE SET "
+                  "n_reqs=excluded.n_reqs",
+                  (job_name, book_id, n_reqs, time.time()))
 
 
 def outstanding_batch(book_id, active_names) -> dict:
-    """How many Batch API requests are still in flight for this book: sum n_reqs over
-    recorded jobs whose name is in `active_names` (the live non-terminal set from the
-    Batch API), split coarse image/text. Empty active set -> all zero."""
-    out = {"total": 0, "image": 0, "text": 0, "jobs": 0}
+    """How many Batch API image requests are still in flight for this book: sum n_reqs
+    over recorded jobs whose name is in `active_names` (the live non-terminal set from
+    the Batch API). Empty active set -> all zero."""
+    out = {"total": 0, "jobs": 0}
     names = list(active_names or [])
     if not names:
         return out
     qs = ",".join("?" * len(names))
     with conn() as c:
-        rows = c.execute(
-            f"SELECT kind, COUNT(*) jobs, COALESCE(SUM(n_reqs),0) n FROM batch_reqs "
-            f"WHERE book_id=? AND job_name IN ({qs}) GROUP BY kind",
-            (book_id, *names)).fetchall()
-    for r in rows:
-        k = r["kind"] if r["kind"] in ("image", "text") else "text"
-        out[k] += r["n"]
-        out["total"] += r["n"]
-        out["jobs"] += r["jobs"]
+        r = c.execute(
+            f"SELECT COUNT(*) jobs, COALESCE(SUM(n_reqs),0) n FROM batch_reqs "
+            f"WHERE book_id=? AND job_name IN ({qs})", (book_id, *names)).fetchone()
+    out["total"], out["jobs"] = r["n"], r["jobs"]
     return out
 
 
@@ -1229,6 +1225,33 @@ def bake_retry_failed(book_id) -> int:
             "gen_id=NULL, best_blob=NULL, best_score=NULL, best_attempt=NULL, "
             "draft_blob=NULL, carry_json=NULL, updated_at=? "
             "WHERE book_id=? AND status='failed'", (time.time(), book_id)).rowcount
+        c.execute("DELETE FROM batch_jobs WHERE book_id=?", (book_id,))
+    return n
+
+
+def bake_reopen_pages(book_id, idxs: list[int]) -> int:
+    """Reopen specific pages for a relaunched bake -- e.g. every page drawn against a
+    reference sheet the user has since fixed -- so the bake redraws ONLY those. Their
+    stored scene is dropped (so the bake's skip-already-illustrated pass doesn't
+    re-skip them, and the reader shows a placeholder until the new picture lands) and
+    their per-page state reset to a clean slate; every other page stays done. The
+    batch_jobs bookkeeping is dropped so the relaunch submits fresh jobs rather than
+    reattaching a finished round's. Returns how many pages were reopened."""
+    if not idxs:
+        return 0
+    now = time.time()
+    with conn() as c:
+        for idx in idxs:
+            c.execute("INSERT OR IGNORE INTO batch_page_state(book_id,idx,status,round,"
+                      "attempt,done,updated_at) VALUES (?,?,'pending',0,0,0,?)",
+                      (book_id, idx, now))
+        qs = ",".join("?" * len(idxs))
+        n = c.execute(
+            f"UPDATE batch_page_state SET status='pending', done=0, round=0, attempt=0, "
+            f"gen_id=NULL, best_blob=NULL, best_score=NULL, best_attempt=NULL, "
+            f"draft_blob=NULL, carry_json=NULL, updated_at=? "
+            f"WHERE book_id=? AND idx IN ({qs})", (now, book_id, *idxs)).rowcount
+        c.execute(f"DELETE FROM scenes WHERE book_id=? AND idx IN ({qs})", (book_id, *idxs))
         c.execute("DELETE FROM batch_jobs WHERE book_id=?", (book_id,))
     return n
 
