@@ -321,6 +321,12 @@ def init():
             # under-counted, which is not recoverable from what was stored.
             c.execute("UPDATE reading_log SET max_pos=MAX(start_pos, end_pos) "
                       "WHERE max_pos IS NULL")
+        # Uploads used to seed a page-0 progress row stamped with the upload time,
+        # which now reads as "last read at upload". Drop the ones no reader ever
+        # touched (position 0 and no reading session) so an unread book sorts by
+        # upload time and shows no "read ... ago" on its card. Idempotent.
+        c.execute("DELETE FROM progress WHERE position=0 AND book_id NOT IN "
+                  "(SELECT book_id FROM reading_log)")
         c.execute("UPDATE schema_version SET version=1")
 
 
@@ -337,8 +343,9 @@ def create_book(title, author, filename, style, words_per_page, age,
         bid = cur.lastrowid
         c.execute("INSERT INTO book_files(book_id,mime,data) VALUES (?,?,?)",
                   (bid, mime, data))
-        c.execute("INSERT INTO progress(book_id,position,updated_at) VALUES (?,?,?)",
-                  (bid, 0, time.time()))
+        # No progress row yet: one appears the first time a reader reports a
+        # position, so "has a progress row" means "has been read" (the library
+        # orders on it). Readers of a book with no row start at page 0 anyway.
     return bid
 
 
@@ -384,11 +391,16 @@ def get_book(book_id) -> dict | None:
 
 
 def list_books() -> list[dict]:
+    """Every book, most recently read first. The order comes from the server-side
+    progress row (written by every reader on every device), so the library looks
+    the same on the phone and the tablet. A book nobody has opened yet sorts by
+    its upload time instead, so a fresh import still lands at the top."""
     with conn() as c:
         rows = c.execute(
-            "SELECT b.*, COALESCE(p.position,0) AS position "
+            "SELECT b.*, COALESCE(p.position,0) AS position, "
+            "p.updated_at AS read_at "
             "FROM books b LEFT JOIN progress p ON p.book_id=b.id "
-            "ORDER BY b.created_at DESC").fetchall()
+            "ORDER BY COALESCE(p.updated_at, b.created_at) DESC, b.id DESC").fetchall()
         return [dict(r) for r in rows]
 
 

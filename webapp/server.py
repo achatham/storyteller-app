@@ -3,7 +3,7 @@
   GET  /                          hub (upload / pick a book)
   GET  /read/{id}                 reader SPA
   GET  /api/styles                available art styles
-  GET  /api/books                 list books (+ status + progress)
+  GET  /api/books                 list books (+ status + progress), most recently read first
   POST /api/books                 upload a book -> kicks off processing subprocess
   GET  /api/books/{id}            book detail (status, chapters, progress)
   GET  /api/books/{id}/cover      the book's cover illustration (404 if not drawn)
@@ -439,7 +439,8 @@ def api_books():
             "id": b["id"], "title": b["title"] or b["filename"] or "Untitled",
             "author": b["author"], "style": b["style"], "status": b["status"],
             "detail": b["detail"], "num_pages": b["num_pages"],
-            "position": b["position"], "scenes_done": sp.get("done", 0),
+            "position": b["position"], "read_at": b["read_at"],
+            "scenes_done": sp.get("done", 0),
             "has_cover": b["id"] in covered,
         })
     return out
