@@ -48,6 +48,20 @@
   ul.iss { margin:6px 0; padding-left:18px; font-size:.8rem; color:#5b5347; }
   .fix { font-size:.8rem; background:#fbf3e6; border-left:3px solid var(--accent); padding:5px 9px; margin-top:7px; }
   details { margin-top:8px; } summary { cursor:pointer; font-size:.78rem; color:var(--accent); }
+  .strip { display:flex; gap:8px; flex-wrap:wrap; margin:10px 0 14px; }
+  .strip .pgimg { width:190px; }
+  .strip .pgimg img { width:100%; display:block; border:1px solid var(--line); border-radius:8px; background:#eee; }
+  .strip .pgimg .cap { font-size:.72rem; color:var(--muted); margin-top:3px; }
+  .issue { font-size:.84rem; padding:6px 10px; border-left:3px solid var(--mid); background:#fbf6ec; margin:6px 0; }
+  .issue.sev3 { border-color:var(--bad); } .issue.sev1 { border-color:var(--line); }
+  .issue .rc { font-size:.7rem; text-transform:uppercase; letter-spacing:.4px; color:var(--muted); margin-left:6px; }
+  .prop { border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin:8px 0; background:#fff; font-size:.84rem; }
+  .prop h4 { margin:0 0 4px; font-size:.9rem; }
+  .prop .why { color:#5b5347; font-style:italic; }
+  .pedit { border-top:1px solid var(--line); padding:8px 0; font-size:.84rem; }
+  .pedit .badge.keep { background:#e8f2ea; } .pedit .badge.revise { background:#f7eee9; } .pedit .badge.regenerate { background:#f6e6e2; }
+  .form { display:flex; gap:8px; align-items:center; padding:10px 16px; border-bottom:1px solid var(--line); flex-wrap:wrap; font-size:.82rem; }
+  .form input { width:64px; padding:4px 6px; border:1px solid var(--line); border-radius:6px; font-size:.82rem; }
   pre { white-space:pre-wrap; word-break:break-word; font-size:.72rem; background:#faf6ee; border:1px solid var(--line);
         border-radius:8px; padding:9px; margin:6px 0 0; max-height:280px; overflow:auto; }
 </style>
@@ -55,7 +69,7 @@
 <header>
   <h1 id="title">Generation debug</h1>
   <a id="back" href="#">&#8592; Settings</a>
-  <div class="tabs"><span class="tab" data-mode="pages">Page scenes</span><span class="tab" data-mode="sheets">Roster sheets</span><span class="tab" data-mode="flagged">⚑ Flagged</span></div>
+  <div class="tabs"><span class="tab" data-mode="pages">Page scenes</span><span class="tab" data-mode="sheets">Roster sheets</span><span class="tab" data-mode="flagged">⚑ Flagged</span><span class="tab" data-mode="continuity">Continuity</span></div>
 </header>
 <div class="wrap">
   <div class="list" id="list"></div>
@@ -90,7 +104,7 @@ function attCard(imgUrl, a, kept){
 async function setMode(m){
   MODE = m; SEL = null;
   document.querySelectorAll(".tab").forEach(t => t.classList.toggle("sel", t.dataset.mode === m));
-  const hint = m==="pages" ? "a page" : m==="sheets" ? "a roster sheet" : "a flagged item";
+  const hint = m==="pages" ? "a page" : m==="sheets" ? "a roster sheet" : m==="continuity" ? "a review" : "a flagged item";
   $("#detail").innerHTML = `<div class="empty">Pick ${hint} on the left.</div>`;
   await loadList();
 }
@@ -119,6 +133,7 @@ async function loadList(){
     };
     return;
   }
+  if (MODE === "continuity"){ await loadReviews(); return; }
   if (MODE === "pages"){
     const r = await (await fetch(`${API()}/debug/pages`)).json();
     if (!r.pages.length){ L.innerHTML = `<div class="empty">No page history yet. Read some pages, then return.</div>`; return; }
@@ -188,6 +203,84 @@ function renderHistory(titleHtml, target, hist, attBase){
       }
     };
   }
+}
+
+// ---- continuity reviews: a critic reads 5 consecutive pages + text and recommends plan edits ----
+let REVIEW_POLL = null;
+async function loadReviews(){
+  const L = $("#list");
+  const r = await (await fetch(`${API()}/continuity`)).json();
+  const form = `<div class="form">Review pages <input id="rvFrom" type="number" min="0" placeholder="from">–<input id="rvTo" type="number" min="0" placeholder="to">
+    <button class="rbtn" id="rvRun" ${r.running?"disabled":""}>${r.running?"Reviewing…":"Run"}</button>
+    <span style="color:var(--muted)">${r.running?"a review is running; windows appear as they finish":"5 pages per window; text-model only (cheap)"}</span></div>`;
+  const rows = r.reviews.map(v => `<div class="pg" data-id="${v.id}">
+    <div>p${v.start_idx}–${v.end_idx} ${v.applied_at?'<span class="badge kept">applied</span>':""}</div>
+    <div class="meta">${v.n_issues} issues · ${v.n_edits} edits · +${v.n_new_entities} entities · +${v.n_new_variants} variants · ${when(v.created_at)}</div></div>`).join("");
+  L.innerHTML = form + (rows || `<div class="empty">No reviews yet. Pick a page range and Run.</div>`);
+  L.querySelectorAll(".pg").forEach(el => { el.onclick = () => loadReview(+el.dataset.id);
+    if (SEL && SEL.review === +el.dataset.id) el.classList.add("sel"); });
+  $("#rvRun").onclick = async () => {
+    const start = +$("#rvFrom").value, end = +$("#rvTo").value;
+    if (!(end >= start)) { alert("Give a page range, e.g. 382 to 391."); return; }
+    $("#rvRun").disabled = true;
+    const res = await (await fetch(`${API()}/continuity/review`, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({start, end})})).json();
+    if (!res.ok) alert(res.error || "could not start");
+    await loadReviews();
+  };
+  clearInterval(REVIEW_POLL);
+  if (r.running) REVIEW_POLL = setInterval(async () => { if (MODE !== "continuity") { clearInterval(REVIEW_POLL); return; } await loadReviews(); }, 8000);
+}
+
+const castTxt = c => (c||[]).map(x => `${x.entity_id}/${x.variant_id||"default"}${x.view?`[${x.view}]`:""}`).join(", ");
+async function loadReview(id){
+  SEL = {review: id};
+  document.querySelectorAll(".pg").forEach(e => e.classList.toggle("sel", +e.dataset.id === id));
+  const r = await (await fetch(`${API()}/continuity/${id}`)).json();
+  const v = r.review, D = $("#detail");
+  const strip = (v.pages||[]).map(i => `<div class="pgimg"><a href="/debug/${ID}?page=${i}"><img loading="lazy" src="${API()}/pages/${i}/image"></a><div class="cap">p${i}</div></div>`).join("");
+  const issues = (v.continuity_issues||[]).map(i => `<div class="issue sev${i.severity}">pages ${(i.pages||[]).join(", ")}: ${esc(i.issue)}<span class="rc">${esc(i.root_cause||"")}</span></div>`).join("") || `<div class="empty" style="padding:8px 0">No cross-page issues found.</div>`;
+  const ents = (v.new_entities||[]).map(e => `<div class="prop"><h4>+ new ${esc(e.type)} <code>${esc(e.id)}</code> — ${esc(e.name)} <span class="rc" style="color:var(--muted)">pages ${(e.pages||[]).join(", ")}</span></h4>
+    <div class="why">${esc(e.why||"")}</div><details><summary>appearance / sheet prompt</summary><pre>${esc(e.appearance)}
+
+${esc(e.sheet_prompt||"")}</pre></details></div>`).join("");
+  const vars = (v.new_variants||[]).map(e => `<div class="prop"><h4>+ new variant <code>${esc(e.entity_id)}/${esc(e.id)}</code> — ${esc(e.label)} <span class="rc" style="color:var(--muted)">pages ${(e.pages||[]).join(", ")}</span></h4>
+    <div class="why">${esc(e.why||"")}</div><details><summary>appearance / sheet prompt</summary><pre>${esc(e.appearance)}
+
+${esc(e.sheet_prompt||"")}</pre></details></div>`).join("");
+  const edits = (v.page_edits||[]).map(e => `<div class="pedit"><b>p${e.idx}</b> <span class="badge ${e.action}">${e.action}</span>
+    ${(e.problems||[]).length?`<ul class="iss">${e.problems.map(p=>`<li>${esc(p)}</li>`).join("")}</ul>`:""}
+    ${e.edit_instruction?`<div class="fix"><b>edit →</b> ${esc(e.edit_instruction)}</div>`:""}
+    ${e.brief?`<div class="fix"><b>brief →</b> ${esc(e.brief)}</div>`:""}
+    ${e.setting?`<div class="fix"><b>setting →</b> ${esc(e.setting)}</div>`:""}
+    ${(e.cast||[]).length?`<div class="fix"><b>cast →</b> ${esc(castTxt(e.cast))}</div>`:""}</div>`).join("");
+  const nRedraw = (v.page_edits||[]).filter(e => e.action !== "keep").length;
+  const applied = r.applied_at ? `<span class="badge kept">applied ${when(r.applied_at)}</span>` : "";
+  D.innerHTML = `<div class="dhead"><h2>Continuity review · pages ${r.start_idx}–${r.end_idx}</h2>${applied}
+      <button class="rbtn" id="rvApply" ${r.applied_at?"disabled":""}>Apply &amp; redraw</button>
+      <button class="rbtn" id="rvApplyPlan" ${r.applied_at?"disabled":""} style="background:var(--panel);color:var(--accent)">Apply plan only</button>
+      <button class="rbtn" id="rvDel" style="background:var(--panel);color:var(--bad);border-color:var(--line)">Delete</button></div>
+    <div class="brief">${esc(v.summary||"")}</div>
+    <div class="strip">${strip}</div>
+    <div class="gen"><h3>Cross-page issues</h3>${issues}</div>
+    ${ents||vars?`<div class="gen"><h3>Proposed registry additions</h3>${ents}${vars}</div>`:""}
+    <div class="gen"><h3>Per-page recommendations</h3>${edits}</div>
+    ${r.applied?`<div class="gen"><h3>Applied</h3><pre>${esc(JSON.stringify(r.applied, null, 1))}</pre></div>`:""}`;
+  const apply = async (draw) => {
+    const what = draw ? `Apply this review and redraw ${nRedraw} page(s) in the background (costs image generations)?`
+                      : "Write the registry/page changes only? Affected pages keep their current pictures until redrawn.";
+    if (!confirm(what)) return;
+    $("#rvApply").disabled = $("#rvApplyPlan").disabled = true;
+    const res = await (await fetch(`${API()}/continuity/${id}/apply`, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({draw})})).json();
+    if (!res.ok) alert(res.error || "apply failed");
+    await loadReviews(); await loadReview(id);
+  };
+  $("#rvApply").onclick = () => apply(true);
+  $("#rvApplyPlan").onclick = () => apply(false);
+  $("#rvDel").onclick = async () => {
+    if (!confirm("Delete this review?")) return;
+    await fetch(`${API()}/continuity/${id}`, {method:"DELETE"});
+    SEL = null; $("#detail").innerHTML = `<div class="empty">Pick a review on the left.</div>`; await loadReviews();
+  };
 }
 
 document.querySelectorAll(".tab").forEach(t => t.onclick = () => setMode(t.dataset.mode));

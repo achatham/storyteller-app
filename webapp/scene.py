@@ -656,15 +656,22 @@ def edit_sheet(book_id, entity_id, variant_id, instruction, model_key="pro") -> 
     return {"ok": True, "model": model}
 
 
-def generate_scene(book_id: int, idx: int, fast_critique: bool = False) -> bytes:
+def generate_scene(book_id: int, idx: int, fast_critique: bool = False,
+                   seed: dict | None = None) -> bytes:
     """Render page `idx`'s illustration, store it, and return the image bytes.
     Synchronous/blocking (the server runs it in a worker thread). All API usage
     is tagged to this book for the per-book cost view. `fast_critique` makes each
     critique a single no-backoff attempt (used by the bake's straggler escalation,
     where the critic is likely blocking and we have a fallback -- don't burn minutes
-    of retry backoff per page)."""
+    of retry backoff per page).
+
+    `seed` = {"draft": bytes, "instruction": str, "ref_chars": [names], "defect": str}
+    starts the loop with an img2img REVISE of an existing picture instead of a fresh
+    draw -- how a continuity review's "keep this composition, fix X" recommendation is
+    carried out. The result is critiqued exactly like any other attempt, so a revise
+    that doesn't land falls through to the normal escalate/redraw path."""
     with costs.run_as(f"book:{book_id}"):
-        return _render_scene(book_id, idx, fast_critique=fast_critique)
+        return _render_scene(book_id, idx, fast_critique=fast_critique, seed=seed)
 
 
 _CHAR_STATE_SCHEMA = {
@@ -1140,7 +1147,8 @@ def _attempt_trace(attempt: int, mode: str, res: dict, crit: dict, fix_ok: bool)
     }
 
 
-def _render_scene(book_id: int, idx: int, fast_critique: bool = False) -> bytes:
+def _render_scene(book_id: int, idx: int, fast_critique: bool = False,
+                  seed: dict | None = None) -> bytes:
     """Render page `idx`'s illustration synchronously (the lazy read path), on top
     of the shared build_scene_context / build_round_request / apply_verdict helpers
     so it stays in lock-step with the batch bake."""
@@ -1152,6 +1160,14 @@ def _render_scene(book_id: int, idx: int, fast_critique: bool = False) -> bytes:
     gen_id = db.next_gen_id(book_id, idx)   # debug history: this generation run
     trace = {"states": ctx["states"], "max_tries": SCENE_TRIES, "attempts": []}
     ctx["original_brief"] = page["brief"]   # kept for the trace if the critic replaces it
+    if seed and seed.get("draft") and (seed.get("instruction") or "").strip():
+        # start from the existing picture: attempt 1 is a targeted edit of it
+        state["mode"], state["draft"] = "revise", seed["draft"]
+        state["edit_instr"] = seed["instruction"].strip()
+        state["ref_chars"] = [r for r in seed.get("ref_chars", []) if isinstance(r, str)]
+        state["pending_defect"] = (seed.get("defect") or "").strip() or state["edit_instr"]
+        trace["seed"] = {"instruction": state["edit_instr"], "defect": state["pending_defect"],
+                         "source": seed.get("source", "revise")}
 
     with tempfile.TemporaryDirectory() as td:
         # critique always sees this page's cast sheets (to catch a wrong figure)

@@ -353,6 +353,30 @@ def judge_images(image_paths: list[Path], prompt: str, schema: dict | None = Non
     return _retry(_go, what="judge_images")
 
 
+def vision_json(contents: list, schema: dict | None = None, model: str = CRITIQUE_MODEL,
+                thinking_level: str | None = None, kind: str = "critique",
+                temperature: float = 0.3) -> dict:
+    """A structured-JSON call over an arbitrary sequence of text and image parts
+    (`contents` = strs and image BYTES, in order). The general form of critique_image /
+    judge_images for reviews that interleave several labelled images with their
+    text -- e.g. the continuity critic, which looks at five consecutive pages at once."""
+    from PIL import Image
+    parts = [Image.open(io.BytesIO(c)) if isinstance(c, (bytes, bytearray)) else c
+             for c in contents]
+    kwargs = dict(response_mime_type="application/json", response_schema=schema,
+                  temperature=temperature)
+    if thinking_level:
+        kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_level)
+    cfg = types.GenerateContentConfig(**kwargs)
+
+    def _go():
+        resp = _client.models.generate_content(model=model, contents=parts, config=cfg)
+        _record_usage(resp, model, kind)
+        return _coerce_json(resp.text, _block_reason(resp))
+
+    return _retry(_go, what="vision_json")
+
+
 # ---------------- batch API ----------------
 # The Batch API takes a JSONL file of {"key","request"} lines and, asynchronously,
 # produces a JSONL file of {"key","response"} lines. We reconstruct each response

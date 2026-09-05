@@ -114,6 +114,42 @@ A page is only rewritten when its words match the re-extracted text exactly, so 
 page it can't place is left as it was. Readers pick the new text up on reload; a
 saved offline copy needs re-saving.
 
+## Continuity review (a critic reads 5 pages at a time)
+
+The per-page critic judges each picture alone, so it cannot see drift that only
+shows across pages: the same room drawn three ways, a character whose clothes
+change between pages the story keeps them in, a prop changing colour. The
+continuity review (`webapp/continuity.py`) shows a text model **five consecutive
+pages together** — each page's source text, the plan it was drawn from (setting,
+brief, cast) and the illustration — plus the reference sheets the illustrator was
+given, and asks for the root cause of each inconsistency rather than a redraw:
+
+- a **new setting / prop / character** entity when the pages take place somewhere
+  (or around something) the registry has no reference for, so every page invents it;
+- a **new variant** of an existing character when the text keeps them in a look the
+  registry never made (hospital pyjamas, a bandaged arm);
+- a corrected **cast** (wrong variant, missing anchor) or **brief** for a page;
+- a per-page verdict: *keep*, *revise* (an in-place img2img edit, with the
+  instruction) or *regenerate*.
+
+Run it from the debug page (**Continuity** tab: pick a page range, Run) or the CLI:
+
+```sh
+docker compose exec storyteller python -m webapp.continuity <book_id> --pages 382-391
+docker compose exec storyteller python -m webapp.continuity <book_id> --pages 382-391 --apply
+```
+
+Each 5-page window is stored as its own review row (`continuity_reviews`); later
+windows are told what earlier ones proposed, so one new setting is reused across
+the run rather than re-invented per window. A review changes nothing by itself.
+**Apply** writes the accepted proposals into the registry and the pages' plans,
+then redraws only the pages marked *revise* / *regenerate* (revise seeds the draw
+loop with the current picture + the critic's edit instruction; a revise the critic
+rejects falls through to the normal escalate/redraw path). New reference sheets
+are drawn lazily the first time a redrawn page needs them. "Apply plan only" skips
+the redraws. A review is text-model only (~$0.03 per window); applying costs image
+generations for the pages it redraws.
+
 ## Config (env)
 
 | var | default | meaning |

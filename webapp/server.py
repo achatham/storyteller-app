@@ -42,7 +42,7 @@ from fastapi.staticfiles import StaticFiles
 
 from pipeline.config import STYLES
 
-from . import cover, db, flow, scene
+from . import continuity, cover, db, flow, scene
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 
@@ -907,6 +907,114 @@ async def api_redraw_flagged(book_id: int, threshold: float = 4.0):
         await asyncio.to_thread(db.delete_scene, book_id, p["idx"])
         asyncio.create_task(_safe_ensure(book_id, p["idx"]))
     return {"ok": True, "redrawing": [p["idx"] for p in flagged]}
+
+
+# ---------------- continuity review ----------------
+# A critic reads a run of consecutive pages (pictures + text) and recommends plan
+# edits: new settings/props/variants, corrected briefs/casts, image revisions.
+# Reviews run in a background thread per book; each window lands in the DB as it
+# finishes. Applying is a separate, explicit step (it can trigger paid redraws).
+
+_reviewing: set[int] = set()
+
+
+async def _run_review(book_id: int, start: int, end: int, window: int):
+    try:
+        await asyncio.to_thread(continuity.review_range, book_id, start, end, window)
+    except Exception as ex:  # noqa: BLE001 -- surfaced via the list endpoint's log
+        print(f"[continuity] review of book {book_id} {start}-{end} failed: "
+              f"{type(ex).__name__}: {ex}", flush=True)
+    finally:
+        _reviewing.discard(book_id)
+
+
+@app.post("/api/books/{book_id}/continuity/review")
+async def api_continuity_review(book_id: int, body: dict = Body(...)):
+    """Start a continuity review of pages start..end (inclusive) in the background.
+    Body: {start, end, window?}. One review at a time per book."""
+    book = db.get_book(book_id)
+    if not book:
+        raise HTTPException(404, "no such book")
+    try:
+        start, end = int(body.get("start")), int(body.get("end"))
+        window = int(body.get("window") or continuity.WINDOW)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "start and end page numbers required")
+    if start > end or window < 2:
+        raise HTTPException(400, "bad range")
+    if book_id in _reviewing:
+        return {"ok": False, "error": "a review is already running for this book"}
+    _reviewing.add(book_id)
+    asyncio.create_task(_run_review(book_id, start, end, window))
+    return {"ok": True, "start": start, "end": end, "window": window}
+
+
+@app.get("/api/books/{book_id}/continuity")
+def api_continuity_list(book_id: int):
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    return {"book_id": book_id, "running": book_id in _reviewing,
+            "reviews": db.reviews_for_book(book_id)}
+
+
+@app.get("/api/books/{book_id}/continuity/{review_id}")
+def api_continuity_get(book_id: int, review_id: int):
+    r = db.review_get(book_id, review_id)
+    if not r:
+        raise HTTPException(404, "no such review")
+    return r
+
+
+@app.delete("/api/books/{book_id}/continuity/{review_id}")
+def api_continuity_delete(book_id: int, review_id: int):
+    if not db.review_get(book_id, review_id):
+        raise HTTPException(404, "no such review")
+    db.review_delete(book_id, review_id)
+    return {"ok": True}
+
+
+async def _revise_scene(book_id: int, idx: int, seed: dict):
+    """Seeded img2img revision of an existing page picture (a continuity review's
+    'revise' recommendation), under the same per-page lock + concurrency cap as a
+    fresh draw. If the page has no picture after all, it is drawn fresh."""
+    try:
+        async with _lock_for(book_id, idx):
+            cur = await asyncio.to_thread(db.scene_data, book_id, idx)
+            await asyncio.to_thread(db.scene_set_status, book_id, idx, "generating")
+            try:
+                async with _sem:
+                    await asyncio.to_thread(scene.generate_scene, book_id, idx,
+                                            seed=dict(seed, draft=cur) if cur else None)
+            except Exception as ex:  # noqa: BLE001
+                await asyncio.to_thread(db.scene_set_status, book_id, idx, "failed",
+                                        f"{type(ex).__name__}: {str(ex)[:200]}")
+            finally:
+                _locks.pop((book_id, idx), None)
+    except Exception:  # noqa: BLE001 -- background work is best-effort
+        pass
+
+
+@app.post("/api/books/{book_id}/continuity/{review_id}/apply")
+async def api_continuity_apply(book_id: int, review_id: int, body: dict | None = Body(None)):
+    """Write a review's recommendations into the registry + pages, then redraw the
+    affected pages in the background (revise = seeded edit of the current picture,
+    regenerate = fresh draw). Body {draw: false} applies the plan changes only."""
+    r = db.review_get(book_id, review_id)
+    if not r:
+        raise HTTPException(404, "no such review")
+    draw = (body or {}).get("draw", True)
+    rep = await asyncio.to_thread(continuity.apply_review, book_id, r["review"])
+    rep["drawn"] = []
+    if draw:
+        for rd in rep["redraws"]:
+            if rd["mode"] == "revise":
+                asyncio.create_task(_revise_scene(book_id, rd["idx"], rd["seed"]))
+            else:
+                await asyncio.to_thread(db.delete_scene, book_id, rd["idx"])
+                asyncio.create_task(_safe_ensure(book_id, rd["idx"]))
+            rep["drawn"].append(rd["idx"])
+    await asyncio.to_thread(db.review_mark_applied, book_id, review_id, rep)
+    return {"ok": True, **rep}
 
 
 @app.get("/api/books/{book_id}/sheet/{entity_id}/{variant_id}/prompt")

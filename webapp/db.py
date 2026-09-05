@@ -253,6 +253,21 @@ CREATE TABLE IF NOT EXISTS jobs (
     PRIMARY KEY (book_id, kind)
 );
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status, updated_at);
+-- Continuity review: a critic's verdict on a run of consecutive illustrated pages
+-- (see webapp/continuity.py). One row per window; `json` is the full review
+-- (issues, per-page edits, proposed new entities/variants), applied_at is set
+-- once its recommendations were written into the registry/pages.
+CREATE TABLE IF NOT EXISTS continuity_reviews (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id     INTEGER REFERENCES books(id) ON DELETE CASCADE,
+    start_idx   INTEGER,
+    end_idx     INTEGER,
+    json        TEXT,
+    created_at  REAL,
+    applied_at  REAL,
+    applied_json TEXT
+);
+CREATE INDEX IF NOT EXISTS continuity_book ON continuity_reviews(book_id, created_at);
 """
 
 
@@ -273,6 +288,14 @@ def init():
     column checks keep existing single-file installations upgrade-safe.
     """
     with conn() as c:
+        # An earlier one-off experiment created a continuity_reviews table with a
+        # different shape (status/report). Keep its rows aside rather than clobber
+        # them; the table the app uses is the one in SCHEMA. Must run before the
+        # schema script, whose index on created_at fails against the old shape.
+        ccols = {r["name"] for r in c.execute("PRAGMA table_info(continuity_reviews)")}
+        if ccols and "json" not in ccols:
+            c.execute("DROP INDEX IF EXISTS continuity_book")
+            c.execute("ALTER TABLE continuity_reviews RENAME TO continuity_reviews_old")
         c.executescript(SCHEMA)
         c.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
         if not c.execute("SELECT 1 FROM schema_version").fetchone():
@@ -548,6 +571,24 @@ def variant_usage(book_id) -> dict:
             rec["pages"] += 1
             rec["first"] = min(rec["first"], r["idx"])
     return out
+
+
+def update_page_plan(book_id, idx, brief=None, setting=None, cast=None):
+    """Rewrite what a page's illustration is planned FROM -- its brief, setting
+    and/or cast -- leaving the text and any drawn image alone. None = keep. Used
+    when a continuity review corrects a page's plan before it is redrawn."""
+    sets, args = [], []
+    if brief is not None:
+        sets.append("brief=?"); args.append(brief)
+    if setting is not None:
+        sets.append("setting=?"); args.append(setting)
+    if cast is not None:
+        sets.append("cast_json=?"); args.append(json.dumps(cast, ensure_ascii=False))
+    if not sets:
+        return
+    args += [book_id, idx]
+    with conn() as c:
+        c.execute(f"UPDATE pages SET {', '.join(sets)} WHERE book_id=? AND idx=?", args)
 
 
 def get_page(book_id, idx) -> dict | None:
@@ -1305,3 +1346,60 @@ def reading_history(limit=200, start=None, end=None) -> list[dict]:
             f"WHERE {' AND '.join(where)} "
             "ORDER BY l.updated_at DESC LIMIT ?", params).fetchall()
         return [dict(r) for r in rows]
+
+
+# ---------------- continuity reviews ----------------
+
+def review_add(book_id, start_idx, end_idx, review: dict) -> int:
+    with conn() as c:
+        cur = c.execute("INSERT INTO continuity_reviews(book_id,start_idx,end_idx,json,"
+                        "created_at) VALUES (?,?,?,?,?)",
+                        (book_id, start_idx, end_idx,
+                         json.dumps(review, ensure_ascii=False), time.time()))
+        return cur.lastrowid
+
+
+def review_get(book_id, review_id) -> dict | None:
+    with conn() as c:
+        r = c.execute("SELECT * FROM continuity_reviews WHERE book_id=? AND id=?",
+                      (book_id, review_id)).fetchone()
+    if not r:
+        return None
+    d = dict(r)
+    d["review"] = json.loads(d.pop("json") or "{}")
+    d["applied"] = json.loads(d.pop("applied_json") or "null")
+    return d
+
+
+def reviews_for_book(book_id) -> list[dict]:
+    """Every review for a book, newest first, with a light summary (no page bodies)
+    for a list view."""
+    with conn() as c:
+        rows = c.execute("SELECT id,start_idx,end_idx,json,created_at,applied_at FROM "
+                         "continuity_reviews WHERE book_id=? ORDER BY start_idx, created_at DESC",
+                         (book_id,)).fetchall()
+    out = []
+    for r in rows:
+        rv = json.loads(r["json"] or "{}")
+        out.append({"id": r["id"], "start_idx": r["start_idx"], "end_idx": r["end_idx"],
+                    "created_at": r["created_at"], "applied_at": r["applied_at"],
+                    "summary": rv.get("summary", ""),
+                    "n_issues": len(rv.get("continuity_issues", [])),
+                    "n_edits": sum(1 for e in rv.get("page_edits", [])
+                                   if e.get("action") in ("revise", "regenerate")),
+                    "n_new_entities": len(rv.get("new_entities", [])),
+                    "n_new_variants": len(rv.get("new_variants", []))})
+    return out
+
+
+def review_mark_applied(book_id, review_id, result: dict):
+    with conn() as c:
+        c.execute("UPDATE continuity_reviews SET applied_at=?, applied_json=? "
+                  "WHERE book_id=? AND id=?",
+                  (time.time(), json.dumps(result, ensure_ascii=False), book_id, review_id))
+
+
+def review_delete(book_id, review_id):
+    with conn() as c:
+        c.execute("DELETE FROM continuity_reviews WHERE book_id=? AND id=?",
+                  (book_id, review_id))
