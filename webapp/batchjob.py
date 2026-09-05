@@ -22,11 +22,12 @@ from pipeline import gem, costs
 from . import db
 
 
-def run_image_batch(book_id: int, round: int, kind: str, reqs: list[dict], model: str,
-                    display: str, log=print) -> dict | None:
-    """Generate `reqs` (see gem.batch_generate_images) with `model` in one batch and
-    return {key: bytes | gem.ImageRefused | None} (see gem.batch_image_results), or
-    None if the job ended in a non-success state (the caller retries next step)."""
+def submit_image_batch(book_id: int, round: int, kind: str, reqs: list[dict], model: str,
+                       display: str, log=print) -> str:
+    """Submit `reqs` (see gem.batch_generate_images) as one image batch -- or reattach
+    to the job a previous run of this same (round, kind) step already submitted -- and
+    return the job name. Does not wait: a round with several image models submits them
+    all first, then collects, so their queue time overlaps instead of adding up."""
     tag = f"r{round} {kind}" if round >= 0 else kind
     existing = db.bjob_get(book_id, round, kind)
     if existing and existing["job_name"] and existing["state"] in gem.BATCH_TERMINAL \
@@ -43,11 +44,28 @@ def run_image_batch(book_id: int, round: int, kind: str, reqs: list[dict], model
         log(f"{tag}: submitted {job} ({len(reqs)} reqs, model={model})")
     # recorded (or re-asserted on reattach) for the outstanding-requests indicator
     db.batch_req_add(book_id, job, len(reqs))
+    return job
+
+
+def collect_image_batch(book_id: int, round: int, kind: str, job: str, model: str,
+                        log=print) -> dict | None:
+    """Wait for a submitted image batch and return {key: bytes | gem.ImageRefused | None}
+    (see gem.batch_image_results), or None if the job ended in a non-success state
+    (the caller retries next step). Mirrors the job state into batch_jobs as it polls."""
+    tag = f"r{round} {kind}" if round >= 0 else kind
     st = gem.batch_wait(job, on_state=lambda s: db.bjob_set_state(book_id, round, kind, s))
     if st != gem.BATCH_DONE:
         log(f"{tag}: {st}")
         return None
     return gem.batch_image_results(job, model)
+
+
+def run_image_batch(book_id: int, round: int, kind: str, reqs: list[dict], model: str,
+                    display: str, log=print) -> dict | None:
+    """Submit (or reattach) one image batch and wait for its results -- the one-model
+    case. See submit_image_batch / collect_image_batch."""
+    job = submit_image_batch(book_id, round, kind, reqs, model, display, log)
+    return collect_image_batch(book_id, round, kind, job, model, log)
 
 
 # Interactive text calls (critique / verify / judge) issued by the batched drawers

@@ -255,7 +255,8 @@ def _cancelled(book_id) -> bool:
 
 def _run_generate(book_id, r, runs, open_idxs):
     """GENERATE step: one image batch per model (fresh + escalated-revise pages can
-    need different models). Fills pr.cand / pr.req / pr.mode for each open page."""
+    need different models), all submitted before any is awaited. Fills pr.cand /
+    pr.req / pr.mode for each open page."""
     groups: dict = {}
     refreshed = 0
     for idx in open_idxs:
@@ -272,13 +273,20 @@ def _run_generate(book_id, r, runs, open_idxs):
     if refreshed:
         log(f"r{r}: picked up {refreshed} roster sheet(s) edited since the last round")
 
+    # Submit every model's batch first, then collect: the jobs queue on Google's side
+    # concurrently, so a mixed round (fresh pages on flash + escalated revises on pro)
+    # waits about one batch time instead of one per model.
+    jobs = {}
     for model, idxs in groups.items():
         short = model.split("-image")[0].split("-")[-1] or "img"
         kind = f"gen:{short}"
         reqs = [{"key": str(idx), "prompt": runs[idx].req["prompt"],
                  "ref_bytes": runs[idx].req["ref_bytes"], "aspect": "3:2"} for idx in idxs]
-        results = batchjob.run_image_batch(book_id, r, kind, reqs, model,
-                                           f"bake b{book_id} r{r} {kind}", log=log)
+        jobs[model] = (kind, batchjob.submit_image_batch(book_id, r, kind, reqs, model,
+                                                         f"bake b{book_id} r{r} {kind}", log=log))
+    for model, idxs in groups.items():
+        kind, job = jobs[model]
+        results = batchjob.collect_image_batch(book_id, r, kind, job, model, log=log)
         if results is None:
             log(f"r{r} {kind}: no results -- pages retry next round")
             continue
