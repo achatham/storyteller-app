@@ -57,6 +57,7 @@ Rules:
 - The first look is simply the earliest segment; capture it like any other. Common triggers for a new variant: moving between different worlds or settings (e.g. everyday real-world clothes before entering a fantasy/secondary world, then that world's dress), donning a uniform/armor/disguise, aging, or a lasting injury.
 - Do not collapse genuinely different looks into one variant, and do not split looks that are essentially the same. A character whose appearance never meaningfully changes can have a single variant; a constant setting/prop may have an empty variants list.
 - A VARIANT IS A DURABLE LOOK, NOT A MOMENT. Only make a variant for how someone looks across a whole stretch of the story. A one-off item worn for a single scene -- a party hat, a costume, a paper crown, a single evening's finery -- is NOT a variant: it belongs to that one page's illustration, and baking it into a variant would put it on every page that variant covers. Never write a "delta" that hedges ("occasionally", "sometimes", "at one point", "for one scene"): if you find yourself hedging, the feature is a moment, so leave it out of the delta entirely and describe only what is true for the WHOLE span.
+- A VARIANT IS NEVER A CONDITION OF HARM OR DISTRESS. Being unconscious, petrified, injured, bleeding, sick, crying, terrified, captive or dead is a MOMENT for that page's illustration, not a look: do NOT make a variant for it and do not put such words in any delta. A reference sheet of a lifeless or hurt child cannot be drawn at all (the image generator refuses it), and then every page needing it loses the character's reference. Only a lasting, VISIBLE wardrobe or body change that persists across scenes qualifies -- a plaster cast worn for chapters, a scar, an eyepatch, torn or dusty clothes -- described neutrally ("left arm in a white plaster cast"); "kind: injury" and "kind: state" are for those alone.
 - Aim for completeness on importance>=3 entities; you may include minor ones at importance 1-2 but do not pad.
 - Keep each text field short; richness is added in a later pass.
 
@@ -96,6 +97,13 @@ it in a way an artist would default to an ordinary human/animal. When a body par
 object, say it is an organic body part shaped LIKE that object, never just the object (write "one huge \
 flat foot shaped like a canoe -- an organic foot, NOT an actual boat", not "a canoe-shaped foot"). The \
 single most identity-defining trait comes FIRST, before clothing and incidental details.
+SAFE TO DRAW: every appearance and sheet_prompt must describe a calm, unhurt figure in a neutral \
+relaxed pose. An image generator REFUSES a reference sheet of a child who is lifeless, limp, \
+motionless, wounded, bleeding, bruised, deathly pale, grimy with tear tracks, terrified or \
+restrained -- and the character then has no reference at all. If a variant's delta describes such \
+a condition, write that variant's appearance as the WARDROBE and hair of that span only (rumpled \
+robes, a loosened tie, tousled dusty hair are fine) with a calm, composed expression and open \
+eyes, standing; the condition itself belongs to the individual page illustrations.
 Resolve EVERY variant listed on the entity (echo each variant id). If the entity has no variants, return an empty variants list.
 """
 

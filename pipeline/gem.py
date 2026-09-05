@@ -175,8 +175,15 @@ def rewrite_prompt_safely(prompt: str, reason: str = "", model: str = TEXT_MODEL
         "aimed at people, nudity, or frightening imagery -- make it gentle and age-"
         "appropriate (e.g. 'a crying, terrified child' -> 'a young child with a sad, "
         "worried expression'; 'a sword plunged into his chest' -> 'a tense standoff, "
-        "swords raised'). Do not add any disclaimer or caption. Return JSON "
-        '{"prompt": "<rewritten prompt>"}.\n\nPROMPT TO REWRITE:\n' + prompt)
+        "swords raised'). For a child who is hurt, unconscious or in danger, prefer these "
+        "moves in order: (1) shift to the moment just before or just after; (2) show the "
+        "others' reaction -- a friend kneeling beside them, a hand reaching out -- with the "
+        "child small, at a distance or seen from behind; (3) if the child must be shown "
+        "down, pose them as if peacefully asleep: face calm, eyes closed, normal skin "
+        "colour, no wounds, blood, bruises, pallor, grime, tear tracks, ropes or restraints; "
+        "(4) show the telling object instead. Remove words like lifeless, limp, motionless, "
+        "cold as marble, bloodless, comatose, victim. Do not add any disclaimer or caption. "
+        'Return JSON {"prompt": "<rewritten prompt>"}.\n\nPROMPT TO REWRITE:\n' + prompt)
     try:
         out = text_json(instr, schema=_SAFE_REWRITE_SCHEMA, model=model)
         return (out.get("prompt") or "").strip() or prompt

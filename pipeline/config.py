@@ -289,9 +289,24 @@ WORDS_PER_PAGE = int(os.environ.get("STORY_WORDS_PER_PAGE", "200"))
 
 # ---- audience / content ----
 AUDIENCE_AGE = os.environ.get("STORY_AGE", "5")
+# How a hurt, unconscious or endangered child is handled everywhere a picture is
+# planned (briefs, per-page states, safety rewrites): imply, don't show. An image model
+# refuses "a limp, lifeless, marble-pale child" outright -- after every retry the page
+# (or reference sheet) is simply blank -- so the plan must never ask for it.
+IMPLY_HARM_RULE = (
+    "When the text has a child hurt, unconscious, petrified, captive or in danger, IMPLY it "
+    "rather than show it: choose the moment just before or just after; show the reaction of "
+    "the others (a friend kneeling beside them, a hand reaching out) with the child small, at "
+    "a distance or seen from behind; or show the telling object instead (the dropped diary, "
+    "the empty chamber). If the child must be in the picture and down, pose them as if "
+    "peacefully asleep -- face calm, eyes closed, normal skin colour -- with NO wounds, blood, "
+    "bruises, pallor, grime, tear tracks, ropes or restraints, and say so in the brief. Never "
+    "write 'lifeless', 'limp', 'motionless', 'cold as marble', 'bloodless', 'comatose' or "
+    "'victim': the image generator refuses those words and the page comes out blank."
+)
 VIOLENCE_POLICY = (
     f"This book is read aloud to a {AUDIENCE_AGE}-year-old. SOFTEN all violence: "
     "depict tension, confrontation, and emotion (a standoff, a brave stance, "
     "worried faces) but NEVER show graphic injury, blood, or a child being "
-    "struck. Imply conflict rather than depicting it."
+    "struck. Imply conflict rather than depicting it. " + IMPLY_HARM_RULE
 )
