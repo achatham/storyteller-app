@@ -138,7 +138,12 @@ def test_apply_review_writes_plan_and_returns_redraws(env):
     assert seed["instruction"] == "Keep everything; fix the arm." and seed["ref_chars"] == ["Kid"]
     # nothing was drawn or deleted: the pictures are still there
     assert db.scene_data(bid, 1) == b"img1" and db.scene_data(bid, 2) == b"img2"
-    assert {p["idx"] for p in rep["pages_updated"]} == {1, 2}
+    # the ward proposal named pages 0-2: the kept page 0 gets it in its cast (plan
+    # only, no redraw); pages 1 and 2 gave explicit casts, which win
+    assert json.loads(db.get_page(bid, 0)["cast_json"])[-1] == {
+        "entity_id": "hospital_ward", "variant_id": "default", "view": ""}
+    assert {p["idx"] for p in rep["pages_updated"]} == {0, 1, 2}
+    assert {r["idx"] for r in rep["redraws"]} == {1, 2}      # page 0 stays undrawn
 
 
 def test_apply_review_retags_a_kept_page_without_redrawing_it(env):
