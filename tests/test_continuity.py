@@ -233,3 +233,32 @@ def test_stage_redraws_for_the_batch_bake(env):
     db.bps_init(bid, [0, 1, 2])
     assert db.bps_skip_illustrated(bid) == 1          # only the untouched page 2
     assert db.bps_actionable(bid) == [0, 1]
+
+
+def test_proposals_retag_the_pages_they_name(env):
+    db, cont, bid = env
+    review = {
+        "pages": [0, 1, 2],
+        "new_entities": [{"id": "kings_cross", "type": "setting", "name": "King's Cross",
+                          "appearance": "a station", "sheet_prompt": "s", "pages": [2]}],
+        "new_variants": [{"entity_id": "kid", "id": "sooty", "kind": "state", "label": "Sooty",
+                          "appearance": "kid with soot on his face and cracked glasses",
+                          "sheet_prompt": "s", "pages": [0, 1]}],
+        "continuity_issues": [{"pages": [0, 1], "issue": "soot gone", "root_cause": "missing_variant",
+                               "severity": 2}],
+        "page_edits": [
+            {"idx": 0, "action": "revise", "problems": ["clean"], "edit_instruction": "add soot"},
+            {"idx": 1, "action": "revise", "problems": ["clean"], "edit_instruction": "add soot",
+             "cast": [{"entity_id": "kid", "variant_id": "pyjamas"}]},   # explicit cast wins
+            {"idx": 2, "action": "keep", "problems": []},
+        ],
+    }
+    rep = cont.apply_review(bid, review, log=lambda *_: None)
+    assert rep["variants_added"] == ["kid/sooty"] and rep["entities_added"] == ["kings_cross"]
+    assert json.loads(db.get_page(bid, 0)["cast_json"]) == [
+        {"entity_id": "kid", "variant_id": "sooty"},
+        {"entity_id": "castle", "variant_id": "default", "view": ""}]
+    assert json.loads(db.get_page(bid, 1)["cast_json"]) == [{"entity_id": "kid", "variant_id": "pyjamas"}]
+    assert json.loads(db.get_page(bid, 2)["cast_json"])[-1] == {
+        "entity_id": "kings_cross", "variant_id": "default", "view": ""}
+    assert {p["idx"] for p in rep["pages_updated"]} == {0, 1, 2}

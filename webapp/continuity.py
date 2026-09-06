@@ -71,6 +71,20 @@ be there). Give the corrected full cast.
 - image_noise: the plan is fine and the picture just came out wrong. Say whether an in-place edit \
 (revise) can fix it or it must be redrawn (regenerate).
 
+YOU ARE EXPECTED TO CHANGE THE PLAN, not just patch pictures. A revise that leaves the plan wrong is \
+drawn against the same wrong plan next time and drifts straight back. So:
+- Whenever a page's root cause is wrong_variant, missing_variant, missing_setting, missing_prop, \
+missing_character or cast, that page's edit MUST include the complete corrected "cast" -- the right \
+existing variant id, or the new variant/entity you are proposing -- not only an edit_instruction.
+- Propose a NEW variant whenever a character keeps a look across two or more pages that no existing \
+variant matches: soot-streaked clothes and broken glasses after a fireplace accident, wet or muddy \
+clothes, a bandaged arm, casual summer clothes for a child who has not started school yet, pyjamas \
+for a night sequence. Give it the pages it applies to. Do not wait for a later window to do it and do \
+not describe the look only in edit_instruction. (A look must still be drawable for a children's \
+book: describe rumpled/dirty clothes and a calm face, never a hurt or lifeless child.)
+- If a variant proposed by an earlier window (listed below) fits, USE it in the cast of every page \
+here where it applies -- that is what it was made for.
+
 Rules for proposals:
 - REUSE existing registry ids and variant ids exactly as written below. Only propose a new entity or \
 variant when nothing existing fits. Never propose one that duplicates an earlier proposal listed below \
@@ -558,6 +572,25 @@ def apply_review(book_id: int, review: dict, log=print, serious_only: bool = Fal
     if changed:
         db.save_registry(book_id, registry)
 
+    # A proposal names the pages it is for. The critic often marks those pages revise
+    # with only an edit_instruction, so fold the proposal into their casts here --
+    # otherwise the picture is patched while the plan still points at the old look
+    # and the next draw drifts straight back. A page edit that gives its own cast wins.
+    retag: dict = {}    # idx -> list of (entity_id, variant_id)
+    in_review = set(review.get("pages") or [pe.get("idx") for pe in review.get("page_edits", [])])
+    for v in review.get("new_variants", []):
+        eid, vid = v.get("entity_id"), _slug(v.get("id", ""))
+        if eid in reg_by_id and any(x.get("id") == vid for x in reg_by_id[eid].get("variants", [])):
+            for idx in v.get("pages", []) or []:
+                if idx in in_review:
+                    retag.setdefault(idx, []).append((eid, vid))
+    for e in review.get("new_entities", []):
+        eid = _slug(e.get("id", ""))
+        if eid in reg_by_id:
+            for idx in e.get("pages", []) or []:
+                if idx in in_review:
+                    retag.setdefault(idx, []).append((eid, "default"))
+
     for pe in review.get("page_edits", []):
         idx = pe.get("idx")
         page = db.get_page(book_id, idx) if idx is not None else None
@@ -569,6 +602,10 @@ def apply_review(book_id: int, review: dict, log=print, serious_only: bool = Fal
         new_cast = None
         if pe.get("cast"):
             new_cast = _validate_cast(pe["cast"], old_cast, reg_by_id, local_ids, rep["notes"], idx)
+        elif idx in retag:
+            new_cast = _retag_cast(old_cast, retag[idx])
+            rep["notes"].append(f"page {idx}: cast retagged to proposed "
+                                + ", ".join(f"{e}/{v}" for e, v in retag[idx]))
         brief = (pe.get("brief") or "").strip() or None
         setting = (pe.get("setting") or "").strip() or None
         if brief == page.get("brief"):
@@ -604,6 +641,19 @@ def apply_review(book_id: int, review: dict, log=print, serious_only: bool = Fal
         f"{len(rep['redraws'])} redraws planned"
         + (f", {len(rep['skipped'])} cosmetic verdicts skipped" if rep["skipped"] else ""))
     return rep
+
+
+def _retag_cast(old_cast: list, changes: list) -> list:
+    """`old_cast` with each (entity_id, variant_id) in `changes` applied: an entity
+    already in the cast switches to that variant; a new one is appended."""
+    cast = [dict(c) for c in old_cast]
+    for eid, vid in changes:
+        hit = next((c for c in cast if c.get("entity_id") == eid), None)
+        if hit:
+            hit["variant_id"] = vid
+        else:
+            cast.append({"entity_id": eid, "variant_id": vid, "view": ""})
+    return cast
 
 
 def _validate_cast(cast: list, old_cast: list, reg_by_id: dict, local_ids: set,
