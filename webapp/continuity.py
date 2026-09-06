@@ -750,6 +750,11 @@ def main(argv=None):
                     help="with --apply: stop (before applying more) once redraws / pages reviewed "
                          "exceeds this fraction, e.g. 0.25 -- the 'more than a quarter of the "
                          "book would be redrawn, rethink' guard")
+    ap.add_argument("--prior", default="0/0", metavar="REDRAWN/REVIEWED",
+                    help="with --max-redraw-rate: counts from earlier runs over this book, so a "
+                         "relaunch judges the BOOK-wide rate rather than the chapter it resumes "
+                         "in (a 15-page chapter tripped a 40%% guard at 60%% while the book stood "
+                         "at 38%%)")
     ap.add_argument("--no-store", action="store_true", help="don't save the review rows")
     ap.add_argument("--json", action="store_true", help="print the raw JSON verdicts")
     a = ap.parse_args(argv)
@@ -765,7 +770,10 @@ def main(argv=None):
     else:
         start, end = pages[0]["idx"], pages[-1]["idx"]
 
-    reviewed = redrawn = 0
+    m = re.fullmatch(r"(\d+)/(\d+)", a.prior.strip())
+    if not m:
+        sys.exit("--prior must look like 23/60 (redrawn/reviewed)")
+    redrawn, reviewed = int(m.group(1)), int(m.group(2))
     deferred: list = []      # --batch: redraw plans collected for one bake at the end
     stopped = False
 
