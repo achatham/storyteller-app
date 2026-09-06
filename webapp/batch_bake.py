@@ -6,6 +6,9 @@ interactive per-page path), run as its own subprocess:
 Batch image generation is asynchronous, so the tight per-image critique/revise loop
 of webapp/scene.py becomes ROUNDS across every page:
 
+    plan      -> a text-only continuity critic reads the pages against the source and
+                 fixes casts / variants / briefs / missing settings BEFORE any image
+                 is paid for (continuity.run_pass(plan_only=True))
     roster    -> draw the reference sheets in the BACKGROUND (batch_roster), saving
                  wave 1 (anchors) before wave 2 (variants) so sheets land mid-draw
     admit     -> each round, admit any page whose OWN sheets are all present (so it
@@ -21,6 +24,10 @@ of webapp/scene.py becomes ROUNDS across every page:
                  it for a handful of pages)
     finalise  -> best-of judge (interactive) for pages that never passed; store every
                  page image
+    review    -> the full continuity critic reads the drawn pages in runs of five; the
+                 serious findings (severity 3 / plan-rooted) are staged as revise or
+                 regenerate and drawn in further batch rounds, capped at
+                 CONTINUITY_MAX_REDRAW of the book
 
 Only image generation is batched. Text steps cost cents, and each queued text job
 used to add a full Batch API wait per round (once 114 minutes for a $0.06 saving),
@@ -74,6 +81,18 @@ INTERACTIVE_WORKERS = int(os.environ.get("STORY_BAKE_INTERACTIVE_WORKERS", "4"))
 # faster (full price, full critique/revise loop). 0 disables the cutover (batch to the end).
 INTERACTIVE_TAIL = int(os.environ.get("STORY_BAKE_INTERACTIVE_TAIL", "20"))
 MAX_ROUNDS = SCENE_TRIES
+# Continuity review stages (webapp/continuity.py), both on by default:
+#  - PLAN review before anything is drawn: a text-only critic reads the pages in runs of
+#    five against the source text and fixes the PLAN -- wrong/missing variants, missing
+#    settings, casts, briefs -- so those never cost an image (about half of what the
+#    picture review found on Chamber of Secrets was visible from text alone);
+#  - PICTURE review after the pages are drawn: the full critic with images; pages with
+#    a severity-3 or plan-rooted issue are redrawn in more batch rounds, unless that
+#    would be more than CONTINUITY_MAX_REDRAW of the book -- then the plan fixes are
+#    written, the redraws withheld and the bake finishes with a note.
+CONTINUITY_PLAN = os.environ.get("STORY_BAKE_PLAN_REVIEW", "1") != "0"
+CONTINUITY_PICTURE = os.environ.get("STORY_BAKE_CONTINUITY", "1") != "0"
+CONTINUITY_MAX_REDRAW = float(os.environ.get("STORY_BAKE_CONTINUITY_MAX_REDRAW", "0.5"))
 
 
 def log(msg):
@@ -522,6 +541,98 @@ def finalise(book_id, runs):
 
 # ---------------- entry ----------------
 
+def _draw_open_pages(book_id, roster, runs, plan_cache, r) -> int:
+    """Run batch rounds until nothing is actionable (admitting pages as their sheets
+    land), finish a small tail interactively, then finalise the stragglers. Returns
+    the next free round number. Called once for the book and again for any pages the
+    continuity review staged afterwards."""
+    max_round = r + MAX_ROUNDS * 4
+    tail = False
+    while r < max_round:
+        if _cancelled(book_id):
+            return r
+        _admit(book_id, runs, plan_cache, force=roster.finished)
+        outstanding = db.bps_actionable(book_id)
+        # Tail cutover: once the roster is drawn and only a small tail of pages
+        # remains, stop batching and finish them interactively -- a batch round's
+        # minutes-per-job latency isn't worth it for a handful of pages.
+        if INTERACTIVE_TAIL and roster.finished and 0 < len(outstanding) < INTERACTIVE_TAIL:
+            log(f"{len(outstanding)} page(s) left (< {INTERACTIVE_TAIL}) -> interactive tail")
+            tail = True
+            break
+        open_idxs = [i for i in outstanding
+                     if i in runs and runs[i].attempt < MAX_ROUNDS]
+        if not open_idxs:
+            if roster.finished:
+                break                     # roster done and nothing left to generate
+            time.sleep(gem.POLL_SECONDS)   # sheets still drawing -- wait, then re-admit
+            continue
+        run_round(book_id, r, runs, open_idxs)
+        r += 1
+    roster.join()
+    if _cancelled(book_id):
+        return r
+    if tail:
+        _drain_interactive(book_id)       # finish the last few pages interactively
+    finalise(book_id, runs)
+    return r
+
+
+def _plan_review(book_id, total):
+    """The pre-draw plan review, once per book (a resumed bake skips it if a plan
+    review is already on record)."""
+    from . import continuity
+    if any(r.get("kind") == "plan" for r in db.reviews_for_book(book_id)):
+        return
+    db.set_status(book_id, "baking", "reviewing the plan before drawing…")
+    db.bake_upsert(book_id, "baking", detail="plan review")
+    pages = db.get_pages(book_id)
+    try:
+        res = continuity.run_pass(book_id, pages[0]["idx"], pages[-1]["idx"], plan_only=True, log=log)
+        rep = res["applied"]
+        log(f"plan review: +{len(rep['entities_added'])} entities, +{len(rep['variants_added'])} "
+            f"variants, {len(rep['pages_updated'])} pages' plans corrected")
+    except Exception as ex:  # noqa: BLE001 -- a failed review must not block the bake
+        log(f"plan review failed ({type(ex).__name__}: {str(ex)[:160]}); drawing as planned")
+    db.set_status(book_id, "baking", "illustrating the whole book…")
+
+
+def _picture_review(book_id, bake_started) -> int:
+    """The post-draw continuity review: stage the serious redraws for more rounds and
+    return how many pages were staged (0 = nothing to do, or withheld by the cap). Runs
+    once per bake (skipped on resume if a picture review newer than the bake exists)."""
+    from . import continuity
+    if any(r.get("kind") == "picture" and (r.get("created_at") or 0) >= bake_started
+           for r in db.reviews_for_book(book_id)):
+        return 0
+    db.set_status(book_id, "baking", "reviewing continuity across pages…")
+    db.bake_upsert(book_id, "baking", detail="continuity review")
+    pages = db.get_pages(book_id)
+    try:
+        res = continuity.run_pass(book_id, pages[0]["idx"], pages[-1]["idx"], serious_only=True,
+                                  max_rate=CONTINUITY_MAX_REDRAW, log=log)
+    except Exception as ex:  # noqa: BLE001 -- a failed review leaves a finished book finished
+        log(f"continuity review failed ({type(ex).__name__}: {str(ex)[:160]})")
+        db.bake_upsert(book_id, "baking", detail=f"continuity review failed: {str(ex)[:120]}")
+        return 0
+    if res["stopped"]:
+        note = (f"continuity review: {len(res['redraws'])} of {res['reviewed']} pages "
+                f"({res['rate']:.0%}) would be redrawn, above the {CONTINUITY_MAX_REDRAW:.0%} cap -- "
+                "plan fixes written, redraws withheld")
+        log(note)
+        db.bake_upsert(book_id, "baking", detail=note)
+        return 0
+    if not res["redraws"]:
+        db.bake_upsert(book_id, "baking", detail="continuity review: nothing to redraw")
+        return 0
+    n = db.bake_stage_redraws(book_id, res["redraws"])
+    note = (f"continuity review: redrawing {n} of {res['reviewed']} pages ({res['rate']:.0%})")
+    log(note)
+    db.bake_upsert(book_id, "baking", detail=note)
+    db.set_status(book_id, "baking", f"redrawing {n} pages from the continuity review…")
+    return n
+
+
 def run(book_id: int):
     book = db.get_book(book_id)
     if not book:
@@ -529,6 +640,9 @@ def run(book_id: int):
     with costs.run_as(f"book:{book_id}"):
         _seed(book_id)
         total = len(db.get_pages(book_id))
+        bake_started = (db.bake_get(book_id) or {}).get("created_at") or time.time()
+        if CONTINUITY_PLAN:
+            _plan_review(book_id, total)      # fix the plan before paying for images
         # Draw the roster in the BACKGROUND so a page starts illustrating as soon as ITS
         # OWN sheets are ready, instead of waiting for the whole roster (better time to
         # first illustrated page -- the reader shows pages progressively during a bake).
@@ -546,44 +660,25 @@ def run(book_id: int):
                        done_pages=db.bps_counts(book_id).get("done", 0))
         if start_round:
             log(f"resuming at round {start_round}")
-        # The round counter is just a batch-job namespace + resume pointer now; the real
+        # The round counter is just a batch-job namespace + resume pointer; the real
         # stop condition is per-page (a page leaves the open set after SCENE_TRIES
         # attempts). A late-admitted page can push total iterations past MAX_ROUNDS, so
-        # cap generously -- every open page still increments its attempt each round, so
-        # once the roster is done the loop drains in <= MAX_ROUNDS more iterations.
-        r = start_round
-        max_round = start_round + MAX_ROUNDS * 4
-        tail = False
-        while r < max_round:
-            if _cancelled(book_id):
-                log("cancelled")
-                db.set_status(book_id, "roster_review", "bake cancelled — review or re-illustrate")
-                return
-            _admit(book_id, runs, plan_cache, force=roster.finished)
-            outstanding = db.bps_actionable(book_id)
-            # Tail cutover: once the roster is drawn and only a small tail of pages
-            # remains, stop batching and finish them interactively -- a batch round's
-            # minutes-per-job latency isn't worth it for a handful of pages.
-            if INTERACTIVE_TAIL and roster.finished and 0 < len(outstanding) < INTERACTIVE_TAIL:
-                log(f"{len(outstanding)} page(s) left (< {INTERACTIVE_TAIL}) -> interactive tail")
-                tail = True
-                break
-            open_idxs = [i for i in outstanding
-                         if i in runs and runs[i].attempt < MAX_ROUNDS]
-            if not open_idxs:
-                if roster.finished:
-                    break                     # roster done and nothing left to generate
-                time.sleep(gem.POLL_SECONDS)   # sheets still drawing -- wait, then re-admit
-                continue
-            run_round(book_id, r, runs, open_idxs)
-            r += 1
-        roster.join()
+        # _draw_open_pages caps generously -- every open page still increments its
+        # attempt each round, so once the roster is done it drains in <= MAX_ROUNDS more.
+        r = _draw_open_pages(book_id, roster, runs, plan_cache, start_round)
         if _cancelled(book_id):
+            log("cancelled")
             db.set_status(book_id, "roster_review", "bake cancelled — review or re-illustrate")
             return
-        if tail:
-            _drain_interactive(book_id)       # finish the last few pages interactively
-        finalise(book_id, runs)
+        if CONTINUITY_PICTURE and _picture_review(book_id, bake_started):
+            # staged pages are actionable again; a fresh PageRun per page restores the
+            # revise seed (draft + instruction) from batch_page_state
+            for idx in db.bps_actionable(book_id):
+                runs.pop(idx, None)
+            r = _draw_open_pages(book_id, roster, runs, plan_cache, r)
+            if _cancelled(book_id):
+                db.set_status(book_id, "roster_review", "bake cancelled — review or re-illustrate")
+                return
         done = db.bps_counts(book_id).get("done", 0)
         db.bake_upsert(book_id, "done", round=r, done_pages=done)
         db.set_status(book_id, "ready", f"{done} pages illustrated (batch)")

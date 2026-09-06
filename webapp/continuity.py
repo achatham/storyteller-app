@@ -21,15 +21,22 @@ caller decides whether to spend the image generations).
 """
 import argparse
 import json
+import os
 import re
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from pipeline import gem, costs, markup
 from pipeline.config import TEXT_MODEL, STYLES
 from . import db
 
 WINDOW = 5            # pages per review call
+# Windows run a few at a time. Each starts with every proposal made so far (a rolling
+# "prior"), so only windows in flight at the same moment can propose the same new
+# setting under two ids -- and dedup_proposals reconciles those afterwards.
+REVIEW_WORKERS = int(os.environ.get("STORY_REVIEW_WORKERS", "3"))
 MAX_SHEETS = 8        # reference sheets attached per window (identity anchors)
 SRC_CHARS = 2600      # per-page source text cap
 REVIEW_MODEL = TEXT_MODEL
@@ -149,6 +156,81 @@ Now judge the sequence. Return JSON only:
   ]
 }}
 Include a page_edits entry for EVERY page shown, in order, even when its action is keep."""
+
+PLAN_PROMPT = """You are the continuity editor for a children's read-aloud picture-book \
+edition of a novel (audience: {age} years old). NOTHING HAS BEEN DRAWN YET. You are shown {n} \
+CONSECUTIVE pages -- for each, the source text the child hears and the PLAN an illustrator will draw \
+from (setting, brief, cast = which registry entity + variant to draw) -- plus the registry of \
+canonical looks. Your job is to fix the PLAN before any picture is paid for, reading the pages AS A \
+SEQUENCE and against the source text, which is the only ground truth:
+- a cast entry using a variant the text contradicts at this point (school uniform during the summer \
+holidays, a child in Hogwarts robes before ever arriving there, clean clothes right after the text \
+covered them in soot) -> wrong_variant if a fitting variant exists, else missing_variant: propose \
+the variant (a DURABLE look across two or more pages -- soot-streaked clothes and cracked glasses, \
+wet or muddy clothes, a bandaged arm, casual summer clothes, pyjamas for a night sequence) and put \
+it in every page's cast where it applies;
+- a place the pages keep returning to that has no registry entry (each page would invent it afresh) \
+-> missing_setting: propose it and add it to those pages' casts; likewise a recurring prop or a \
+character who speaks or acts across pages but is absent from the registry -> missing_prop / \
+missing_character;
+- a character the text has present, speaking or acting who is missing from the cast (or listed but \
+absent from the scene) -> cast: give the complete corrected cast;
+- a brief that asks for something the text contradicts, spoils something the text has not reached, or \
+shows a hurt or endangered child directly (imply it instead: the moment before or after, the others' \
+reaction, the telling object, or a calm resting pose with no wounds, pallor, grime or tears) -> brief: \
+rewrite it in full.
+Be proportionate: most pages are fine. Do not invent problems, and never rewrite a brief that already \
+matches the text. Set every page's action to "keep" (there is no picture to revise) and leave \
+edit_instruction empty; the plan fields (brief / setting / cast) are what you change.
+
+Rules for proposals:
+- REUSE existing registry ids and variant ids exactly as written below. Only propose a new entity or \
+variant when nothing existing fits. Never propose one that duplicates an earlier proposal listed below \
+-- reuse its id instead.
+- New ids are snake_case. Appearances are CONCRETE (materials, colours, layout, build, clothing), \
+describe ONE look at ONE moment, and never mention an art style or medium. sheet_prompt describes a \
+neutral reference image of the subject alone (a character: full body, front view, plain off-white \
+background, no props, no text; a setting: a clean establishing view; a prop: an isolated view). A \
+look must be drawable for a children's book: rumpled or dirty clothes and a calm face, never a hurt \
+or lifeless child.
+- When a page's cast changes, return the COMPLETE corrected cast for that page (every entity that \
+should anchor the look), with variant ids that exist or that you are proposing. Leave "cast" empty \
+to keep it as it is; likewise "brief" / "setting".
+
+REGISTRY (canonical entities and their variants; "no sheet" = not drawn yet):
+{registry}
+{prior}
+THE PAGES:
+{pages}
+
+Return JSON only:
+{{
+  "summary": "<two or three sentences: what is wrong with the plan across these pages, or that it is fine>",
+  "continuity_issues": [
+    {{"pages": [<page numbers involved>], "issue": "<what is wrong, concretely>",
+      "root_cause": "<missing_setting | missing_prop | missing_character | wrong_variant | missing_variant | brief | cast | other>",
+      "severity": <1 minor, 2 noticeable, 3 breaks the story for a child>}}
+  ],
+  "new_entities": [
+    {{"id": "<snake_case>", "type": "<setting | prop | character>", "name": "<display name>",
+      "importance": <1-5>, "summary": "<one line>", "appearance": "<canonical look>",
+      "sheet_prompt": "<neutral reference-sheet prompt>",
+      "pages": [<pages that should list it in their cast>], "why": "<the problem it fixes>"}}
+  ],
+  "new_variants": [
+    {{"entity_id": "<existing entity id>", "id": "<snake_case>", "kind": "<outfit | age | state | other>",
+      "label": "<short label>", "when": "<where it applies>", "delta": "<what differs from the base look>",
+      "appearance": "<full resolved look>", "sheet_prompt": "<neutral reference-sheet prompt>",
+      "pages": [<pages that should use it>], "why": "<the problem it fixes>"}}
+  ],
+  "page_edits": [
+    {{"idx": <page number>, "action": "keep", "problems": ["<what was wrong with this page's plan>"],
+      "edit_instruction": "", "reference_characters": [],
+      "brief": "<full corrected brief, or empty to keep>", "setting": "<corrected setting, or empty>",
+      "cast": [{{"entity_id": "<id>", "variant_id": "<variant id, or 'default'>", "view": "<named spot within a setting, or empty>"}}]}}
+  ]
+}}
+Include a page_edits entry for EVERY page shown, in order, even when nothing changes."""
 
 _CAST_ITEM = {"type": "object", "properties": {
     "entity_id": {"type": "string"}, "variant_id": {"type": "string"}, "view": {"type": "string"}},
@@ -338,8 +420,9 @@ def _prior_text(prior: dict | None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def review_contents(win: dict, prior: dict | None = None) -> list:
-    """The ordered text/image parts for one review call."""
+def review_contents(win: dict, prior: dict | None = None, plan_only: bool = False) -> list:
+    """The ordered text/image parts for one review call. plan_only = the pre-draw pass:
+    text and plan only, no illustrations and no reference sheets (nothing exists yet)."""
     book = win["book"]
     style = STYLES.get(book.get("style")) or next(iter(STYLES.values()))
     page_blocks = []
@@ -353,7 +436,12 @@ def review_contents(win: dict, prior: dict | None = None) -> list:
             f"CAST (planned, entity_id/variant_id): {cast_txt}\n"
             f"BRIEF (planned): {pg.get('brief') or '(none)'}\n"
             f"SOURCE TEXT:\n{_snip(markup.plain(pg.get('read_text') or ''), SRC_CHARS)}\n"
-            + ("" if p["image"] else "(this page has NO illustration yet -- judge its plan only)\n"))
+            + ("" if p["image"] or plan_only
+               else "(this page has NO illustration yet -- judge its plan only)\n"))
+    if plan_only:
+        return [PLAN_PROMPT.format(
+            age=book.get("age") or "5", n=len(win["pages"]),
+            registry=win["registry_text"], prior=_prior_text(prior), pages="\n".join(page_blocks))]
     prompt = REVIEW_PROMPT.format(
         age=book.get("age") or "5", n=len(win["pages"]), style=style,
         registry=win["registry_text"], prior=_prior_text(prior), pages="\n".join(page_blocks))
@@ -402,55 +490,201 @@ def _slug(s: str) -> str:
 
 
 def review_window(book_id: int, idxs: list[int], prior: dict | None = None,
-                  thinking_level: str | None = "medium") -> dict:
+                  thinking_level: str | None = "medium", plan_only: bool = False) -> dict:
     """One review call over pages `idxs`. Returns the cleaned verdict plus the
-    window it covered ("pages") and which pages had no picture."""
+    window it covered ("pages"), which pages had no picture, and its "kind"
+    ("plan" = pre-draw text-only pass, "picture" = the full pass with images)."""
     win = build_window(book_id, idxs)
     if not win["pages"]:
         raise ValueError(f"no pages in {idxs}")
-    contents = review_contents(win, prior)
+    contents = review_contents(win, prior, plan_only=plan_only)
     with costs.run_as(f"book:{book_id}"):
         raw = gem.vision_json(contents, schema=REVIEW_SCHEMA, model=REVIEW_MODEL,
                               thinking_level=thinking_level, kind="critique")
     rv = _clean_review(raw, [p["idx"] for p in win["pages"]])
+    if plan_only:
+        for pe in rv["page_edits"]:           # nothing to revise before a draw
+            pe["action"] = "keep"
     rv["pages"] = [p["idx"] for p in win["pages"]]
     rv["missing_images"] = win["missing_images"]
     rv["model"] = REVIEW_MODEL
+    rv["kind"] = "plan" if plan_only else "picture"
     return rv
 
 
+def _absorb(prior: dict, rv: dict):
+    """Fold a finished window's proposals into the rolling prior (caller holds the lock)."""
+    for e in rv["new_entities"]:
+        if not any(x["id"] == e["id"] for x in prior["new_entities"]):
+            prior["new_entities"].append(e)
+    for v in rv["new_variants"]:
+        if not any(x["entity_id"] == v["entity_id"] and x["id"] == v["id"]
+                   for x in prior["new_variants"]):
+            prior["new_variants"].append(v)
+
+
 def review_range(book_id: int, start: int, end: int, window: int = WINDOW,
-                 store: bool = True, log=print, on_window=None) -> list[dict]:
-    """Review pages start..end (inclusive) in consecutive windows. Each window is
-    told what earlier windows already proposed, so a setting invented for pages
-    1-5 is reused (not re-proposed under another id) for pages 6-10. Each verdict
-    is stored as its own row (id in "review_id") so it can be applied separately.
-    `on_window(rv)` is called after each window; returning False stops the run."""
+                 store: bool = True, log=print, on_window=None, plan_only: bool = False,
+                 workers: int = REVIEW_WORKERS) -> list[dict]:
+    """Review pages start..end (inclusive) in consecutive windows, `workers` at a time.
+    Each window is told what earlier windows already proposed (a rolling prior), so a
+    setting invented for pages 1-5 is reused for pages 6-10 rather than re-proposed
+    under another id; only windows in flight together can collide, which
+    dedup_proposals reconciles. Each verdict is stored as its own row (id in
+    "review_id"). `on_window(rv)` is called as each window finishes (any order);
+    returning False stops the run from starting new windows. Results are returned
+    in page order."""
     idxs = [p["idx"] for p in db.get_pages(book_id) if start <= p["idx"] <= end]
     if not idxs:
         raise ValueError(f"book {book_id} has no pages in {start}-{end}")
+    groups = window_groups(idxs, window)
     prior = {"new_entities": [], "new_variants": []}
-    out = []
-    for grp in window_groups(idxs, window):
-        log(f"[continuity] book {book_id}: reviewing pages {grp[0]}-{grp[-1]}")
-        rv = review_window(book_id, grp, prior)
-        if store:
-            rv["review_id"] = db.review_add(book_id, grp[0], grp[-1], rv)
-        out.append(rv)
-        for e in rv["new_entities"]:
-            if not any(x["id"] == e["id"] for x in prior["new_entities"]):
-                prior["new_entities"].append(e)
-        for v in rv["new_variants"]:
-            if not any(x["entity_id"] == v["entity_id"] and x["id"] == v["id"]
-                       for x in prior["new_variants"]):
-                prior["new_variants"].append(v)
-        log(f"[continuity]   {len(rv['continuity_issues'])} issues, "
+    lock = threading.Lock()
+    stop = threading.Event()
+    what = "plan" if plan_only else "continuity"
+
+    def one(grp):
+        if stop.is_set():
+            return None
+        with lock:
+            snap = {"new_entities": list(prior["new_entities"]),
+                    "new_variants": list(prior["new_variants"])}
+        log(f"[{what}] book {book_id}: reviewing pages {grp[0]}-{grp[-1]}")
+        rv = review_window(book_id, grp, snap, plan_only=plan_only)
+        with lock:
+            _absorb(prior, rv)
+            if store:
+                rv["review_id"] = db.review_add(book_id, grp[0], grp[-1], rv)
+        log(f"[{what}]   pages {grp[0]}-{grp[-1]}: {len(rv['continuity_issues'])} issues, "
             f"{sum(1 for e in rv['page_edits'] if e['action'] != 'keep')} page edits, "
             f"+{len(rv['new_entities'])} entities, +{len(rv['new_variants'])} variants")
         if on_window is not None and on_window(rv) is False:
-            log("[continuity] stopped early by the caller")
-            break
+            log(f"[{what}] stopped early by the caller")
+            stop.set()
+        return rv
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        out = [rv for rv in ex.map(one, groups) if rv is not None]
     return out
+
+
+_DEDUP_SCHEMA = {"type": "object", "properties": {
+    "groups": {"type": "array", "items": {"type": "object", "properties": {
+        "keep": {"type": "string"}, "drop": {"type": "array", "items": {"type": "string"}},
+        "why": {"type": "string"}}, "required": ["keep", "drop"]}}}, "required": ["groups"]}
+
+
+def dedup_proposals(book_id: int, reviews: list[dict], log=print) -> dict:
+    """Reconcile proposals made by windows that ran side by side (or by separate
+    runs over the same book): one cheap text pass names which proposed entities /
+    variants are the same thing as each other or as an existing registry entry, and
+    the reviews are rewritten in place -- losers dropped, their pages folded into the
+    winner, casts retargeted. Returns {loser_key: winner_key}. Keys are "entity_id"
+    for entities and "entity_id/variant_id" for variants. Never raises: on any
+    failure the reviews are left as they are."""
+    ents: dict = {}
+    vars_: dict = {}
+    for rv in reviews:
+        for e in rv.get("new_entities", []):
+            ents.setdefault(e["id"], e)
+        for v in rv.get("new_variants", []):
+            vars_.setdefault(f"{v['entity_id']}/{v['id']}", v)
+    if len(ents) + len(vars_) < 2:
+        return {}
+    registry = db.get_registry(book_id) or {}
+    existing = [f"- {e['id']} ({e.get('type', 'character')}): {e.get('name', '')}"
+                + (" -- variants: " + ", ".join(v.get("id", "") for v in e.get("variants", []))
+                   if e.get("variants") else "")
+                for e in registry.get("entities", [])]
+    proposed = [f"- ENTITY {k} ({e.get('type')}): {e.get('name')} -- {_snip(e.get('appearance', ''), 160)}"
+                for k, e in ents.items()]
+    proposed += [f"- VARIANT {k}: {v.get('label')} -- {_snip(v.get('delta') or v.get('appearance', ''), 160)}"
+                 for k, v in vars_.items()]
+    prompt = (
+        "A continuity review of a children's picture book ran in parallel windows, and each "
+        "window could propose NEW registry entities (settings, props, characters) and NEW "
+        "variants (looks) of existing characters. Some proposals may describe the SAME thing "
+        "under different ids, or something the registry ALREADY has. Group the duplicates.\n\n"
+        "Rules: a group's \"keep\" is the id to keep -- an EXISTING registry id if the proposal "
+        "duplicates one (for a variant, an existing variant written as entity_id/variant_id), "
+        "else the best-named proposal; \"drop\" lists the proposal keys that mean the same thing. "
+        "Two variants are the same only if they are variants of the SAME entity describing the "
+        "same look; two settings are the same only if they are the same place (a shop and the "
+        "street outside it are different). When in doubt, do NOT merge. Return an empty groups "
+        "list if nothing is duplicated.\n\n"
+        "EXISTING REGISTRY:\n" + "\n".join(existing) + "\n\nPROPOSALS (key = id, or "
+        "entity_id/variant_id for a variant):\n" + "\n".join(proposed)
+        + '\n\nReturn JSON only: {"groups": [{"keep": "<key>", "drop": ["<key>", ...], "why": "<short>"}]}')
+    try:
+        with costs.run_as(f"book:{book_id}"):
+            out = gem.text_json(prompt, schema=_DEDUP_SCHEMA, model=REVIEW_MODEL)
+    except Exception as ex:  # noqa: BLE001 -- dedup is a nicety; never sink the review
+        log(f"[continuity] proposal dedup failed ({str(ex)[:120]}); keeping all proposals")
+        return {}
+    mapping: dict = {}
+    for g in out.get("groups", []) or []:
+        keep = (g.get("keep") or "").strip()
+        for d in g.get("drop", []) or []:
+            d = (d or "").strip()
+            if d and keep and d != keep and (d in ents or d in vars_):
+                mapping[d] = keep
+    if mapping:
+        _apply_dedup(reviews, mapping)
+        log("[continuity] merged duplicate proposals: "
+            + ", ".join(f"{a} -> {b}" for a, b in mapping.items()))
+    return mapping
+
+
+def _apply_dedup(reviews: list[dict], mapping: dict):
+    """Rewrite reviews in place per {loser: winner}: drop losing proposals (folding
+    their pages into a winning proposal when that winner is itself one of the
+    proposals) and retarget every cast entry that pointed at a loser."""
+    def _split(key):
+        return key.split("/", 1) if "/" in key else (key, None)
+
+    # winners' page unions
+    win_pages: dict = {}
+    for rv in reviews:
+        for e in rv.get("new_entities", []):
+            if e["id"] in mapping:
+                win_pages.setdefault(mapping[e["id"]], set()).update(e.get("pages", []))
+        for v in rv.get("new_variants", []):
+            k = f"{v['entity_id']}/{v['id']}"
+            if k in mapping:
+                win_pages.setdefault(mapping[k], set()).update(v.get("pages", []))
+    for rv in reviews:
+        rv["new_entities"] = [e for e in rv.get("new_entities", []) if e["id"] not in mapping]
+        rv["new_variants"] = [v for v in rv.get("new_variants", [])
+                              if f"{v['entity_id']}/{v['id']}" not in mapping]
+        for e in rv["new_entities"]:
+            if e["id"] in win_pages:
+                e["pages"] = sorted(set(e.get("pages", [])) | win_pages[e["id"]])
+        for v in rv["new_variants"]:
+            k = f"{v['entity_id']}/{v['id']}"
+            if k in win_pages:
+                v["pages"] = sorted(set(v.get("pages", [])) | win_pages[k])
+        for pe in rv.get("page_edits", []):
+            for c in pe.get("cast", []) or []:
+                eid, vid = c.get("entity_id"), c.get("variant_id") or "default"
+                if f"{eid}/{vid}" in mapping:            # variant -> variant (maybe other entity)
+                    weid, wvid = _split(mapping[f"{eid}/{vid}"])
+                    c["entity_id"], c["variant_id"] = weid, (wvid or "default")
+                elif eid in mapping:                      # entity -> entity
+                    weid, wvid = _split(mapping[eid])
+                    c["entity_id"] = weid
+                    if wvid:
+                        c["variant_id"] = wvid
+    # a cast may now list the same entity twice: keep the first
+    for rv in reviews:
+        for pe in rv.get("page_edits", []):
+            seen, cast = set(), []
+            for c in pe.get("cast", []) or []:
+                if c.get("entity_id") in seen:
+                    continue
+                seen.add(c.get("entity_id"))
+                cast.append(c)
+            if pe.get("cast"):
+                pe["cast"] = cast
 
 
 def merge_reviews(reviews: list[dict]) -> dict:
@@ -749,6 +983,39 @@ def bake_redraws(book_id: int, redraws: list, log=print) -> int:
     return n
 
 
+def run_pass(book_id: int, start: int, end: int, *, plan_only: bool = False,
+             serious_only: bool = True, max_rate: float | None = None, window: int = WINDOW,
+             workers: int = REVIEW_WORKERS, store: bool = True, log=print) -> dict:
+    """One complete review pass over pages start..end: review the windows (in
+    parallel), reconcile duplicate proposals, write every plan correction, and
+    return the redraw plan WITHOUT drawing anything -- the caller decides how to
+    spend (batch bake, interactive, or not at all). Result:
+        {"reviews", "applied", "redraws", "reviewed", "rate", "stopped"}
+    `stopped` is True when max_rate is set and the redraws would exceed that share of
+    the reviewed pages: the plan fixes are still written, the redraws are withheld
+    (listed in "redraws" for the record) -- the "more than X% of the book would be
+    redrawn, rethink" guard. A plan-only pass never redraws."""
+    reviews = review_range(book_id, start, end, window=window, store=store, log=log,
+                           plan_only=plan_only, workers=workers)
+    dedup_proposals(book_id, reviews, log=log)
+    merged = merge_reviews(reviews)
+    rep = apply_review(book_id, merged, log=log, serious_only=serious_only)
+    for rv in reviews:
+        if rv.get("review_id"):
+            db.review_mark_applied(book_id, rv["review_id"], rep)
+    reviewed = len(merged["pages"])
+    redraws = [] if plan_only else rep["redraws"]
+    rate = len(redraws) / reviewed if reviewed else 0.0
+    stopped = bool(max_rate is not None and redraws and rate > max_rate)
+    log(f"[{'plan' if plan_only else 'continuity'}] pass over {reviewed} page(s): "
+        f"+{len(rep['entities_added'])} entities, +{len(rep['variants_added'])} variants, "
+        f"{len(rep['pages_updated'])} pages' plans corrected"
+        + ("" if plan_only else f", {len(redraws)} redraw(s) = {rate:.0%}"
+           + (f" -- EXCEEDS {max_rate:.0%}, redraws withheld" if stopped else "")))
+    return {"reviews": reviews, "applied": rep, "redraws": redraws, "reviewed": reviewed,
+            "rate": rate, "stopped": stopped}
+
+
 # ---------------- CLI ----------------
 
 def format_review(rv: dict) -> str:
@@ -785,26 +1052,23 @@ def main(argv=None):
     ap.add_argument("book_id", type=int)
     ap.add_argument("--pages", help="inclusive page range, e.g. 382-391 (default: whole book)")
     ap.add_argument("--window", type=int, default=WINDOW)
+    ap.add_argument("--workers", type=int, default=REVIEW_WORKERS, help="windows reviewed at once")
+    ap.add_argument("--plan-only", action="store_true",
+                    help="the pre-draw pass: text and plan only, no pictures; fixes casts/variants/"
+                         "briefs and proposes registry additions, never redraws")
     ap.add_argument("--apply", action="store_true",
-                    help="write each window's recommendations into the registry/pages and "
-                         "redraw, as soon as that window is reviewed")
+                    help="write the recommendations into the registry/pages (and redraw unless "
+                         "--no-draw); without it the verdicts are only stored and printed")
     ap.add_argument("--no-draw", action="store_true", help="with --apply: skip the redraws")
     ap.add_argument("--batch", action="store_true",
-                    help="with --apply: collect every window's redraws and run them as ONE "
-                         "batch bake at the end (half the image price) instead of drawing "
-                         "each window's pages interactively as it is reviewed")
-    ap.add_argument("--serious-only", action="store_true",
-                    help="with --apply: redraw only pages with a severity-3 issue or a plan-level "
-                         "root cause (brief/cast/variant); still write every plan correction")
+                    help="with --apply: run the redraws as ONE batch bake (half the image price) "
+                         "instead of interactively")
+    ap.add_argument("--all-pages", action="store_true",
+                    help="with --apply: redraw every page the critic flagged, not only the serious "
+                         "ones (severity 3 or a plan-level root cause)")
     ap.add_argument("--max-redraw-rate", type=float, default=None,
-                    help="with --apply: stop (before applying more) once redraws / pages reviewed "
-                         "exceeds this fraction, e.g. 0.25 -- the 'more than a quarter of the "
-                         "book would be redrawn, rethink' guard")
-    ap.add_argument("--prior", default="0/0", metavar="REDRAWN/REVIEWED",
-                    help="with --max-redraw-rate: counts from earlier runs over this book, so a "
-                         "relaunch judges the BOOK-wide rate rather than the chapter it resumes "
-                         "in (a 15-page chapter tripped a 40%% guard at 60%% while the book stood "
-                         "at 38%%)")
+                    help="with --apply: withhold the redraws if more than this fraction of the "
+                         "reviewed pages would be redrawn, e.g. 0.5")
     ap.add_argument("--no-store", action="store_true", help="don't save the review rows")
     ap.add_argument("--json", action="store_true", help="print the raw JSON verdicts")
     a = ap.parse_args(argv)
@@ -820,54 +1084,32 @@ def main(argv=None):
     else:
         start, end = pages[0]["idx"], pages[-1]["idx"]
 
-    m = re.fullmatch(r"(\d+)/(\d+)", a.prior.strip())
-    if not m:
-        sys.exit("--prior must look like 23/60 (redrawn/reviewed)")
-    redrawn, reviewed = int(m.group(1)), int(m.group(2))
-    deferred: list = []      # --batch: redraw plans collected for one bake at the end
-    stopped = False
-
-    def on_window(rv):
-        """Applied per window (not once at the end) so a long run streams its fixes and
-        the redraw-rate guard can stop it early instead of after the whole book."""
-        nonlocal reviewed, redrawn
+    def show(rv):
         print(json.dumps(rv, indent=1, ensure_ascii=False) if a.json else format_review(rv))
         print(flush=True)
-        if not a.apply:
-            return True
-        rep = apply_review(a.book_id, rv, serious_only=a.serious_only)
-        for n in rep["notes"]:
-            print("  note:", n)
-        if rv.get("review_id"):
-            db.review_mark_applied(a.book_id, rv["review_id"], rep)
-        reviewed += len(rv["pages"])
-        redrawn += len(rep["redraws"])
-        if not a.no_draw and rep["redraws"]:
-            if a.batch:
-                deferred.extend(rep["redraws"])
-            else:
-                with costs.run_as(f"book:{a.book_id}"):
-                    execute_redraws(a.book_id, rep["redraws"])
-        rate = redrawn / reviewed if reviewed else 0
-        print(f"[continuity] running redraw rate: {redrawn}/{reviewed} = {rate:.0%}", flush=True)
-        if a.max_redraw_rate is not None and reviewed >= 2 * a.window and rate > a.max_redraw_rate:
-            nonlocal stopped
-            stopped = True
-            print(f"[continuity] STOP: redraw rate {rate:.0%} exceeds {a.max_redraw_rate:.0%} "
-                  "-- rethink before continuing", flush=True)
-            return False
-        return True
 
-    review_range(a.book_id, start, end, window=a.window, store=not a.no_store,
-                 on_window=on_window)
-    if deferred and stopped:
-        # the guard fired: the plan corrections are written, but spend nothing on images
-        # until someone has looked at why the rate is high
-        print(f"[continuity] {len(deferred)} deferred redraw(s) NOT drawn (stopped by the "
-              "redraw-rate guard): " + ", ".join(str(r["idx"]) for r in deferred), flush=True)
-    elif deferred:
+    if not a.apply:
+        for rv in review_range(a.book_id, start, end, window=a.window, store=not a.no_store,
+                               plan_only=a.plan_only, workers=a.workers):
+            show(rv)
+        return
+    res = run_pass(a.book_id, start, end, plan_only=a.plan_only, serious_only=not a.all_pages,
+                   max_rate=a.max_redraw_rate, window=a.window, workers=a.workers,
+                   store=not a.no_store)
+    for rv in res["reviews"]:
+        show(rv)
+    for n in res["applied"]["notes"]:
+        print("  note:", n)
+    if res["stopped"]:
+        print(f"[continuity] {len(res['redraws'])} redraw(s) NOT drawn (redraw rate "
+              f"{res['rate']:.0%} exceeds {a.max_redraw_rate:.0%}): "
+              + ", ".join(str(r["idx"]) for r in res["redraws"]), flush=True)
+    elif res["redraws"] and not a.no_draw:
         with costs.run_as(f"book:{a.book_id}"):
-            bake_redraws(a.book_id, deferred)
+            if a.batch:
+                bake_redraws(a.book_id, res["redraws"])
+            else:
+                execute_redraws(a.book_id, res["redraws"])
 
 
 if __name__ == "__main__":

@@ -214,7 +214,7 @@ async function loadReviews(){
     <button class="rbtn" id="rvRun" ${r.running?"disabled":""}>${r.running?"Reviewing…":"Run"}</button>
     <span style="color:var(--muted)">${r.running?"a review is running; windows appear as they finish":"5 pages per window; text-model only (cheap)"}</span></div>`;
   const rows = r.reviews.map(v => `<div class="pg" data-id="${v.id}">
-    <div>p${v.start_idx}–${v.end_idx} ${v.applied_at?'<span class="badge kept">applied</span>':""}</div>
+    <div>p${v.start_idx}–${v.end_idx} ${v.kind==="plan"?'<span class="badge">plan</span>':""} ${v.applied_at?'<span class="badge kept">applied</span>':""}</div>
     <div class="meta">${v.n_issues} issues · ${v.n_edits} edits · +${v.n_new_entities} entities · +${v.n_new_variants} variants · ${when(v.created_at)}</div></div>`).join("");
   L.innerHTML = form + (rows || `<div class="empty">No reviews yet. Pick a page range and Run.</div>`);
   L.querySelectorAll(".pg").forEach(el => { el.onclick = () => loadReview(+el.dataset.id);
@@ -266,11 +266,11 @@ ${esc(e.sheet_prompt||"")}</pre></details></div>`).join("");
     <div class="gen"><h3>Per-page recommendations</h3>${edits}</div>
     ${r.applied?`<div class="gen"><h3>Applied</h3><pre>${esc(JSON.stringify(r.applied, null, 1))}</pre></div>`:""}`;
   const apply = async (draw) => {
-    const what = draw ? `Apply this review and redraw ${nRedraw} page(s) in the background (costs image generations)?`
+    const what = draw ? `Apply this review and redraw its serious pages (severity 3 or a plan-level cause; up to ${nRedraw}) through the batch bake?`
                       : "Write the registry/page changes only? Affected pages keep their current pictures until redrawn.";
     if (!confirm(what)) return;
     $("#rvApply").disabled = $("#rvApplyPlan").disabled = true;
-    const res = await (await fetch(`${API()}/continuity/${id}/apply`, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({draw})})).json();
+    const res = await (await fetch(`${API()}/continuity/${id}/apply`, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({draw, serious_only:true, batch:true})})).json();
     if (!res.ok) alert(res.error || "apply failed");
     await loadReviews(); await loadReview(id);
   };

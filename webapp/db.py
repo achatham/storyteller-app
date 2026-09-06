@@ -1466,7 +1466,7 @@ def reviews_for_book(book_id) -> list[dict]:
         rv = json.loads(r["json"] or "{}")
         out.append({"id": r["id"], "start_idx": r["start_idx"], "end_idx": r["end_idx"],
                     "created_at": r["created_at"], "applied_at": r["applied_at"],
-                    "summary": rv.get("summary", ""),
+                    "kind": rv.get("kind", "picture"), "summary": rv.get("summary", ""),
                     "n_issues": len(rv.get("continuity_issues", [])),
                     "n_edits": sum(1 for e in rv.get("page_edits", [])
                                    if e.get("action") in ("revise", "regenerate")),

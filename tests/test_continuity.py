@@ -267,3 +267,46 @@ def test_proposals_retag_the_pages_they_name(env):
     assert json.loads(db.get_page(bid, 2)["cast_json"])[-1] == {
         "entity_id": "kings_cross", "variant_id": "default", "view": ""}
     assert {p["idx"] for p in rep["pages_updated"]} == {0, 1, 2}
+
+
+def test_apply_dedup_folds_losers_into_winners_and_retargets_casts():
+    import webapp.continuity as cont
+    reviews = [
+        {"new_entities": [{"id": "quidditch_pitch", "type": "setting", "pages": [1, 2]}],
+         "new_variants": [{"entity_id": "harry", "id": "quidditch_robes", "pages": [1]}],
+         "page_edits": [{"idx": 1, "cast": [{"entity_id": "harry", "variant_id": "quidditch_robes"},
+                                            {"entity_id": "quidditch_pitch", "variant_id": "default"}]}]},
+        {"new_entities": [{"id": "hogwarts_quidditch_pitch", "type": "setting", "pages": [6]}],
+         "new_variants": [{"entity_id": "harry", "id": "scarlet_quidditch_kit", "pages": [6, 7]}],
+         "page_edits": [{"idx": 6, "cast": [{"entity_id": "harry", "variant_id": "scarlet_quidditch_kit"},
+                                            {"entity_id": "hogwarts_quidditch_pitch", "variant_id": "default"}]}]},
+    ]
+    cont._apply_dedup(reviews, {"hogwarts_quidditch_pitch": "quidditch_pitch",
+                                "harry/scarlet_quidditch_kit": "harry/quidditch_robes"})
+    # losers gone, their pages folded into the winners
+    assert [e["id"] for e in reviews[1]["new_entities"]] == []
+    assert reviews[0]["new_entities"][0]["pages"] == [1, 2, 6]
+    assert reviews[0]["new_variants"][0]["pages"] == [1, 6, 7]
+    # the second window's cast now points at the winners
+    assert reviews[1]["page_edits"][0]["cast"] == [
+        {"entity_id": "harry", "variant_id": "quidditch_robes"},
+        {"entity_id": "quidditch_pitch", "variant_id": "default"}]
+
+
+def test_apply_dedup_can_point_a_proposal_at_an_existing_registry_variant():
+    import webapp.continuity as cont
+    reviews = [{"new_entities": [], "new_variants": [{"entity_id": "kid", "id": "night_clothes", "pages": [3]}],
+                "page_edits": [{"idx": 3, "cast": [{"entity_id": "kid", "variant_id": "night_clothes"}]}]}]
+    cont._apply_dedup(reviews, {"kid/night_clothes": "kid/pyjamas"})
+    assert reviews[0]["new_variants"] == []
+    assert reviews[0]["page_edits"][0]["cast"] == [{"entity_id": "kid", "variant_id": "pyjamas"}]
+
+
+def test_plan_only_contents_have_no_images(env):
+    db, cont, bid = env
+    win = cont.build_window(bid, [0, 1, 2])
+    parts = cont.review_contents(win, None, plan_only=True)
+    assert len(parts) == 1 and isinstance(parts[0], str)
+    assert "NOTHING HAS BEEN DRAWN YET" in parts[0] and "PAGE 0" in parts[0]
+    full = cont.review_contents(win, None)
+    assert any(isinstance(c, (bytes, bytearray)) for c in full)
