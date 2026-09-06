@@ -98,12 +98,6 @@
   <div id="mode-tweak">
     <div class="flabel">What should change?</div>
     <textarea id="ovtext" placeholder="e.g. make her hair red, not blonde; remove the second sword; give him a green cloak"></textarea>
-    <div class="flabel">Model</div>
-    <div class="models">
-      <label><input type="radio" name="ovmodel" value="pro" checked> Pro <small>Nano Banana Pro · best</small></label>
-      <label><input type="radio" name="ovmodel" value="flash"> Flash <small>faster</small></label>
-      <label><input type="radio" name="ovmodel" value="lite"> Lite <small>Nano Banana Lite · fastest</small></label>
-    </div>
   </div>
 
   <div id="mode-scratch" hidden>
@@ -111,7 +105,7 @@
     <textarea id="ovapp" placeholder="Describe exactly what it looks like…"></textarea>
     <div class="flabel">Sheet prompt — reference framing</div>
     <textarea id="ovsheet" placeholder="How the reference sheet is composed…"></textarea>
-    <div class="scratch-note">Redraws from scratch with the Pro sheet model (single-subject critic + retry) and saves this prompt back to the roster. Iterate until it looks right.</div>
+    <div class="scratch-note">Redraws from scratch (single-subject critic + retry) and saves this prompt back to the roster. Iterate until it looks right.</div>
   </div>
 
   <div class="status" id="ovstatus"></div>
@@ -268,13 +262,12 @@ async function submitEdit(){
   if (mode === "scratch") return submitScratch();
   const instruction = $("#ovtext").value.trim();
   if (!instruction){ setStatus("Describe what to change first.", true); return; }
-  const model = document.querySelector('input[name="ovmodel"]:checked').value;
   $("#ovgo").disabled = true;
-  setStatus("Rendering… this can take up to a minute.");
+  setStatus("Rendering… this usually takes well under a minute.");
   try {
     const r = await fetch(sheetUrl(cur.eid, cur.vid) + "/edit", {
       method:"POST", headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({ instruction, model }) });
+      body:JSON.stringify({ instruction }) });
     if (!r.ok){ const e = await r.json().catch(()=>({})); throw new Error(e.detail || ("HTTP "+r.status)); }
     refreshSheet();
     setStatus("Done — updated. Edit again or close.");

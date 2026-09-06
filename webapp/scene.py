@@ -17,18 +17,9 @@ from pathlib import Path
 from PIL import Image
 
 from pipeline import gem, costs, analyze, markup
-from pipeline.config import (STYLES, STYLE_ANATOMY, STYLE_ANATOMY_DEFAULT, SHEET_IMAGE_MODEL, PAGE_IMAGE_MODEL, ROSTER_IMAGE_MODEL,
+from pipeline.config import (STYLES, STYLE_ANATOMY, STYLE_ANATOMY_DEFAULT, PAGE_IMAGE_MODEL, ROSTER_IMAGE_MODEL,
                              LITE_IMAGE_MODEL, MAX_REFS,
                              ANALYZE_MODEL, WEBP_QUALITY, SCENE_MAXW)
-
-# The image models offered for a manual roster-sheet correction, keyed by the short
-# name the roster UI sends. "pro" is the high-fidelity sheet model; "lite" is the new
-# cheap/fast "nano banana lite". Order here is the order the radio buttons render in.
-EDIT_MODELS = {
-    "pro": SHEET_IMAGE_MODEL,     # gemini-3-pro-image-preview  (Nano Banana Pro)
-    "flash": PAGE_IMAGE_MODEL,    # gemini-3.1-flash-image
-    "lite": LITE_IMAGE_MODEL,     # gemini-3.1-flash-lite-image (Nano Banana Lite)
-}
 
 # Debug-history candidates are review-only -> compress them harder than display art.
 DEBUG_MAXW = int(os.environ.get("STORY_DEBUG_MAXW", "960"))
@@ -661,16 +652,15 @@ def redraw_sheet_from_prompt(book_id, entity_id, variant_id, sheet_prompt,
     return {"ok": True}
 
 
-def edit_sheet(book_id, entity_id, variant_id, instruction, model_key="pro") -> dict:
+def edit_sheet(book_id, entity_id, variant_id, instruction) -> dict:
     """Apply a user's written correction to one roster sheet as an img2img edit:
     keep the same subject/identity/style, change ONLY what the instruction asks, then
-    replace the cached sheet. `model_key` picks the image model (see EDIT_MODELS)."""
+    replace the cached sheet. Always the lite model: the current sheet is attached as
+    the reference, so this is the easiest kind of edit and the cheapest model does it."""
     instruction = (instruction or "").strip()
     if not instruction:
         return {"ok": False, "error": "empty instruction"}
-    model = EDIT_MODELS.get(model_key)
-    if not model:
-        return {"ok": False, "error": f"unknown model '{model_key}'"}
+    model = LITE_IMAGE_MODEL
     book = db.get_book(book_id)
     if not book:
         return {"ok": False, "error": "no such book"}
@@ -1177,8 +1167,9 @@ def build_round_request(ctx: dict, state: dict, name_cache: dict) -> dict:
                   + esc_note
                   + f"\n\nThe people must still match:\n{char_desc}{place_note}")
         ref_bytes = [state["draft"]] + [b for _, b in sheet_refs]
-        model = SHEET_IMAGE_MODEL if state.get("escalate") else PAGE_IMAGE_MODEL
-        return {"prompt": prompt, "ref_bytes": ref_bytes, "model": model, "mode": "revise"}
+        # an escalated revise used to switch to the pro model; it now relies on the
+        # stronger instruction alone (esc_note) -- no pro for anything.
+        return {"prompt": prompt, "ref_bytes": ref_bytes, "model": PAGE_IMAGE_MODEL, "mode": "revise"}
     # A prior attempt's prompt was refused for content policy -> use the rewritten,
     # policy-safe prompt verbatim (it already folds in style + place). Shared by both
     # paths: interactive sets it inline, the batch bake carries it in carry_json.

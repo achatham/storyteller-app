@@ -3,10 +3,9 @@ downloadable EPUB lead with.
 
 Two things make a cover different from a page scene, and both are deliberate:
 
-* It is drawn with the PRO image model (`config.COVER_IMAGE_MODEL`). Every
-  interior page uses flash because there are hundreds of them; there is exactly
-  one cover per book and it is the most-looked-at image in the app, so ~$0.15 of
-  pro is worth it here where it is not worth it per page.
+* It is drawn with `config.COVER_IMAGE_MODEL` -- the same flash model as every
+  interior page since the pro model was retired (2026-09-05); the cover gets its
+  quality from a larger render size (COVER_SIZE) and the critic/retry loop instead.
 
 * It REQUIRES the roster first. A cover whose hero doesn't look like the hero on
   page 7 is worse than no cover, so `ensure_cover` resolves the cover's cast to

@@ -231,22 +231,19 @@ if STYLE not in STYLES:
 ART_STYLE = STYLES[STYLE]
 
 # ---- image models + output resolution ----
-# Image models by role. SHEET_IMAGE_MODEL is the higher-fidelity "pro" model,
-# now reserved for the high-stakes cases: a manual roster-sheet edit, the revise
-# ESCALATION (when a flash img2img fix fails to land), and the one-per-book cover
-# (see COVER_IMAGE_MODEL below). ROSTER_IMAGE_MODEL
-# is what the automatic roster reference-sheet draws use; it defaults to the same
-# cheap "flash" model as the per-page SCENE illustrations, since the batch roster
-# draw + single-subject critic/reroll keeps sheet consistency good enough without
-# paying pro prices on every sheet. Override any of them via env.
-SHEET_IMAGE_MODEL = os.environ.get("STORY_SHEET_IMAGE_MODEL", "gemini-3-pro-image")
+# Image models by role. Everything automatic draws with the cheap "flash" model: page
+# scenes, roster reference sheets, the revise escalation and the cover. The "pro"
+# model is retired (2026-09-05): at 2x the price it was only ever used for the
+# escalation and the cover, and the batch roster + critic/reroll keeps sheet quality
+# good enough without it. SHEET_IMAGE_MODEL is kept as a role name (escalation, cover,
+# the legacy pipeline/sheets.py) so it can still be pointed elsewhere via env.
 PAGE_IMAGE_MODEL = os.environ.get("STORY_PAGE_IMAGE_MODEL", "gemini-3.1-flash-image")
+SHEET_IMAGE_MODEL = os.environ.get("STORY_SHEET_IMAGE_MODEL", PAGE_IMAGE_MODEL)
 ROSTER_IMAGE_MODEL = os.environ.get("STORY_ROSTER_IMAGE_MODEL", PAGE_IMAGE_MODEL)
-# The book's one cover illustration: a single high-visibility image per book, so it
-# is worth the pro model even though every interior page uses flash.
 COVER_IMAGE_MODEL = os.environ.get("STORY_COVER_IMAGE_MODEL", SHEET_IMAGE_MODEL)
-# "Nano Banana Lite": the cheapest/fastest image model, offered as a manual
-# choice for roster-sheet correction edits (not used in the automatic pipeline).
+# "Nano Banana Lite": the cheapest/fastest image model. A manual roster-sheet TWEAK
+# (img2img correction in the roster editor) always uses it -- the current sheet is
+# the reference, so the edit is easy and the price should match.
 LITE_IMAGE_MODEL = os.environ.get("STORY_LITE_IMAGE_MODEL", "gemini-3.1-flash-lite-image")
 # general default (used when a caller doesn't specify) = the page model
 IMAGE_MODEL = os.environ.get("STORY_IMAGE_MODEL", PAGE_IMAGE_MODEL)
