@@ -8,7 +8,7 @@ def setup(monkeypatch, tmp_path):
     db.init()
     import webapp.bake_progress as bp
     importlib.reload(bp)
-    bid = db.create_book("Title", "Author", "book.pdf", "watercolor", 200, "5",
+    bid = db.create_book("Title", "Author", "book.pdf", "watercolor", 200,
                          "application/pdf", b"%PDF-test")
     return db, bp, bid
 
@@ -112,7 +112,7 @@ def test_pass_rate_learned_from_this_bake(monkeypatch, tmp_path):
 
 def test_job_durations_prefer_this_bake(monkeypatch, tmp_path):
     db, bp, bid = setup(monkeypatch, tmp_path)
-    other = db.create_book("Other", "", "b.pdf", "watercolor", 200, "5",
+    other = db.create_book("Other", "", "b.pdf", "watercolor", 200,
                            "application/pdf", b"%PDF-test")
     _seed_jobs(db, other, [100, 200, 300])
     med, p90, basis = bp.job_stats(bid)

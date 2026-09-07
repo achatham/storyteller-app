@@ -18,7 +18,7 @@ def test_delete_book_removes_generated_epub(tmp_path, monkeypatch):
     import webapp.db as db
     importlib.reload(db)
     db.init()
-    bid = db.create_book("Title", "Author", "book.pdf", "watercolor", 200, "5",
+    bid = db.create_book("Title", "Author", "book.pdf", "watercolor", 200,
                          "application/pdf", b"%PDF-test")
     path = db.epub_path(bid)
     path.parent.mkdir(parents=True)
@@ -34,7 +34,7 @@ def test_jobs_are_marked_interrupted_on_restart(tmp_path, monkeypatch):
     import webapp.db as db
     importlib.reload(db)
     db.init()
-    bid = db.create_book("Title", "", "book.pdf", "watercolor", 200, "5",
+    bid = db.create_book("Title", "", "book.pdf", "watercolor", 200,
                          "application/pdf", b"%PDF-test")
     db.job_start(bid, "process", 123)
     assert db.interrupt_running_jobs() == 1
@@ -53,7 +53,7 @@ def test_library_orders_by_last_read_then_upload(tmp_path, monkeypatch):
     importlib.reload(db)
     db.init()
     def mk(title):
-        return db.create_book(title, "", "b.pdf", "watercolor", 200, "5",
+        return db.create_book(title, "", "b.pdf", "watercolor", 200,
                               "application/pdf", b"%PDF-test")
     older, newer, unread = mk("older"), mk("newer"), mk("unread")
     with db.conn() as c:                    # deterministic upload times
@@ -76,7 +76,7 @@ def test_bake_reopen_pages_redraws_only_those_pages(tmp_path, monkeypatch):
     import webapp.db as db
     importlib.reload(db)
     db.init()
-    bid = db.create_book("Title", "", "book.epub", "watercolor", 200, "5",
+    bid = db.create_book("Title", "", "book.epub", "watercolor", 200,
                          "application/epub+zip", b"epub")
     for idx in range(4):
         db.add_page(bid, idx, 0, f"p{idx}", "text", "room", "brief", [])

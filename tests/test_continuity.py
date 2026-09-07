@@ -16,7 +16,7 @@ def env(tmp_path, monkeypatch):
     db.init()
     import webapp.continuity as cont
     importlib.reload(cont)
-    bid = db.create_book("T", "A", "book.pdf", "watercolor", 200, "5",
+    bid = db.create_book("T", "A", "book.pdf", "watercolor", 200,
                          "application/pdf", b"%PDF-test")
     db.save_registry(bid, {"entities": [
         {"id": "kid", "type": "character", "name": "Kid", "importance": 5,

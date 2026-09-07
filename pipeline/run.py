@@ -37,7 +37,7 @@ SRC_CHARS = 4000
 CRIT_SRC_CHARS = 4000
 
 SCENE_CRITIQUE = """You are a strict art director reviewing one illustration for a children's \
-read-aloud picture book (audience: 5 years old).
+read-aloud picture book for young children.
 
 WHAT IS GROUND TRUTH: the SOURCE TEXT below is the book, and it is the only authority. The brief and \
 the character descriptions were generated FROM it by an earlier automated step and can be wrong. Where \
@@ -332,8 +332,8 @@ def build_scene_prompt(spread: dict, members: list[dict], ref_members: list[dict
         labels = ", ".join(f"image {i+1} = {m['name']}" for i, m in enumerate(ref_members))
         prompt += (f"Reference images are attached ({labels}). Keep each one's face, hair, "
                    "and clothing CONSISTENT with their reference image. ")
-    prompt += ("Horizontal storybook composition. Keep it warm, gentle, and age-5 "
-               "appropriate: no blood, no graphic violence. Do NOT render any text, words, "
+    prompt += ("Horizontal storybook composition. Keep it warm, gentle, and "
+               "child-appropriate: no blood, no graphic violence. Do NOT render any text, words, "
                "letters, captions or labels in the image unless the scene itself calls for it "
                "(e.g. a sign or book the story describes) -- never put the description into the picture.")
     if fix:

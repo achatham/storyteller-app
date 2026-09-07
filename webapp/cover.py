@@ -69,7 +69,7 @@ COVER_PASS = int(os.environ.get("STORY_COVER_PASS", "4"))
 COVER_OK_STATUS = ("ready", "roster_review")
 
 COVER_BRIEF = """You are art-directing the front cover of an illustrated read-aloud \
-edition of this book, for a child of about {age}.
+edition of this book, for a young child.
 
 BOOK: {title}{by}
 
@@ -123,7 +123,7 @@ COVER_SCHEMA = {
 }
 
 COVER_CRITIQUE = """You are a strict art director reviewing the finished FRONT COVER of \
-an illustrated children's read-aloud edition (audience: about {age}).
+an illustrated children's read-aloud edition.
 
 BOOK: {title}
 
@@ -340,7 +340,7 @@ def _plan(book_id, book, registry, usage) -> dict:
     fails."""
     chars = _characters(registry)
     prompt = COVER_BRIEF.format(
-        age=book.get("age") or "5", title=book.get("title") or "this novel",
+        title=book.get("title") or "this novel",
         by=f"\nAUTHOR: {book['author']}" if book.get("author") else "",
         roster=_variant_menu(registry, usage, book.get("num_pages") or 0),
         briefs=_brief_samples(book_id), n_cast=COVER_CAST)
@@ -538,7 +538,7 @@ def ensure_cover(book_id: int, force: bool = False, log=print) -> bytes | None:
                 " ".join(notes),
             ]))
             crit_brief = COVER_CRITIQUE.format(
-                age=book.get("age") or "5", title=book.get("title") or "this book",
+                title=book.get("title") or "this book",
                 scene=plan["scene"], style=style_text,
                 cast="\n".join(f"- {m['name']}" + (f" -- {m['label']}" if m["label"] else "")
                                for m in cast) or "(none)")

@@ -34,7 +34,7 @@ def book_with_flat_pages(monkeypatch, tmp_path):
     import webapp.reflow
     reflow = importlib.reload(webapp.reflow)
     db.init()
-    bid = db.create_book("The Book", "", "book.epub", "watercolor", 200, "7",
+    bid = db.create_book("The Book", "", "book.epub", "watercolor", 200,
                          "application/epub+zip", epub_bytes())
     db.add_chapter(bid, 0, "One", 0, [])
     db.add_page(bid, 0, 0, "A dragon",

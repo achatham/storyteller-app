@@ -12,7 +12,7 @@ def setup(monkeypatch, tmp_path):
     importlib.reload(bp)
     import webapp.batch_bake as bb
     importlib.reload(bb)
-    bid = db.create_book("Title", "Author", "book.pdf", "watercolor", 200, "5",
+    bid = db.create_book("Title", "Author", "book.pdf", "watercolor", 200,
                          "application/pdf", b"%PDF-test")
     return db, bp, bb, bid
 

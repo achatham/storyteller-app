@@ -5,7 +5,7 @@ long-lived server process.
     python -m webapp.process <book_id>
 
 Env (set by the server before spawning): STORY_PDF (working copy of the upload),
-STORY_BOOK / STORY_AUTHOR / STORY_STYLE / STORY_WORDS_PER_PAGE / STORY_AGE,
+STORY_BOOK / STORY_AUTHOR / STORY_STYLE / STORY_WORDS_PER_PAGE,
 STORY_OUT / STORY_REGISTRY / STORY_ASSETS (per-book scratch dirs), STORY_APP_DB.
 
 Stages, each recorded to the DB so the hub can show live progress:

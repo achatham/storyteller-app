@@ -7,11 +7,11 @@ import re
 
 from . import gem, markup
 from .config import (OUT, LABEL, ART_STYLE, VIOLENCE_POLICY, REGISTRY,
-                     BOOK_REF, TITLE_OUT, AUDIENCE_AGE, WORDS_PER_PAGE,
+                     BOOK_REF, TITLE_OUT, WORDS_PER_PAGE,
                      ANALYZE_MODEL)
 
 ANALYZE_PROMPT = """You are the art director and adapter for an illustrated read-aloud edition of \
-{book_ref} (section: {label}), for a {age}-year-old audience.
+{book_ref} (section: {label}), read aloud to young children.
 
 You are given a passage of the book's raw text. NOTE: it may be missing some spaces \
 (e.g. "hiseyes" = "his eyes"). You do NOT need to fix that: you only mark where each \
@@ -210,7 +210,6 @@ def build_bible(chapter_text: str, registry: dict, model: str = ANALYZE_MODEL) -
     prompt = ANALYZE_PROMPT.format(
         book_ref=BOOK_REF,
         title=TITLE_OUT,
-        age=AUDIENCE_AGE,
         label=LABEL,
         art_style=ART_STYLE,
         violence_policy=VIOLENCE_POLICY,

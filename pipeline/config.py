@@ -18,7 +18,6 @@ pipeline can target any book / page range / output directory / art style.
 
   Look:
     STORY_STYLE    art-style key (see STYLES below), default "watercolor"
-    STORY_AGE      read-aloud audience age, default "5"
 """
 import os
 from pathlib import Path
@@ -285,7 +284,6 @@ SCENE_MAXW = int(os.environ.get("STORY_SCENE_MAXW", "1152"))
 WORDS_PER_PAGE = int(os.environ.get("STORY_WORDS_PER_PAGE", "200"))
 
 # ---- audience / content ----
-AUDIENCE_AGE = os.environ.get("STORY_AGE", "5")
 # How a hurt, unconscious or endangered child is handled everywhere a picture is
 # planned (briefs, per-page states, safety rewrites): imply, don't show. An image model
 # refuses "a limp, lifeless, marble-pale child" outright -- after every retry the page
@@ -302,7 +300,7 @@ IMPLY_HARM_RULE = (
     "'victim': the image generator refuses those words and the page comes out blank."
 )
 VIOLENCE_POLICY = (
-    f"This book is read aloud to a {AUDIENCE_AGE}-year-old. SOFTEN all violence: "
+    "This book is read aloud to a young child. SOFTEN all violence: "
     "depict tension, confrontation, and emotion (a standoff, a brave stance, "
     "worried faces) but NEVER show graphic injury, blood, or a child being "
     "struck. Imply conflict rather than depicting it. " + IMPLY_HARM_RULE

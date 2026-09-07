@@ -38,7 +38,7 @@ def test_valid_upload_requires_matching_signature(monkeypatch, tmp_path):
 def test_cancel_only_selected_local_job(monkeypatch, tmp_path):
     module = server(monkeypatch, tmp_path)
     module.db.init()
-    bid = module.db.create_book("Title", "", "book.pdf", "watercolor", 200, "5",
+    bid = module.db.create_book("Title", "", "book.pdf", "watercolor", 200,
                                 "application/pdf", b"%PDF-test")
 
     class Proc:
@@ -107,7 +107,7 @@ def test_parse_when_accepts_dates_datetimes_and_epochs(monkeypatch, tmp_path):
 def test_history_export_filters_by_date_range(monkeypatch, tmp_path):
     module = server(monkeypatch, tmp_path)
     module.db.init()
-    bid = module.db.create_book("Title", "Author", "book.pdf", "watercolor", 200, "5",
+    bid = module.db.create_book("Title", "Author", "book.pdf", "watercolor", 200,
                                 "application/pdf", b"%PDF-test")
     with module.db.conn() as c:
         c.execute("UPDATE books SET num_pages=100 WHERE id=?", (bid,))
@@ -148,7 +148,7 @@ def test_history_export_covers_sessions_straddling_the_boundary(monkeypatch, tmp
     export of either day still sees it."""
     module = server(monkeypatch, tmp_path)
     module.db.init()
-    bid = module.db.create_book("Title", "Author", "book.pdf", "watercolor", 200, "5",
+    bid = module.db.create_book("Title", "Author", "book.pdf", "watercolor", 200,
                                 "application/pdf", b"%PDF-test")
     import datetime
     start = datetime.datetime(2026, 8, 4, 23, 45).timestamp()
@@ -164,7 +164,7 @@ def test_history_export_covers_sessions_straddling_the_boundary(monkeypatch, tmp
 def test_history_export_flags_truncation(monkeypatch, tmp_path):
     module = server(monkeypatch, tmp_path)
     module.db.init()
-    bid = module.db.create_book("Title", "Author", "book.pdf", "watercolor", 200, "5",
+    bid = module.db.create_book("Title", "Author", "book.pdf", "watercolor", 200,
                                 "application/pdf", b"%PDF-test")
     import datetime
     base = datetime.datetime(2026, 8, 1, 12).timestamp()
@@ -215,7 +215,7 @@ def test_paging_back_does_not_erase_session_progress(monkeypatch, tmp_path):
     report how far it actually got, and count the ground it covered."""
     module = server(monkeypatch, tmp_path)
     module.db.init()
-    bid = module.db.create_book("Title", "Author", "book.pdf", "watercolor", 200, "5",
+    bid = module.db.create_book("Title", "Author", "book.pdf", "watercolor", 200,
                                 "application/pdf", b"%PDF-test")
     with module.db.conn() as c:
         c.execute("UPDATE books SET num_pages=100 WHERE id=?", (bid,))
@@ -237,7 +237,7 @@ def test_history_backfills_max_pos_for_pre_existing_rows(monkeypatch, tmp_path):
     """Rows written before max_pos existed still export sane numbers."""
     module = server(monkeypatch, tmp_path)
     module.db.init()
-    bid = module.db.create_book("Title", "Author", "book.pdf", "watercolor", 200, "5",
+    bid = module.db.create_book("Title", "Author", "book.pdf", "watercolor", 200,
                                 "application/pdf", b"%PDF-test")
     with module.db.conn() as c:
         c.execute("UPDATE books SET num_pages=100 WHERE id=?", (bid,))
@@ -257,7 +257,7 @@ def test_export_flags_position_jumps_without_dropping_them(monkeypatch, tmp_path
     sessions are flagged, not filtered -- whether they count is the caller's call."""
     module = server(monkeypatch, tmp_path)
     module.db.init()
-    bid = module.db.create_book("Title", "Author", "book.pdf", "watercolor", 200, "5",
+    bid = module.db.create_book("Title", "Author", "book.pdf", "watercolor", 200,
                                 "application/pdf", b"%PDF-test")
     with module.db.conn() as c:
         c.execute("UPDATE books SET num_pages=400 WHERE id=?", (bid,))

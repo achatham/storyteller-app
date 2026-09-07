@@ -335,13 +335,15 @@ def init():
 
 # ---------------- books ----------------
 
-def create_book(title, author, filename, style, words_per_page, age,
-                mime, data) -> int:
+def create_book(title, author, filename, style, words_per_page, mime, data) -> int:
+    # books.age is left NULL: the audience age used to be threaded into the prompts
+    # but never mattered to the pictures (and was never kept up to date), so it was
+    # dropped from the upload form; the column stays for old rows.
     with conn() as c:
         cur = c.execute(
-            "INSERT INTO books(title,author,filename,style,words_per_page,age,"
-            "status,detail,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-            (title, author, filename, style, words_per_page, age,
+            "INSERT INTO books(title,author,filename,style,words_per_page,"
+            "status,detail,created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (title, author, filename, style, words_per_page,
              "queued", "queued for processing", time.time()))
         bid = cur.lastrowid
         c.execute("INSERT INTO book_files(book_id,mime,data) VALUES (?,?,?)",

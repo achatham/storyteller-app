@@ -306,7 +306,6 @@ def start_processing(book_id: int):
         "STORY_LABEL": "",   # don't leak the Ender-era default section label
         "STORY_STYLE": book["style"],
         "STORY_WORDS_PER_PAGE": str(book["words_per_page"]),
-        "STORY_AGE": str(book["age"] or "5"),
         "STORY_BODY": "1,0",
         "STORY_OUT": str(workdir),
         "STORY_REGISTRY": str(workdir / "registry.json"),
@@ -454,20 +453,17 @@ def api_books():
 @app.post("/api/books")
 async def api_upload(request: Request, file: UploadFile = File(...), title: str = Form(""),
                      author: str = Form(""), style: str = Form("watercolor"),
-                     words_per_page: int = Form(200), age: str = Form("5"),
-                     illustration_mode: str = Form("lazy")):
+                     words_per_page: int = Form(200), illustration_mode: str = Form("lazy")):
     if style not in STYLES:
         raise HTTPException(400, f"unknown style {style!r}")
     if words_per_page < 50 or words_per_page > 2_000:
         raise HTTPException(400, "words_per_page must be between 50 and 2000")
-    if not age.isdigit() or not 0 <= int(age) <= 120:
-        raise HTTPException(400, "audience age must be a whole number between 0 and 120")
     if illustration_mode not in ("lazy", "batch"):
         raise HTTPException(400, f"unknown illustration_mode {illustration_mode!r}")
     _check_upload_rate(request)
     if not file.filename:
         raise HTTPException(400, "file name is required")
-    if len(title) > 300 or len(author) > 300 or len(age) > 20:
+    if len(title) > 300 or len(author) > 300:
         raise HTTPException(400, "metadata field is too long")
     chunks, total = [], 0
     while chunk := await file.read(1024 * 1024):
@@ -480,7 +476,7 @@ async def api_upload(request: Request, file: UploadFile = File(...), title: str 
         raise HTTPException(400, "empty file")
     mime = _valid_upload(file.filename, data)
     book_id = db.create_book(title.strip(), author.strip(), Path(file.filename).name, style,
-                             words_per_page, age, mime, data)
+                             words_per_page, mime, data)
     if illustration_mode != "lazy":
         db.set_illustration_mode(book_id, illustration_mode)
     await asyncio.to_thread(start_processing, book_id)
@@ -497,7 +493,7 @@ def api_book(book_id: int):
         "author": b["author"], "style": b["style"], "status": b["status"],
         "detail": b["detail"], "num_pages": b["num_pages"],
         "seg_ver": b["seg_ver"] if "seg_ver" in b.keys() else 0,
-        "words_per_page": b["words_per_page"], "age": b["age"],
+        "words_per_page": b["words_per_page"],
         "position": db.get_progress(book_id),
         "position_at": db.get_progress_at(book_id),
         "chapters": db.get_chapters(book_id),

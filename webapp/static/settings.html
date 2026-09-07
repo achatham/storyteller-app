@@ -181,7 +181,6 @@ async function getJSON(url){
   $("#info").innerHTML = [
     ["Art style", (b.style||"").replace(/_/g," ")],
     ["Illustration cadence", "~"+b.words_per_page+" words / picture"],
-    ["Audience age", b.age],
     ["Pages", b.num_pages],
     ["Status", b.status],
   ].map(([k,v]) => `<div class="k">${k}</div><div>${v}</div>`).join("");

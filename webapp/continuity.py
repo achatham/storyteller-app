@@ -42,7 +42,7 @@ SRC_CHARS = 2600      # per-page source text cap
 REVIEW_MODEL = TEXT_MODEL
 
 REVIEW_PROMPT = """You are the continuity editor for a children's read-aloud picture-book \
-edition of a novel (audience: {age} years old). You are shown {n} CONSECUTIVE pages -- for each, \
+edition of a novel. You are shown {n} CONSECUTIVE pages -- for each, \
 the source text the child hears, the plan the illustration was drawn from (setting, brief, cast), \
 and the illustration itself -- followed by the canonical reference sheets the illustrator was given.
 
@@ -158,7 +158,7 @@ Now judge the sequence. Return JSON only:
 Include a page_edits entry for EVERY page shown, in order, even when its action is keep."""
 
 PLAN_PROMPT = """You are the continuity editor for a children's read-aloud picture-book \
-edition of a novel (audience: {age} years old). NOTHING HAS BEEN DRAWN YET. You are shown {n} \
+edition of a novel. NOTHING HAS BEEN DRAWN YET. You are shown {n} \
 CONSECUTIVE pages -- for each, the source text the child hears and the PLAN an illustrator will draw \
 from (setting, brief, cast = which registry entity + variant to draw) -- plus the registry of \
 canonical looks. Your job is to fix the PLAN before any picture is paid for, reading the pages AS A \
@@ -440,10 +440,10 @@ def review_contents(win: dict, prior: dict | None = None, plan_only: bool = Fals
                else "(this page has NO illustration yet -- judge its plan only)\n"))
     if plan_only:
         return [PLAN_PROMPT.format(
-            age=book.get("age") or "5", n=len(win["pages"]),
+            n=len(win["pages"]),
             registry=win["registry_text"], prior=_prior_text(prior), pages="\n".join(page_blocks))]
     prompt = REVIEW_PROMPT.format(
-        age=book.get("age") or "5", n=len(win["pages"]), style=style,
+        n=len(win["pages"]), style=style,
         registry=win["registry_text"], prior=_prior_text(prior), pages="\n".join(page_blocks))
     contents: list = [prompt, "\nTHE ILLUSTRATIONS, in the same order:"]
     for p in win["pages"]:
