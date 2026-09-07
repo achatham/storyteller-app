@@ -253,7 +253,7 @@ def resolve_cast(bible: dict, registry: dict) -> dict:
     reg = {e["id"]: e for e in registry.get("entities", [])}
     out = {}
     for m in bible.get("cast", []):
-        eid, vid = m["entity_id"], m.get("variant_id", "default")
+        eid, vid = m["entity_id"], m.get("variant_id") or "default"
         key = f"{eid}/{vid}"
         if m.get("from_registry") and eid in reg:
             e = reg[eid]

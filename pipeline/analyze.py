@@ -204,6 +204,22 @@ def _reconcile_bible(bible: dict, registry: dict) -> None:
     print(f"[analyze] reconciled invented registry ids: {remap}", flush=True)
 
 
+def normalize_cast_variants(bible: dict) -> int:
+    """A cast entry with a blank variant_id means the entity's base look, which every
+    consumer names "default" -- the model sometimes returns "" for an entity that has
+    no variants, and an un-normalized "" became a roster sheet stored under an empty
+    id (unreachable from its URL) next to the real "default" one. Fixes the section
+    cast and every spread's cast in place; returns how many entries were changed."""
+    n = 0
+    casts = [bible.get("cast", [])] + [s.get("cast", []) for s in bible.get("spreads", [])]
+    for cast in casts:
+        for m in cast:
+            if isinstance(m, dict) and m.get("entity_id") and not (m.get("variant_id") or "").strip():
+                m["variant_id"] = "default"
+                n += 1
+    return n
+
+
 def build_bible(chapter_text: str, registry: dict, model: str = ANALYZE_MODEL) -> dict:
     words = len(chapter_text.split())
     target_pages = max(1, round(words / WORDS_PER_PAGE))
@@ -219,6 +235,9 @@ def build_bible(chapter_text: str, registry: dict, model: str = ANALYZE_MODEL) -
         chapter=chapter_text,
     )
     bible = gem.text_json(prompt, model=model)
+    if n := normalize_cast_variants(bible):
+        print(f"[analyze] {n} cast entr{'y' if n == 1 else 'ies'} with a blank variant_id -> default",
+              flush=True)
     _reconcile_bible(bible, registry)
     return apply_anchors(chapter_text, bible)
 
