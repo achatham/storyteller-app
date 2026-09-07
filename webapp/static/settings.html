@@ -36,6 +36,8 @@
   .btn.go { background:var(--accent); color:#fff; border-color:var(--accent); }
   .pill { font-family:system-ui,sans-serif; font-size:.72rem; text-transform:uppercase; letter-spacing:.5px;
           padding:2px 8px; border:1px solid var(--line); border-radius:20px; }
+  .barwrap { height:8px; background:var(--line); border-radius:4px; overflow:hidden; }
+  .bar { height:100%; background:var(--accent); border-radius:4px; transition:width .6s; }
 </style>
 </head><body>
 <header>
@@ -95,6 +97,16 @@
     <button class="btn go" id="bakego">Illustrate whole book</button>
     <button class="btn" id="bakeretry" hidden>Retry failed pages</button>
     <button class="btn" id="bakecancel" hidden style="border-color:#b9532e;color:#b9532e">Cancel bake</button>
+    <div id="bakelive" hidden style="flex-basis:100%;font-family:system-ui,sans-serif;font-size:.88rem">
+      <div class="barwrap"><div class="bar" id="bakefill"></div></div>
+      <div id="bakehead" style="margin-top:8px;font-weight:600"></div>
+      <div id="bakesub" class="note" style="margin-top:4px"></div>
+      <div id="bakecounts" class="note" style="margin-top:2px"></div>
+      <details style="margin-top:8px">
+        <summary class="note" style="cursor:pointer">Recent log</summary>
+        <pre id="bakelog" style="margin:6px 0 0;max-height:220px;overflow:auto;font-size:.72rem;line-height:1.35;white-space:pre-wrap;color:var(--muted)"></pre>
+      </details>
+    </div>
   </div>
   <div id="epubbar" hidden style="margin-top:14px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--panel);display:flex;align-items:center;gap:14px;flex-wrap:wrap">
     <div id="epubmsg" style="flex:1 1 260px;font-size:.9rem;font-family:system-ui,sans-serif"></div>
@@ -280,10 +292,14 @@ function renderBake(bake){
   const failed = (bake && bake.counts && bake.counts.failed) || 0;
   const total = (bake && bake.total_pages) || numPages || "";
   retry.hidden = true;   // shown only when a finished bake left failed pages
+  const live = $("#bakelive");
+  live.hidden = st !== "baking";
   if (st === "baking"){
     go.hidden = true; cancel.hidden = false;
-    msg.innerHTML = `<b>Illustrating…</b> ${bake.done_pages}/${total} pages `
-      + `(round ${(bake.round||0)+1}). Runs in the background — you can leave this page.`;
+    msg.innerHTML = `<b>Illustrating…</b> ${bake.done_pages}/${total} pages done`
+      + (bake.elapsed_s != null ? ` · running ${dur(bake.elapsed_s)}` : "")
+      + `. Runs in the background — you can leave this page.`;
+    renderBakeLive(bake, total);
   } else if (st === "done"){
     go.hidden = false; go.textContent = "Illustrate whole book"; cancel.hidden = true;
     if (failed){
@@ -306,10 +322,59 @@ function renderBake(bake){
       + `Pages already illustrated are left as they are.`;
   }
 }
+// "4 min" / "1h05" -- coarse on purpose; the ETA is a rough range.
+const dur = s => { const m = Math.round(s/60); return m < 1 ? "under a minute" : m < 90 ? `${m} min` : `${Math.floor(m/60)}h${String(m%60).padStart(2,"0")}`; };
+function etaText(eta){
+  if (!eta) return "";
+  const lo = Math.round(eta.low_s/60), hi = Math.round(eta.high_s/60);
+  const span = lo === hi ? dur(eta.high_s)
+    : (lo < 90 && hi < 90) ? `${lo}–${hi} min` : `${dur(eta.low_s)} – ${dur(eta.high_s)}`;
+  return `~${span} left (rough — batch queue times vary; based on ${esc(eta.basis||"recent jobs")})`;
+}
+function renderBakeLive(bake, total){
+  const p = bake.progress || {}, c = bake.counts || {};
+  const pct = total ? Math.round((bake.done_pages||0) / total * 100) : 0;
+  $("#bakefill").style.width = pct + "%";
+  $("#bakehead").textContent = bake.headline || "";
+  const bits = [];
+  const r = p.roster;
+  if (r && r.step && r.step !== "done" && r.total)
+    bits.push(`roster sheets ${r.drawn||0}/${r.total} drawn in the background (wave ${r.wave||1}${r.attempt>1?`, attempt ${r.attempt}`:""})`);
+  if (bake.jobs && bake.jobs.length){
+    const n = bake.jobs.reduce((a,j)=>a+(j.n_reqs||0),0);
+    bits.push(`${n} image${n!==1?"s":""} in ${bake.jobs.length} batch job${bake.jobs.length>1?"s":""}: `
+      + bake.jobs.map(j => `${esc(j.kind)} ${esc((j.state||"").replace("JOB_STATE_","").toLowerCase())} ${dur(j.age_s||0)}`).join(", "));
+  }
+  if (p.rounds && p.rounds.length){
+    const last = p.rounds[p.rounds.length-1];
+    bits.push(`last round: ${last.passed}/${last.open} passed, drawing took ${dur(last.gen_s)}, scoring ${dur(last.score_s)}`);
+  }
+  if (p.staged) bits.push(`${p.staged} page${p.staged>1?"s":""} staged by the continuity review`);
+  if (p.attempts_left != null && p.phase === "draw" && p.open)
+    bits.push(`up to ${p.attempts_left} more round${p.attempts_left!==1?"s":""} for pages that don't pass`);
+  $("#bakesub").textContent = bits.join(" · ");
+  const counts = [];
+  if (c.done) counts.push(`${c.done} done`);
+  if (c.revising) counts.push(`${c.revising} being revised`);
+  if (c.pending) counts.push(`${c.pending} waiting`);
+  if (c.failed) counts.push(`${c.failed} failed`);
+  $("#bakecounts").textContent = [counts.join(" · "), etaText(bake.eta)].filter(Boolean).join("   ·   ");
+}
+async function pollBakeLog(){
+  const pre = $("#bakelog");
+  if (!pre || pre.closest("details").open === false) return;
+  try {
+    const r = await (await fetch("/api/books/"+ID+"/bake/log?lines=40", {cache:"no-store"})).json();
+    pre.textContent = (r.lines||[]).join("\n");
+    pre.scrollTop = pre.scrollHeight;
+  } catch (e) { /* details only */ }
+}
+document.addEventListener("toggle", e => { if (e.target.closest && e.target.closest("#bakelive")) pollBakeLog(); }, true);
 async function pollBake(){
   try {
-    const bake = await (await fetch("/api/books/"+ID+"/bake")).json();
+    const bake = await (await fetch("/api/books/"+ID+"/bake", {cache:"no-store"})).json();
     renderBake(bake);
+    if (bake && bake.status === "baking") pollBakeLog();
     pollOutstanding();   // refresh the in-flight batch count alongside bake progress
     if (bake && bake.status === "baking" && !bakeTimer) bakeTimer = setInterval(pollBake, 5000);
     if (bake && bake.status !== "baking" && bakeTimer){ clearInterval(bakeTimer); bakeTimer = null; }

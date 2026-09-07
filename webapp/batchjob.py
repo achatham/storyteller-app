@@ -73,11 +73,13 @@ def run_image_batch(book_id: int, round: int, kind: str, reqs: list[dict], model
 TEXT_WORKERS = int(os.environ.get("STORY_TEXT_WORKERS", "8"))
 
 
-def run_text_parallel(book_id: int, items: dict, fn, log=print, what: str = "critique") -> dict:
+def run_text_parallel(book_id: int, items: dict, fn, log=print, what: str = "critique",
+                      on_progress=None) -> dict:
     """{key: fn(key, item)} over `items` in parallel interactive calls, each attributed
     to the book's cost run (costs.run_as is thread-local, so the pool re-enters it). A
     call that raises is logged and its key left out -- callers treat a missing verdict
-    as "unscored", never as a failure of the whole step."""
+    as "unscored", never as a failure of the whole step. `on_progress(done, total)` is
+    called after each item completes (from the pool's threads), for a progress display."""
     if not items:
         return {}
 
@@ -92,7 +94,9 @@ def run_text_parallel(book_id: int, items: dict, fn, log=print, what: str = "cri
 
     out = {}
     with ThreadPoolExecutor(max_workers=TEXT_WORKERS) as ex:
-        for k, res in ex.map(one, items.items()):
+        for n, (k, res) in enumerate(ex.map(one, items.items()), 1):
             if res is not None:
                 out[k] = res
+            if on_progress:
+                on_progress(n, len(items))
     return out

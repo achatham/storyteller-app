@@ -42,7 +42,7 @@ from fastapi.staticfiles import StaticFiles
 
 from pipeline.config import STYLES
 
-from . import continuity, cover, db, flow, scene
+from . import bake_progress, continuity, cover, db, flow, scene
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 
@@ -435,14 +435,19 @@ def api_books():
     covered = db.books_with_covers()
     for b in db.list_books():
         sp = db.scene_progress(b["id"])
-        out.append({
+        row = {
             "id": b["id"], "title": b["title"] or b["filename"] or "Untitled",
             "author": b["author"], "style": b["style"], "status": b["status"],
             "detail": b["detail"], "num_pages": b["num_pages"],
             "position": b["position"], "read_at": b["read_at"],
             "scenes_done": sp.get("done", 0),
             "has_cover": b["id"] in covered,
-        })
+        }
+        if b["status"] == "baking":   # what the bake is doing + a rough time left
+            st = bake_progress.status(b["id"])
+            row["bake"] = {"headline": st.get("headline"), "eta": st.get("eta"),
+                           "done_pages": st.get("done_pages"), "total_pages": st.get("total_pages")}
+        out.append(row)
     return out
 
 
@@ -595,14 +600,27 @@ async def api_bake_cancel(book_id: int):
 
 @app.get("/api/books/{book_id}/bake")
 def api_bake_status(book_id: int):
-    """Bake progress for the roster/hub UI: overall state + per-status page counts."""
-    bake = db.bake_get(book_id)
-    if not bake:
-        return {"status": None}
-    counts = db.bps_counts(book_id)
-    return {"status": bake["status"], "round": bake["round"],
-            "total_pages": bake["total_pages"], "done_pages": counts.get("done", 0),
-            "detail": bake["detail"], "counts": counts}
+    """Bake progress for the settings/hub UI: overall state, per-status page counts,
+    and -- while baking -- the live phase/step, the round's batch jobs, a headline
+    and a rough time-left range (see webapp/bake_progress)."""
+    return bake_progress.status(book_id)
+
+
+@app.get("/api/books/{book_id}/bake/log")
+def api_bake_log(book_id: int, lines: int = 40):
+    """The tail of the bake worker's log, for the settings page's details panel."""
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    path = LOGS / f"bake_{book_id}.log"
+    if not path.exists():
+        return {"lines": []}
+    lines = max(1, min(lines, 400))
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(max(0, size - 64 * 1024))
+        tail = f.read().decode("utf-8", "replace").splitlines()
+    return {"lines": tail[-lines:]}
 
 
 def _epub_status(book_id: int) -> dict:

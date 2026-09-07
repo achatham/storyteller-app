@@ -12,7 +12,7 @@
 // saved book reads with zero reader-side offline logic.
 importScripts("/static/offline-idb.js");
 
-const CACHE = "storyteller-v24";   // bumped: roster editor drops the model radio buttons (tweaks always lite)
+const CACHE = "storyteller-v25";   // bumped: live bake progress (phase, ETA, log) on settings + hub
 
 // The app shell, fetched at install time. Without this the cache only ever held
 // what happened to be requested while a previous worker was already in control --

@@ -55,7 +55,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pipeline import gem, costs
 from pipeline.config import WEBP_QUALITY
 
-from . import batch_roster, batchjob, db, scene
+from . import bake_progress, batch_roster, batchjob, db, scene
 from .scene import (build_scene_context, build_round_request, apply_verdict,
                     new_scene_state, critique_prompt, critique_prompt_lite,
                     _attempt_trace, _compress, _verify_fix, _judge_best,
@@ -96,7 +96,32 @@ CONTINUITY_MAX_REDRAW = float(os.environ.get("STORY_BAKE_CONTINUITY_MAX_REDRAW",
 
 
 def log(msg):
-    print(f"[bake] {msg}", flush=True)
+    print(f"{time.strftime('%H:%M:%S')} [bake] {msg}", flush=True)
+
+
+def _report(book_id, **fields):
+    """Progress for the settings page / library card (webapp/bake_progress). Never
+    lets a bookkeeping hiccup stop the bake."""
+    try:
+        bake_progress.report(book_id, **fields)
+    except Exception as ex:  # noqa: BLE001 -- display only
+        log(f"progress report failed: {ex}")
+
+
+def _counting_log(book_id, key, total):
+    """A log wrapper that counts the continuity critic's finished five-page runs
+    ("... pages a-b: N issues, ...") into progress[key] = [done, total]."""
+    n = [0]
+    lock = threading.Lock()
+
+    def _log(msg):
+        log(msg)
+        if " issues, " in msg and "pages " in msg:
+            with lock:
+                n[0] += 1
+                done = n[0]
+            _report(book_id, **{key: [done, total]})
+    return _log
 
 
 # ---------------- per-page runtime ----------------
@@ -188,13 +213,17 @@ class _RosterThread:
     def start(self):
         def _go():
             try:
-                n = batch_roster.draw_roster(self.book_id, log=log)
+                n = batch_roster.draw_roster(
+                    self.book_id, log=log,
+                    progress=lambda **kw: _report(self.book_id, roster=kw))
                 log(f"batch roster drew {n} sheets")
             except Exception as ex:  # noqa: BLE001 -- fall back to interactive per-page draws
                 log(f"batch roster failed ({type(ex).__name__}: {ex}); "
                     "remaining sheets drawn interactively")
             finally:
                 self.finished = True
+                prev = (db.bake_get(self.book_id) or {}).get("progress", {}).get("roster") or {}
+                _report(self.book_id, roster={**prev, "step": "done"})
         self._t = threading.Thread(target=_go, name=f"roster-{self.book_id}", daemon=True)
         self._t.start()
 
@@ -268,6 +297,7 @@ def _admit(book_id, runs, plan_cache, force) -> int:
                 added += 1
     if added:
         log(f"admitted {added} page(s) ({'roster done' if force else 'sheets ready'})")
+        _report(book_id, admitted=len(runs))
     return added
 
 
@@ -356,8 +386,17 @@ def _score_round(book_id, r, runs, open_idxs) -> dict:
         return {"crit": crit, "fix_ok": fix_ok, "verify": v}
 
     todo = {idx: runs[idx] for idx in open_idxs if runs[idx].cand is not None}
+    _report(book_id, step="score", step_since=time.time(), scored=[0, len(todo)])
+    last = [0.0]
+
+    def tick(done, total):   # throttled: the pool finishes several drafts a second
+        now = time.time()
+        if done == total or now - last[0] > 3:
+            last[0] = now
+            _report(book_id, scored=[done, total])
+
     out = batchjob.run_text_parallel(book_id, todo, score, log=lambda m: log(f"r{r} {m}"),
-                                     what="critique")
+                                     what="critique", on_progress=tick)
     if len(out) < len(todo):
         log(f"r{r}: {len(todo) - len(out)} page(s) could not be scored this round")
     return out
@@ -402,14 +441,29 @@ def run_round(book_id, r, runs, open_idxs) -> int:
         return 0
     log(f"round {r}: {len(open_idxs)} pages open")
     # resume pointer = r while this round runs; a crash resumes and re-runs round r
-    db.bake_upsert(book_id, "baking", round=r,
-                   done_pages=db.bps_counts(book_id).get("done", 0))
+    done_before = db.bps_counts(book_id).get("done", 0)
+    db.bake_upsert(book_id, "baking", round=r, done_pages=done_before)
+    t0 = time.time()
+    _report(book_id, phase="draw", round=r, round_since=t0, open=len(open_idxs),
+            attempts_left=max(MAX_ROUNDS - runs[i].attempt - 1 for i in open_idxs),
+            step="generate", step_since=t0, scored=None)
     _run_generate(book_id, r, runs, open_idxs)
+    t1 = time.time()
     _apply_round(book_id, r, runs, open_idxs, _score_round(book_id, r, runs, open_idxs))
     # round fully applied: advance the resume pointer so a later restart won't redo it
-    db.bake_upsert(book_id, "baking", round=r + 1,
-                   done_pages=db.bps_counts(book_id).get("done", 0))
+    done_after = db.bps_counts(book_id).get("done", 0)
+    db.bake_upsert(book_id, "baking", round=r + 1, done_pages=done_after)
+    hist = (db.bake_get(book_id) or {}).get("progress", {}).get("rounds") or []
+    hist.append({"r": r, "open": len(open_idxs), "passed": done_after - done_before,
+                 "gen_s": int(t1 - t0), "score_s": int(time.time() - t1)})
+    _report(book_id, rounds=hist[-12:], round=r + 1, open=0, step=None, scored=None)
+    log(f"round {r} done in {_mins(time.time() - t0)}: {done_after - done_before} passed, "
+        f"{done_after}/{(db.bake_get(book_id) or {}).get('total_pages') or '?'} pages done")
     return len(db.bps_actionable(book_id))
+
+
+def _mins(s: float) -> str:
+    return f"{int(s // 60)}m{int(s % 60):02d}s"
 
 
 # ---------------- finalise ----------------
@@ -500,6 +554,9 @@ def _drain_interactive(book_id):
     if not targets:
         return
     log(f"interactive tail: drawing {len(targets)} remaining page(s)")
+    _report(book_id, phase="tail", phase_since=time.time(), tail=[0, len(targets)])
+    finished = [0]
+    lock = threading.Lock()
 
     def one(idx):
         if _cancelled(book_id):
@@ -511,6 +568,11 @@ def _drain_interactive(book_id):
         except Exception as ex:  # noqa: BLE001 -- leave actionable for finalise's fallback
             log(f"interactive tail render failed for page {idx}: {ex}")
             return False
+        finally:
+            with lock:
+                finished[0] += 1
+                k = finished[0]
+            _report(book_id, tail=[k, len(targets)])
 
     with ThreadPoolExecutor(max_workers=INTERACTIVE_WORKERS) as ex:
         n = sum(1 for ok in ex.map(one, targets) if ok)
@@ -529,6 +591,7 @@ def finalise(book_id, runs):
         _escalate_interactive(book_id, stragglers, runs)
         stragglers = [i for i in db.bps_actionable(book_id) if i in runs]   # drop the resolved
     judgeable = {i: runs[i] for i in stragglers if len(runs[i].state["cands"]) > 1}
+    _report(book_id, phase="finalise", phase_since=time.time(), judge=len(judgeable))
     picks = {}
     for i, pick in batchjob.run_text_parallel(
             book_id, judgeable, lambda i, pr: _judge_best(pr.state["cands"], pr.ctx["page"]["brief"]),
@@ -541,13 +604,15 @@ def finalise(book_id, runs):
 
 # ---------------- entry ----------------
 
-def _draw_open_pages(book_id, roster, runs, plan_cache, r) -> int:
+def _draw_open_pages(book_id, roster, runs, plan_cache, r, pass_name="main") -> int:
     """Run batch rounds until nothing is actionable (admitting pages as their sheets
     land), finish a small tail interactively, then finalise the stragglers. Returns
     the next free round number. Called once for the book and again for any pages the
-    continuity review staged afterwards."""
+    continuity review staged afterwards (`pass_name` tells the progress display which)."""
     max_round = r + MAX_ROUNDS * 4
     tail = False
+    _report(book_id, phase="draw", phase_since=time.time(), **{"pass": pass_name},
+            round=r, open=0, step=None, scored=None, tail=None, judge=None)
     while r < max_round:
         if _cancelled(book_id):
             return r
@@ -587,8 +652,11 @@ def _plan_review(book_id, total):
     db.set_status(book_id, "baking", "reviewing the plan before drawing…")
     db.bake_upsert(book_id, "baking", detail="plan review")
     pages = db.get_pages(book_id)
+    windows = -(-len(pages) // continuity.WINDOW)
+    _report(book_id, phase="plan", phase_since=time.time(), review=[0, windows])
     try:
-        res = continuity.run_pass(book_id, pages[0]["idx"], pages[-1]["idx"], plan_only=True, log=log)
+        res = continuity.run_pass(book_id, pages[0]["idx"], pages[-1]["idx"], plan_only=True,
+                                  log=_counting_log(book_id, "review", windows))
         rep = res["applied"]
         log(f"plan review: +{len(rep['entities_added'])} entities, +{len(rep['variants_added'])} "
             f"variants, {len(rep['pages_updated'])} pages' plans corrected")
@@ -608,9 +676,12 @@ def _picture_review(book_id, bake_started) -> int:
     db.set_status(book_id, "baking", "reviewing continuity across pages…")
     db.bake_upsert(book_id, "baking", detail="continuity review")
     pages = db.get_pages(book_id)
+    windows = -(-len(pages) // continuity.WINDOW)
+    _report(book_id, phase="review", phase_since=time.time(), review=[0, windows])
     try:
         res = continuity.run_pass(book_id, pages[0]["idx"], pages[-1]["idx"], serious_only=True,
-                                  max_rate=CONTINUITY_MAX_REDRAW, log=log)
+                                  max_rate=CONTINUITY_MAX_REDRAW,
+                                  log=_counting_log(book_id, "review", windows))
     except Exception as ex:  # noqa: BLE001 -- a failed review leaves a finished book finished
         log(f"continuity review failed ({type(ex).__name__}: {str(ex)[:160]})")
         db.bake_upsert(book_id, "baking", detail=f"continuity review failed: {str(ex)[:120]}")
@@ -628,6 +699,7 @@ def _picture_review(book_id, bake_started) -> int:
     n = db.bake_stage_redraws(book_id, res["redraws"])
     note = (f"continuity review: redrawing {n} of {res['reviewed']} pages ({res['rate']:.0%})")
     log(note)
+    _report(book_id, staged=n)
     db.bake_upsert(book_id, "baking", detail=note)
     db.set_status(book_id, "baking", f"redrawing {n} pages from the continuity review…")
     return n
@@ -641,6 +713,10 @@ def run(book_id: int):
         _seed(book_id)
         total = len(db.get_pages(book_id))
         bake_started = (db.bake_get(book_id) or {}).get("created_at") or time.time()
+        # progress is per worker run: a resume starts its own clock and round history
+        db.bake_progress_reset(book_id)
+        _report(book_id, started_at=time.time(), phase=None,
+                stages={"plan": CONTINUITY_PLAN, "picture": CONTINUITY_PICTURE})
         if CONTINUITY_PLAN:
             _plan_review(book_id, total)      # fix the plan before paying for images
         # Draw the roster in the BACKGROUND so a page starts illustrating as soon as ITS
@@ -675,7 +751,7 @@ def run(book_id: int):
             # revise seed (draft + instruction) from batch_page_state
             for idx in db.bps_actionable(book_id):
                 runs.pop(idx, None)
-            r = _draw_open_pages(book_id, roster, runs, plan_cache, r)
+            r = _draw_open_pages(book_id, roster, runs, plan_cache, r, pass_name="redraw")
             if _cancelled(book_id):
                 db.set_status(book_id, "roster_review", "bake cancelled — review or re-illustrate")
                 return
@@ -684,11 +760,13 @@ def run(book_id: int):
         db.set_status(book_id, "ready", f"{done} pages illustrated (batch)")
         # Cover last: it needs a settled roster (and the status it just got), and a
         # lazily-read book that only reached the bake now may never have had one.
+        _report(book_id, phase="cover", phase_since=time.time())
         try:
             from . import cover
             cover.ensure_cover(book_id, log=log)
         except Exception as ex:  # noqa: BLE001 -- cosmetic; never fail a finished bake
             log(f"book {book_id} cover failed: {type(ex).__name__}: {ex}")
+        _report(book_id, phase="done", phase_since=time.time())
         log(f"book {book_id} bake done: {done}/{total} pages")
 
 

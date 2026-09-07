@@ -234,6 +234,14 @@ function ago(t){
   return new Date(t*1000).toLocaleDateString([], {month:"short", day:"numeric"});
 }
 
+// rough time-left range for a baking book, e.g. "40–75 min" / "1h10 – 2h05"
+function etaRange(e){
+  const m = s => { const x = Math.round(s/60); return x < 90 ? `${x} min` : `${Math.floor(x/60)}h${String(x%60).padStart(2,"0")}`; };
+  const lo = Math.round(e.low_s/60), hi = Math.round(e.high_s/60);
+  if (lo === hi) return m(e.high_s);
+  return lo < 90 && hi < 90 ? `${lo}–${hi} min` : `${m(e.low_s)} – ${m(e.high_s)}`;
+}
+
 function card(b){
   const processing = PROCESSING.includes(b.status);
   const pct = b.num_pages ? Math.round((b.position+1)/b.num_pages*100) : 0;
@@ -259,6 +267,8 @@ function card(b){
         failed ? "⚠ " + (b.detail||"failed")
         : rosterReview ? "🎨 Roster ready — review & illustrate"
         : baking ? `🎨 Illustrating… ${b.scenes_done||0}/${b.num_pages} pages`
+                   + (b.bake && b.bake.headline ? `<br><span class="sub">${b.bake.headline}</span>` : "")
+                   + (b.bake && b.bake.eta ? `<br><span class="sub">~${etaRange(b.bake.eta)} left</span>` : "")
         : processing ? "⏳ " + (b.detail||b.status)
         : ready ? `${b.num_pages} pages · ${b.scenes_done} drawn${b.read_at ? " · read " + ago(b.read_at) : ""}`
         : b.status}</div>
@@ -269,7 +279,7 @@ function card(b){
           ? `<a class="btn go" href="/roster/${b.id}">Review roster</a>`
           : `<a class="btn go" href="/book/${b.id}" aria-disabled="${(ready||baking)?'false':'true'}">
                ${b.position>0 && (ready||baking) ? "Continue" : "Read"}</a>`}
-        ${baking ? `<a class="btn" href="/roster/${b.id}" title="Bake progress">&#127912;</a>` : ""}
+        ${baking ? `<a class="btn" href="/settings/${b.id}" title="Bake progress">&#127912;</a>` : ""}
         <a class="btn" href="/settings/${b.id}" title="Settings & cost">&#9881;</a>
         <button class="del" onclick="del(${b.id},event)">✕</button>
       </div>

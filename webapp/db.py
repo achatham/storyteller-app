@@ -312,6 +312,9 @@ def init():
         scols = {r["name"] for r in c.execute("PRAGMA table_info(scenes)")}
         if "trace" not in scols:   # per-attempt critique/revise log (JSON)
             c.execute("ALTER TABLE scenes ADD COLUMN trace TEXT")
+        bcols = {r["name"] for r in c.execute("PRAGMA table_info(batch_bake)")}
+        if "progress" not in bcols:   # live phase/step/ETA inputs (JSON), see bake_progress
+            c.execute("ALTER TABLE batch_bake ADD COLUMN progress TEXT")
         lcols = {r["name"] for r in c.execute("PRAGMA table_info(reading_log)")}
         if "max_pos" not in lcols:
             c.execute("ALTER TABLE reading_log ADD COLUMN max_pos INTEGER")
@@ -1066,7 +1069,61 @@ def bake_upsert(book_id, status, round=None, total_pages=None, done_pages=None, 
 def bake_get(book_id) -> dict | None:
     with conn() as c:
         r = c.execute("SELECT * FROM batch_bake WHERE book_id=?", (book_id,)).fetchone()
-        return dict(r) if r else None
+    if not r:
+        return None
+    out = dict(r)
+    out["progress"] = json.loads(out.get("progress") or "{}")
+    return out
+
+
+def bake_progress(book_id, **fields) -> dict:
+    """Merge `fields` into the bake's live progress JSON (the phase/step/timing the
+    bake worker reports for the UI; see webapp/bake_progress). A value of None
+    removes the key. Returns the merged dict. One read-modify-write per call inside
+    a single transaction, so the bake's threads (roster, scoring pool) can each
+    report their own keys without clobbering the others'."""
+    with conn() as c:
+        r = c.execute("SELECT progress FROM batch_bake WHERE book_id=?", (book_id,)).fetchone()
+        cur = json.loads((r["progress"] if r else None) or "{}")
+        for k, v in fields.items():
+            if v is None:
+                cur.pop(k, None)
+            else:
+                cur[k] = v
+        c.execute("UPDATE batch_bake SET progress=?, updated_at=? WHERE book_id=?",
+                  (json.dumps(cur), time.time(), book_id))
+    return cur
+
+
+def bake_progress_reset(book_id):
+    with conn() as c:
+        c.execute("UPDATE batch_bake SET progress=NULL WHERE book_id=?", (book_id,))
+
+
+def bjobs_for_round(book_id, round) -> list[dict]:
+    """The batch jobs of one round with their request counts (batch_reqs) -- what is
+    in flight right now, for the progress display."""
+    with conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT j.kind, j.job_name, j.state, j.created_at, j.updated_at, r.n_reqs "
+            "FROM batch_jobs j LEFT JOIN batch_reqs r ON r.job_name=j.job_name "
+            "WHERE j.book_id=? AND j.round=? ORDER BY j.created_at", (book_id, round))]
+
+
+def batch_job_durations(book_id=None, limit=20) -> list[float]:
+    """Wall-clock seconds of the most recent SUCCEEDED batch jobs (submit -> last
+    poll that saw it finished), newest first -- the empirical basis for a bake's
+    ETA, since a job's queue time varies far more with time of day than with its
+    size. `book_id` limits it to one book's jobs (a bake's own history)."""
+    q = ("SELECT updated_at-created_at d FROM batch_jobs WHERE state='JOB_STATE_SUCCEEDED' "
+         "AND updated_at>created_at")
+    args: tuple = ()
+    if book_id is not None:
+        q += " AND book_id=?"
+        args = (book_id,)
+    q += " ORDER BY updated_at DESC LIMIT ?"
+    with conn() as c:
+        return [r["d"] for r in c.execute(q, (*args, limit))]
 
 
 def books_baking() -> list[int]:

@@ -90,7 +90,8 @@ def _save_slot(book_id, s) -> int:
     return 1
 
 
-def _draw_wave(book_id, w, wave, style_text, style_ref_bytes, use_anchor, log) -> int:
+def _draw_wave(book_id, w, wave, style_text, style_ref_bytes, use_anchor, log,
+               progress=None, total=0, drawn_before=0) -> int:
     """Generate + critique + save one wave of sheets, keeping the best of up to
     SHEET_TRIES attempts each. `use_anchor` attaches a same-entity sibling sheet as
     an identity reference (for wave 2, whose entities were drawn in wave 1). `w` is
@@ -104,12 +105,17 @@ def _draw_wave(book_id, w, wave, style_text, style_ref_bytes, use_anchor, log) -
             "safe_prompt": "", "safety_tries": 0}
     saved = 0
 
+    def report(step):
+        if progress:
+            progress(total=total, drawn=drawn_before + saved, wave=w, attempt=attempt, step=step)
+
     # extra attempts beyond SHEET_TRIES cover slots whose draw was policy-refused and
     # rewritten (a refused attempt produced no candidate, so it shouldn't cost a try).
     for attempt in range(1, scene.SHEET_TRIES + scene.SAFETY_REWRITES + 1):
         todo = [k for k, s in slots.items() if not s["saved"]]
         if not todo:
             break
+        report("generate")
 
         # --- GENERATE (image batch) ---
         reqs = []
@@ -154,6 +160,7 @@ def _draw_wave(book_id, w, wave, style_text, style_ref_bytes, use_anchor, log) -
                 log(f"[roster] {k}: image blocked [{res.reason}] -- rewrote prompt for next attempt")
 
         # --- CRITIQUE (interactive, parallel) ---
+        report("critique")
         crits = batchjob.run_text_parallel(
             book_id, cands, lambda k, img: scene.critique_sheet(img, slots[k]["_desc"], style_text),
             log=lambda m: log(f"[roster] {m}"), what="sheet critique")
@@ -172,6 +179,7 @@ def _draw_wave(book_id, w, wave, style_text, style_ref_bytes, use_anchor, log) -
                 s["best"] = (img, score, attempt)
             if score is None or score >= scene.SHEET_PASS:
                 saved += _save_slot(book_id, s)
+        report("critique")
 
     # --- SAVE the best of every slot that never settled ---
     for k, s in slots.items():
@@ -184,9 +192,11 @@ def _draw_wave(book_id, w, wave, style_text, style_ref_bytes, use_anchor, log) -
     return saved
 
 
-def draw_roster(book_id, log=print) -> int:
+def draw_roster(book_id, log=print, progress=None) -> int:
     """Draw the bulk of a book's roster sheets in two batched waves. Returns how many
-    sheets were saved (the interactive pass in draw_all_sheets covers the remainder)."""
+    sheets were saved (the interactive pass in draw_all_sheets covers the remainder).
+    `progress(total=, drawn=, wave=, attempt=, step=)` is called at each step change
+    (the bake shows it; the import worker doesn't pass one)."""
     book = db.get_book(book_id)
     if not book:
         return 0
@@ -213,7 +223,11 @@ def draw_roster(book_id, log=print) -> int:
                 wave2 += [m for _, m in items[1:]]
         log(f"[roster] {len(needed)} sheets to batch (wave1={len(wave1)} anchors, "
             f"wave2={len(wave2)}), model={ROSTER_IMAGE_MODEL}")
-        n = _draw_wave(book_id, 1, wave1, style_text, style_ref, use_anchor=False, log=log)
-        n += _draw_wave(book_id, 2, wave2, style_text, style_ref, use_anchor=True, log=log)
+        n = _draw_wave(book_id, 1, wave1, style_text, style_ref, use_anchor=False, log=log,
+                       progress=progress, total=len(needed))
+        n += _draw_wave(book_id, 2, wave2, style_text, style_ref, use_anchor=True, log=log,
+                        progress=progress, total=len(needed), drawn_before=n)
         log(f"[roster] batch drew {n}/{len(needed)} sheets")
+        if progress:
+            progress(total=len(needed), drawn=n, wave=2, attempt=0, step="done")
         return n
