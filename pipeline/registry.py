@@ -196,6 +196,34 @@ def discover(book_text: str) -> list[dict]:
     return data.get("entities", [])
 
 
+def neutral_sheet_prompt(name: str, desc: str) -> str:
+    """A reference-sheet prompt built straight from a description, for when the expand
+    pass didn't write one."""
+    return (f"A neutral full reference view of {name}: {desc} "
+            "Plain soft off-white background, even lighting, no text.")
+
+
+def fill_variant_fallback(entity: dict, variant: dict) -> None:
+    """Give one variant whatever appearance/sheet_prompt the expand pass didn't:
+    the entity's base look with THIS variant's delta appended.
+
+    Folding the delta in is the whole point. Every variant of an entity shares a base
+    look, so a fallback of the base alone gives all of them byte-identical text --
+    every reference sheet is then drawn from the same prompt and the roster shows the
+    same picture two or three times, with nothing on screen to say why. "In this look:"
+    marks the delta as the override, so a delta that contradicts the base (shorn hair
+    over a base that says long hair) reads as the later state rather than a conflict.
+    """
+    base = (entity.get("base_appearance") or "").strip()
+    delta = (variant.get("delta") or "").strip()
+    desc = variant.get("appearance") or " ".join(
+        x for x in (base, f"In this look: {delta}" if delta else "") if x)
+    variant["appearance"] = desc
+    if not variant.get("sheet_prompt"):
+        variant["sheet_prompt"] = neutral_sheet_prompt(
+            entity.get("name", "the subject"), desc)
+
+
 def expand_one(entity: dict) -> dict:
     stub = {k: entity.get(k) for k in
             ("id", "type", "name", "summary", "canonical_details", "variants")}
@@ -205,17 +233,20 @@ def expand_one(entity: dict) -> dict:
     try:
         rich = gem.text_json(prompt, model=REGISTRY_MODEL, thinking_level=REGISTRY_THINK)
     except Exception as e:  # noqa: BLE001 -- never let one entity sink the whole summary
+        # Reliably reached: Gemini's child-safety filter refuses to write a detailed
+        # physical description of a named child (PROHIBITED_CONTENT on the *output*, so
+        # gem's retries can't help, and softer wording doesn't move it -- it fires on
+        # the density of the description, not any one word). The delta-aware fallback
+        # below is what keeps such a character's variants distinguishable.
         print(f"[registry] expand FAILED for {entity.get('id')}: "
               f"{type(e).__name__}: {str(e)[:120]} -- using canonical_details fallback", flush=True)
         fallback = entity.get("canonical_details", "") or entity.get("summary", "")
         out["base_appearance"] = fallback
-        out["base_sheet_prompt"] = (
-            f"A neutral full reference view of {entity.get('name','the subject')}: "
-            f"{fallback} Plain soft off-white background, even lighting, no text.")
+        out["base_sheet_prompt"] = neutral_sheet_prompt(
+            entity.get("name", "the subject"), fallback)
         out["expand_failed"] = True
         for v in out.get("variants", []):
-            v.setdefault("appearance", fallback)
-            v.setdefault("sheet_prompt", out["base_sheet_prompt"])
+            fill_variant_fallback(out, v)
         return out
     out["base_appearance"] = rich.get("base_appearance", "")
     out["base_sheet_prompt"] = rich.get("base_sheet_prompt", "")
@@ -223,8 +254,9 @@ def expand_one(entity: dict) -> dict:
     resolved = {v.get("id"): v for v in rich.get("variants", [])}
     for v in out.get("variants", []):
         r = resolved.get(v["id"], {})
-        v["appearance"] = r.get("appearance", "")
-        v["sheet_prompt"] = r.get("sheet_prompt", "")
+        v["appearance"] = r.get("appearance") or ""
+        v["sheet_prompt"] = r.get("sheet_prompt") or ""
+        fill_variant_fallback(out, v)      # the model skipped this variant id
         flag_momentary_variant(out, v)
     return out
 
