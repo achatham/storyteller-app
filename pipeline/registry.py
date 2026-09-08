@@ -266,8 +266,9 @@ def expand_one(entity: dict) -> dict:
 # unconditional, gets drawn onto the reference sheet, and then rides every page the
 # variant covers -- and the scene critic scores that as correct, because the sheet
 # says so. Cheap to detect, so say it loudly rather than silently shipping it.
-HEDGE_RE = re.compile(r"\b(occasionally|sometimes|at one point|at times|momentarily|"
-                      r"for one scene|on one occasion|now and then|at the feast)\b", re.I)
+HEDGE_RE = re.compile(r"\b(occasionally|sometimes|often|frequently|at one point|at times|"
+                      r"momentarily|for one scene|on one occasion|on occasion|now and then|"
+                      r"every so often|at the feast)\b", re.I)
 
 
 def flag_momentary_variant(entity: dict, variant: dict) -> bool:

@@ -72,3 +72,19 @@ def test_expand_fills_in_a_variant_the_model_skipped(registry, monkeypatch):
         assert by_id[vid]["delta"] in by_id[vid]["appearance"]
         assert by_id[vid]["sheet_prompt"]
     assert len({v["appearance"] for v in out["variants"]}) == 3
+
+
+def test_often_counts_as_a_hedge(registry, capsys):
+    """A delta reading "often carrying knitting needles and misshapen elf hats" put
+    knitting in Hermione's hands on all 200 pages of her prefect variant -- as
+    unconditional as any other hedge, and it went unflagged."""
+    entity = {"id": "hermione_granger", "name": "Hermione Granger"}
+    variant = {"id": "prefect_robes",
+               "delta": "Neat Hogwarts robes, often carrying knitting needles."}
+    assert registry.flag_momentary_variant(entity, variant) is True
+    assert variant["momentary_warning"]
+    assert "MOMENTARY" in capsys.readouterr().out
+
+    durable = {"id": "quest", "delta": "Hair chopped short; battle robes and a scabbard."}
+    assert registry.flag_momentary_variant(entity, durable) is False
+    assert "momentary_warning" not in durable
