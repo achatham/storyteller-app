@@ -486,7 +486,13 @@ def _ensure_sheet(book_id, member, style_text, style_ref=None) -> bytes | None:
 
 
 def _view_slug(view: str) -> str:
+    """Slug for a named spot inside a setting. The slug IS the sheet key, so a
+    leading article has to go: the planner writes "the Hall of Prophecy" on one page
+    and "Hall of Prophecy" on the next, and two slugs mean two separately drawn
+    sheets -- the same room, looking different, depending on the page. That had
+    happened in nine of twelve books."""
     s = re.sub(r"[^a-z0-9]+", "_", (view or "").strip().lower()).strip("_")
+    s = re.sub(r"^(the|a|an)_", "", s)
     return s[:28] or "inside"
 
 
