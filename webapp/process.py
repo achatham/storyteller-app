@@ -26,10 +26,24 @@ from concurrent.futures import ThreadPoolExecutor
 from . import db
 
 
-def _when_range(when: str):
-    """(low, high) story-chapter numbers a variant's 'when' covers, or None."""
-    nums = [int(n) for n in re.findall(r"\d+", when or "")]
-    return (min(nums), max(nums)) if nums else None
+_WHEN_RANGE_RE = re.compile(r"(\d+)\s*(?:-|\u2013|\u2014|to)\s*(\d+)")
+
+
+def _when_chapters(when: str):
+    """The story chapters a variant's 'when' covers, or None if it names none.
+
+    A split span has to stay split: "Ch 4-15, Ch 24-27" is a character who leaves
+    on the quest and comes back, and reading it as min..max quietly puts them in
+    their palace clothes for chapters 16-23, where they are not in that look at all.
+    """
+    s = when or ""
+    covered = set()
+    for a, b in _WHEN_RANGE_RE.findall(s):
+        a, b = int(a), int(b)
+        if a <= b:
+            covered |= set(range(a, b + 1))
+    covered |= {int(n) for n in re.findall(r"\d+", _WHEN_RANGE_RE.sub(" ", s))}
+    return covered or None
 
 
 def _variant_for_chapter(entity: dict, chapter_num: int) -> str:
@@ -38,8 +52,8 @@ def _variant_for_chapter(entity: dict, chapter_num: int) -> str:
     if not variants:
         return "default"
     for v in variants:
-        rng = _when_range(v.get("when", ""))
-        if rng and rng[0] <= chapter_num <= rng[1]:
+        chs = _when_chapters(v.get("when", ""))
+        if chs and chapter_num in chs:
             return v["id"]
     return variants[0]["id"]
 
