@@ -496,6 +496,52 @@ def _view_slug(view: str) -> str:
     return s[:28] or "inside"
 
 
+# char_desc lists every cast member on its own line, in isolation. Each line may state
+# a size ("four feet tall", a "fifteen-foot wingspan") but nothing tells the generator
+# how the figures compare, so it falls back on what the creature ordinarily is: Temp the
+# four-foot crawler comes out a hand-sized bug beside Gregor, and a rider on a giant bat
+# comes out a person with wings growing from their back. Both were among the commonest
+# defects the critic logged. These notes state the relationship the per-member lines
+# can't, and cost nothing -- they are derived from text already in the context.
+_SIZE_RE = re.compile(r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+                      r"twelve|fifteen|twenty)[- ](?:foot|feet)\b", re.I)
+_MOUNT_RE = re.compile(r"\b(?:human rider|a rider|riders|riding bat|carry a human)\b", re.I)
+# The brief matters as much as the cast: a page can call for riders in mid-flight while
+# naming no mount at all (no sheet is attached, and the generator then grows the wings
+# out of the riders' backs). Trigger off either.
+_MOUNT_BRIEF_RE = re.compile(r"\b(?:riding|rides|ridden|rode|mounted|astride|"
+                             r"on (?:his|her|their|its) back|fliers?)\b", re.I)
+
+
+def _relation_note(members, brief: str = "") -> str:
+    """SCALE and MOUNT lines for a page whose cast mixes people with an outsized
+    creature or a ridden animal. Empty when the cast is all ordinary humans."""
+    def named(ms):
+        return ", ".join(m.get("name", m["entity_id"]) for m in ms)
+
+    beings = [m for m in members if m.get("type") != "setting"]
+    sized = [m for m in beings if _SIZE_RE.search(m.get("appearance") or "")]
+    mounts = [m for m in beings if _MOUNT_RE.search(m.get("appearance") or "")]
+    ridden = bool(mounts) or bool(_MOUNT_BRIEF_RE.search(brief or ""))
+    bits = []
+    if sized:
+        bits.append(
+            f"SCALE: the measurements above are literal, and {named(sized)} must be drawn "
+            "at that size against the people in the frame -- a four-foot crawler stands as "
+            "high as a child's shoulder, a six-foot rat meets a grown man's eye. Never "
+            "shrink one to an ordinary animal or insect of its kind.")
+    if ridden:
+        who = ("anyone riding or flying in this scene travels on the back of an animal"
+               if not mounts else
+               f"{named(mounts)} is an animal that people RIDE" if len(mounts) == 1 else
+               f"{named(mounts)} are animals that people RIDE")
+        bits.append(
+            f"MOUNTS: {who}. A rider sits astride the animal's back, a leg to either side and "
+            "hands in its fur, with the animal's whole body and head clearly visible beneath "
+            "them. Never draw wings or extra limbs growing from a person's own body.")
+    return ("\n\n" + "\n\n".join(bits)) if bits else ""
+
+
 def _view_prompt(name, appearance, view):
     """A book-agnostic reference prompt for ONE specific place within/on a setting,
     named by the story (e.g. 'lobby', 'rooftop', 'the deck'). Generic -- no ship or
@@ -1050,6 +1096,7 @@ def build_scene_context(book_id: int, idx: int) -> dict:
     char_desc = "\n".join(
         f"- {m['name']}" + (f" (RIGHT NOW: {m['state']})" if m.get("state") else "")
         + f": {m['appearance']}" for m in members)
+    relation_note = _relation_note(members, page["brief"])
     place_note = ""
     if view_members:
         spots = "; ".join(f"the {_view(m)} of {m.get('name', m['entity_id'])}" for m in view_members)
@@ -1064,6 +1111,7 @@ def build_scene_context(book_id: int, idx: int) -> dict:
         "ref_members": ref_members, "ref_bytes": ref_bytes,
         "ref_labels": [m["name"] for m in ref_members],
         "char_desc": char_desc, "place_note": place_note,
+        "relation_note": relation_note,
         "chapter_ahead": _chapter_ahead(book_id, page), "roster": roster_digest(registry),
         "style_text": style_text, "style_ref_bytes": style_ref_bytes,
     }
@@ -1141,6 +1189,7 @@ def build_round_request(ctx: dict, state: dict, name_cache: dict) -> dict:
     (draft first for a revise), `model` the image model to use. Shared verbatim by
     the lazy loop and the batch bake so both build identical prompts."""
     style_text, char_desc, place_note = ctx["style_text"], ctx["char_desc"], ctx["place_note"]
+    place_note += ctx.get("relation_note", "")
     if state.get("draft") is not None:
         # REVISE (img2img): critic-authored edit_instruction; attach the sheets the
         # critic asked for + this page's cast, budgeted to MAX_REFS incl. the draft.
