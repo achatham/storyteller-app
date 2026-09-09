@@ -487,6 +487,16 @@ def _finalise_page(book_id, pr, judged=None):
             db.bps_save(book_id, pr.idx, status="done", done=1, best_score=None,
                         best_attempt=pr.attempt)
             return
+        if s.get("draft") is not None:
+            # A STAGED REVISE that produced nothing leaves the page exactly as it was --
+            # and it already has an accepted picture, the one the revise was seeded from.
+            # Calling that failed strands the page: bps_actionable skips failed pages, so
+            # no later bake revisits it, and the bake reports a failure for a page the
+            # reader shows perfectly well. Keep the picture, keep it unscored.
+            pr.trace["fallback"] = "kept the revise seed (the revise produced no image)"
+            db.bps_save(book_id, pr.idx, status="done", done=1, best_score=None,
+                        best_attempt=pr.attempt)
+            return
         db.bps_save(book_id, pr.idx, status="failed")
         return
     data, score, chosen = s["best"]
