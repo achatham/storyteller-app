@@ -40,6 +40,33 @@ manifest loads. The manifest links already set `crossorigin="use-credentials"`
 to send the session cookie; if a gate still blocks it, skip auth for the
 non-sensitive PWA assets (`/static/*`, `/sw.js`, the manifest).
 
+### Signing in again from an installed PWA
+
+An expired session is the one failure the app cannot recover from on its own,
+because the sign-in lives on a **different origin** and no `fetch()` can carry a
+cross-origin 302 into an OAuth handshake. Worse, the installed service worker
+answers navigations from cache, so a reload never reaches the network — the app
+looks fine, every API call is refused, and nothing prompts. That is why a stuck
+device used to need an ordinary browser tab to recover.
+
+`auth.js` is the whole fix, and it is deliberately synchronous. `Auth.bounced(r)`
+recognises a refused session in either shape the gate produces:
+
+| Response | Emitted for |
+| :--- | :--- |
+| `401` + `X-Auth-Login: <login URL>` | fetch / XHR / service-worker requests |
+| `200` with `r.redirected` | navigations, and clients too old to send `Sec-Fetch-*` |
+
+Call it immediately after every `fetch()`, **before** the `!r.ok` branch, or a
+dead session gets reported as a network error. It shows an overlay whose button
+does the top-level navigation, with `rd` rewritten to `location.href` so signing
+in resumes the page the reader was on. `sw.js` runs the same test and messages
+open pages, which is the only way an `<img>` load can raise the prompt.
+
+Any gate put in front of this app needs to send `X-Auth-Login` on a refused
+non-navigation. For the Caddy + oauth2-proxy setup here, see the `(oauth2_gate)`
+snippet in `~/dev/docker/caddy/Caddyfile`.
+
 ## Static export (GitHub Pages)
 
 Export a fully-illustrated book as a **self-contained static site** -- one

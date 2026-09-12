@@ -12,7 +12,7 @@
 // saved book reads with zero reader-side offline logic.
 importScripts("/static/offline-idb.js");
 
-const CACHE = "storyteller-v26";   // bumped: roster page carries the Illustrate button; hub flags the next step
+const CACHE = "storyteller-v27";   // bumped: recognise the gate's 401 sign-in bounce
 
 // The app shell, fetched at install time. Without this the cache only ever held
 // what happened to be requested while a previous worker was already in control --
@@ -101,6 +101,18 @@ function maybeCache(req, res) {
 // Tell every open page that an /api request bounced to the login portal, so the
 // shared auth overlay pops immediately -- crucial for <img> loads, which aren't
 // guarded fetches and so can never surface the sign-in prompt on their own.
+// The gate refuses an expired session two ways; see the header comment in
+// auth.js. A request the proxy can prove is not a navigation gets 401 with the
+// login URL on X-Auth-Login, and everything else gets a cross-origin 302 that
+// fetch follows into the sign-in page (res.redirected, never an /api body).
+// Returns the login URL, or null when this is a real response.
+function authBounce(res) {
+  if (!res) return null;
+  if (res.redirected) return res.url;
+  if (res.status !== 401 && res.status !== 403) return null;
+  try { return res.headers.get("X-Auth-Login"); } catch (_) { return null; }
+}
+
 async function notifyAuthBounce(loginUrl) {
   try {
     const cs = await self.clients.matchAll({ includeUncontrolled: true, type: "window" });
@@ -130,14 +142,13 @@ self.addEventListener("fetch", (e) => {
     e.respondWith((async () => {
       try {
         const res = await fetch(req);
-        // An expired session makes the auth proxy 302 this /api request to its
-        // login portal; fetch follows it, so we get a 200 login page with
-        // res.redirected === true (never a real /api body). Treat it like being
-        // offline: serve the saved copy so a downloaded book keeps reading, and
-        // ping open pages to raise the sign-in overlay (images can't do that
-        // themselves -- they're <img> loads, not Auth.bounced fetches).
-        if (res.redirected) {
-          notifyAuthBounce(res.url);
+        // Expired session. Treat it like being offline: serve the saved copy so
+        // a downloaded book keeps reading, and ping open pages to raise the
+        // sign-in overlay -- images can't do that themselves, they're <img>
+        // loads, not Auth.bounced fetches.
+        const login = authBounce(res);
+        if (login) {
+          notifyAuthBounce(login);
           return (await fromOffline(url)) || res;
         }
         // A 202 means "not drawn yet". If we have the page saved offline, prefer

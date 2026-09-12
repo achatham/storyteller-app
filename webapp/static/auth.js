@@ -1,12 +1,26 @@
 // Shared "session expired / couldn't load" overlay.
 //
-// Auth is enforced entirely by the reverse proxy (caddy-security + Google
-// OAuth). When a session expires the proxy 302s an /api/* XHR to its
-// same-origin login portal; fetch follows that transparently, so the client
-// sees r.redirected === true with r.url = the portal URL. An XHR can never
-// carry that 302 into the OAuth handshake, so we surface an overlay whose
-// button does a top-level navigation to the captured login URL (which then
-// bounces to Google and back to where the user was).
+// Auth is enforced entirely by the reverse proxy (Caddy forward_auth ->
+// oauth2-proxy -> Google). No fetch() can ever complete the handshake itself:
+// the sign-in lives on auth.294page.net, a DIFFERENT origin, so the only cure
+// is a top-level navigation. That is all this overlay is -- a button that
+// performs one, and then lands back where the user was.
+//
+// The gate refuses an expired session in one of two shapes, and both have to be
+// recognised or the app hangs:
+//
+//   401 + X-Auth-Login    What a fetch/XHR/service-worker request gets today.
+//                         The header carries the login URL; the JSON body says
+//                         the same thing for a human reading a log.
+//   200 + r.redirected    The older shape, still what a client too old to send
+//                         Sec-Fetch-* (Safari < 16.4) receives, since the gate
+//                         only 401s requests it can prove are not navigations.
+//
+// Missing the 401 shape is what stranded the installed PWA: the app saw a bare
+// failure, showed "couldn't reach the server", and its Retry called reload() --
+// which the service worker answers from cache, so no request ever reached the
+// network and the session could never be renewed. The only escape was opening
+// the site in a real browser tab. Keep both branches.
 //
 // Usage:
 //   const r = await fetch(url, {cache:"no-store"});
@@ -76,13 +90,47 @@
     });
   } catch (_) {}
 
+  // The gate emits X-Auth-Login on an /api/* request, so the `rd` it chose is
+  // the site root -- it cannot know which book the user had open. Point it at
+  // this page instead, so signing in resumes reading rather than dumping
+  // everyone back at the library.
+  function withReturn(loginUrl) {
+    try {
+      const u = new URL(loginUrl, location.origin);
+      u.searchParams.set("rd", location.href);
+      return u.toString();
+    } catch (_) {
+      return loginUrl;
+    }
+  }
+
+  // The login URL for an expired-session response, or null if this response is
+  // not one. Deliberately synchronous and body-free: callers check it inline on
+  // a Response they still intend to read, and the service worker checks it on
+  // responses it must pass through untouched.
+  function loginUrlFor(r) {
+    if (!r) return null;
+    // Cross-origin redirect the fetch could not follow into OAuth.
+    if (r.redirected) return r.url;
+    if (r.status !== 401 && r.status !== 403) return null;
+    try {
+      const h = r.headers && r.headers.get && r.headers.get("X-Auth-Login");
+      return h ? withReturn(h) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   window.Auth = {
     // Call immediately after a fetch(). Returns true (and shows the overlay)
-    // when the response is an expired-session bounce to the login portal.
+    // when the response is the gate refusing an expired session.
     bounced: function (r) {
-      if (r && r.redirected) { show(r.url, false); return true; }
+      const login = loginUrlFor(r);
+      if (login) { show(login, false); return true; }
       return false;
     },
+    // Same test without the overlay, for callers that only want to know.
+    loginUrl: loginUrlFor,
     // Call from a catch block (or a bad-body branch) to surface the overlay.
     // Pass {offline:true} for a connectivity failure vs. an auth failure.
     fail: function (opts) {

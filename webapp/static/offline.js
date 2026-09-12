@@ -41,10 +41,11 @@
       let r;
       try { r = await fetch(path + bust, { cache: "no-store", signal }); }
       catch (e) { if (e.name === "AbortError") throw e; return null; }
-      // A redirected 200 is the auth proxy's login page, not an image. Saving it
-      // as image/webp would store a broken picture; abort the whole download so
-      // the user re-signs in and retries rather than silently baking in garbage.
-      if (r.redirected) throw new Error("Please sign in first");
+      // A sign-in bounce is not an image -- either a redirected 200 carrying the
+      // auth proxy's login page, or a 401 carrying X-Auth-Login. Saving either
+      // as image/webp would store a broken picture, so abort the whole download
+      // and raise the sign-in overlay rather than silently baking in garbage.
+      if (window.Auth && Auth.bounced(r)) throw new Error("Please sign in first");
       if (r.status === 200) return await r.blob();
       if (r.status === 202) { await sleep(2000, signal); continue; }
       return null;   // 404/409/5xx -> skip this page rather than hang the whole download

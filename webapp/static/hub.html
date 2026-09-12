@@ -182,7 +182,13 @@ async function checkVersion(){
   if (!BUILD || BUILD.startsWith("__")) return;      // page served without a build id
   try {
     const r = await fetch("/api/version", {cache:"no-store"});
-    if (!r.ok || r.redirected) return;                // offline / bounced to sign-in
+    // Doubles as the session check. Resuming an installed PWA is not a load, so
+    // nothing else here talks to the network until the user taps something --
+    // this is the earliest moment a dead session can be surfaced, and surfacing
+    // it is what gives the app a way back in. Without it the first sign of
+    // trouble was a card that did nothing when tapped.
+    if (Auth.bounced(r)) return;
+    if (!r.ok) return;                                 // offline: nothing to offer
     const { version } = await r.json();
     if (version && version !== BUILD) $("#update").classList.add("show");
   } catch(_){}                                        // offline: nothing to offer
