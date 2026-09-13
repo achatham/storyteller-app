@@ -233,6 +233,32 @@ def test_paging_back_does_not_erase_session_progress(monkeypatch, tmp_path):
     assert session["page_turns"] == 5
 
 
+def test_opening_a_book_without_reading_it_is_not_history(monkeypatch, tmp_path):
+    """Glancing at a book reports its restored position, over and over if the
+    reader sits there. That is not a sitting until the page actually turns --
+    and when it does, the sitting is timed from when they opened the book."""
+    module = server(monkeypatch, tmp_path)
+    module.db.init()
+    bid = module.db.create_book("Title", "Author", "book.pdf", "watercolor", 200,
+                                "application/pdf", b"%PDF-test")
+    with module.db.conn() as c:
+        c.execute("UPDATE books SET num_pages=100 WHERE id=?", (bid,))
+
+    for _ in range(3):
+        module.db.log_reading(bid, 30)
+    assert module.api_history() == []
+    assert module.api_history_export()["count"] == 0
+
+    with module.db.conn() as c:
+        opened_at = c.execute("SELECT started_at FROM reading_log").fetchone()[0]
+
+    module.db.log_reading(bid, 31)
+    session = module.api_history_export()["sessions"][0]
+    assert (session["start_page"], session["end_page"]) == (31, 32)
+    assert session["started_at"] == opened_at      # timed from the open, not the turn
+    assert len(module.api_history()) == 1
+
+
 def test_history_backfills_max_pos_for_pre_existing_rows(monkeypatch, tmp_path):
     """Rows written before max_pos existed still export sane numbers."""
     module = server(monkeypatch, tmp_path)

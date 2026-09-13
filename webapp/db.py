@@ -234,6 +234,8 @@ CREATE TABLE IF NOT EXISTS reading_log (
     -- keeping the high-water mark separately is what lets progress be reported
     -- without it regressing mid-session.
     max_pos     INTEGER,
+    -- Position changes seen, so a row still on 1 is a book that was opened and
+    -- never paged. Those stay out of the reported history (see reading_history).
     events      INTEGER DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS reading_log_book ON reading_log(book_id, updated_at);
@@ -1440,7 +1442,11 @@ SESSION_GAP = 30 * 60
 
 def log_reading(book_id, position):
     """Record a reading report into the history log, coalescing it into the most
-    recent session for this book if that session is still recent (< SESSION_GAP)."""
+    recent session for this book if that session is still recent (< SESSION_GAP).
+
+    The first report of a session only opens it -- it says where the sitting began,
+    not that anyone read anything. Until the position actually moves the session
+    stays provisional and reading_history() leaves it out; see there."""
     now = time.time()
     with conn() as c:
         r = c.execute("SELECT id, updated_at, end_pos FROM reading_log "
@@ -1468,10 +1474,17 @@ def reading_history(limit=200, start=None, end=None) -> list[dict]:
     """Recent reading sessions across all books, newest first, with book title +
     page count for display. Sessions whose book was deleted are dropped (JOIN).
 
+    Only sessions that turned a page are reported. Opening a book still writes a
+    row -- it is the anchor a later turn gets timed from, so the sitting starts
+    when the reader sat down rather than at their second page -- but on its own
+    it is someone glancing at the library, not reading. events counts position
+    changes, so `events > 1` is exactly "the page moved at least once"; a
+    provisional row appears in the history the moment it does.
+
     start/end are optional epoch-second bounds. A session is a stretch of time,
     not an instant, so the window selects sessions that *overlap* it: one that
     begins before `start` but runs past it still counts. `end` is exclusive."""
-    where, params = ["1=1"], []
+    where, params = ["l.events > 1"], []
     if start is not None:
         where.append("l.updated_at >= ?")
         params.append(start)
