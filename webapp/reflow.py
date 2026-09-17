@@ -42,6 +42,13 @@ def _tokens(text: str) -> list[str]:
 _OPENERS = "*`\\“‘\"'(«¿¡[—–"
 _LINE_PREFIX = " #>"
 _TRAILERS = "*`\\.,!?;:…”’\"')]—–"
+# ...and some of those the book sets off with a space ("his wide, mad eyes —",
+# "to ignore it completely . . ."), where a span that stopped at the last word
+# would leave the page hanging. Deliberately not the markers: a space before an
+# asterisk means an emphasis run OPENING on the next page.
+_SPACED_TRAILERS = ".!?…—–"
+_TRAIL = re.compile("(?:[" + re.escape(_TRAILERS) + "]"
+                    + "| (?=[" + re.escape(_SPACED_TRAILERS) + "]))*")
 # A page's slice runs from its first word to its last, so a scene break sitting
 # between two pages falls outside both. This is the gap that holds nothing else:
 # the divider belongs to the page about to start.
@@ -55,9 +62,7 @@ def _expand(text: str, start: int, end: int) -> tuple[int, int]:
     line_start = text.rfind("\n", 0, start) + 1
     if text[line_start:start] and not text[line_start:start].strip(_LINE_PREFIX):
         start = line_start
-    while end < len(text) and text[end] in _TRAILERS:
-        end += 1
-    return start, end
+    return start, _TRAIL.match(text, end).end()
 
 
 def _key(text: str) -> str:

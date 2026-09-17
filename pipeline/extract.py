@@ -18,10 +18,10 @@ from .config import PDF, PAGES, LABEL, BODY_PAGES, IS_EPUB, CHAPTERS
 
 # ---------------- EPUB ----------------
 
-def _xhtml_to_text(raw: str, dividers=()) -> str:
+def _xhtml_to_text(raw: str, dividers=(), breaks=()) -> str:
     """One XHTML document as story markup (see pipeline/markup.py): paragraph
     breaks plus the emphasis, headings and block quotes the source marks up."""
-    return markup.from_html(raw, dividers)
+    return markup.from_html(raw, dividers, breaks)
 
 
 _IMG = re.compile(r"<img\b[^>]*>", re.I)
@@ -48,6 +48,120 @@ def _divider_images(docs: list[str]) -> set[str]:
                 uses[name] = uses.get(name, 0) + 1
     return {name for name, n in uses.items()
             if n >= _ORNAMENT_USES or _ORNAMENT.search(name)}
+
+
+# ---- scene breaks the book sets in type rather than drawing ----
+# Print marks a break between two sections by giving the paragraph that follows
+# it extra air and no first-line indent. The stylesheet says which class that is,
+# so we ask it instead of guessing: an empty paragraph is NOT a usable signal --
+# the same books use one to space a letter or a stanza of verse.
+
+_CSS_RULE = re.compile(r"([^{}@]+)\{([^{}]*)\}")
+_LENGTH = re.compile(r"^(-?[\d.]+)\s*([a-z%]*)$")
+# rough px equivalents -- enough to compare one paragraph's spacing with another's
+_UNIT_PX = {"": 1.0, "px": 1.0, "em": 16.0, "rem": 16.0, "ex": 8.0, "pt": 16 / 12,
+            "pc": 16.0, "%": 16.0, "in": 96.0, "cm": 37.8, "mm": 3.78}
+# a break is set with space alone: a class that also changes the font, the
+# alignment or the case is a heading, a caption or a block extract
+_SPACING_ONLY = {"text-indent", "margin", "margin-top", "margin-bottom",
+                 "margin-left", "margin-right", "display", "line-height",
+                 "widows", "orphans", "page-break-inside"}
+# ...and it is the space ABOVE AN ORDINARY PARAGRAPH that makes it one, by this
+# much. Books converted by calibre give every paragraph a small top margin.
+_BREAK_GAP_PX = 8.0
+# A class that almost always dresses a document's opening paragraph is the start
+# of a CHAPTER, set the same way. It divides nothing inside the chapter.
+_OPENER_WITHIN = 2      # paragraphs into the document
+_OPENER_SHARE = 0.8
+
+
+def _px(value) -> float | None:
+    m = _LENGTH.match((value or "").strip().lower())
+    return float(m.group(1)) * _UNIT_PX.get(m.group(2), 1.0) if m else None
+
+
+def _declarations(body: str) -> dict:
+    out = {}
+    for decl in body.split(";"):
+        prop, sep, value = decl.partition(":")
+        if sep:
+            out[prop.strip().lower()] = value.strip().lower()
+    return out
+
+
+def _margin_top(decls: dict) -> float | None:
+    if "margin-top" in decls:
+        return _px(decls["margin-top"])
+    parts = (decls.get("margin") or "").split()
+    return _px(parts[0]) if parts else None
+
+
+def _css_rules(css: str) -> list[tuple[str, dict]]:
+    """(selector, declarations) for every rule in the book's stylesheets, one
+    entry per comma-separated selector."""
+    css = re.sub(r"/\*.*?\*/", " ", css, flags=re.S)
+    return [(sel.strip(), _declarations(body))
+            for raw_sel, body in _CSS_RULE.findall(css)
+            for sel in raw_sel.split(",")]
+
+
+def _body_paragraph(rules: list[tuple[str, dict]], docs: list[str]) -> dict:
+    """How the book sets an ordinary paragraph: the class most of its <p> carry,
+    resolved through the stylesheet."""
+    uses: dict[str, int] = {}
+    for raw in docs:
+        for tag in re.findall(r"<p\b[^>]*>", raw):
+            m = re.search(r'class="([^"]*)"', tag)
+            name = (m.group(1).split() or [""])[0] if m else ""
+            uses[name] = uses.get(name, 0) + 1
+    cls = max(uses, key=uses.get) if uses else ""
+    applies = {"p"} | ({f"p.{cls}", f".{cls}"} if cls else set())
+    decls: dict = {}
+    for sel, d in rules:
+        if sel in applies:
+            decls.update(d)
+    return decls
+
+
+def _paragraph_classes(raw: str) -> list[list[str]]:
+    """The classes on each <p> of one document, in order."""
+    out = []
+    for tag in re.findall(r"<p\b[^>]*>", raw):
+        m = re.search(r'class="([^"]*)"', tag)
+        out.append(m.group(1).split() if m else [])
+    return out
+
+
+def _chapter_opener(name: str, docs: list[str]) -> bool:
+    """True if this class is nearly always on a document's first paragraph."""
+    opening = total = 0
+    for raw in docs:
+        for i, names in enumerate(_paragraph_classes(raw)):
+            if name in names:
+                total += 1
+                opening += i <= _OPENER_WITHIN
+    return bool(total) and opening / total >= _OPENER_SHARE
+
+
+def _break_classes(css: str, docs: list[str]) -> set[str]:
+    """Paragraph classes that start a new section of a chapter.
+
+    Empty unless the book indents its paragraphs in the first place -- where it
+    doesn't (calibre conversions, Gregor), "no indent" distinguishes nothing and
+    every paragraph would look like a break."""
+    rules = _css_rules(css)
+    body = _body_paragraph(rules, docs)
+    if not (_px(body.get("text-indent")) or 0) > 0:
+        return set()
+    floor = (_margin_top(body) or 0) + _BREAK_GAP_PX
+    out = set()
+    for sel, decls in rules:
+        m = re.fullmatch(r"(?:p)?\.([A-Za-z0-9_-]+)", sel)
+        if not m or set(decls) - _SPACING_ONLY:
+            continue
+        if _px(decls.get("text-indent")) == 0 and (_margin_top(decls) or 0) >= floor:
+            out.add(m.group(1))
+    return {name for name in out if not _chapter_opener(name, docs)}
 
 
 def _norm(base: str, src: str) -> str:
@@ -84,10 +198,14 @@ def _epub_units(path: Path) -> list[tuple[str, str]]:
             docs.append((p, z.read(p).decode("utf-8", "ignore")))
         except KeyError:
             continue
-    # which images are ornaments is a question about the whole book, not one
+    # what marks a scene break is a question about the whole book, not one
     # document, so every spine document is read before any of them is converted
-    dividers = _divider_images([raw for _p, raw in docs])
-    return [(p, _xhtml_to_text(raw, dividers)) for p, raw in docs]
+    raws = [raw for _p, raw in docs]
+    dividers = _divider_images(raws)
+    css = "\n".join(z.read(n).decode("utf-8", "ignore")
+                    for n in z.namelist() if n.lower().endswith(".css"))
+    breaks = _break_classes(css, raws)
+    return [(p, _xhtml_to_text(raw, dividers, breaks)) for p, raw in docs]
 
 
 def _epub_toc_titles(path: Path) -> dict[str, str]:

@@ -117,3 +117,33 @@ def test_reflow_recovers_a_scene_break_that_falls_between_two_pages(monkeypatch,
     assert pages[0]["read_text"] == "## One\n\nHe was a dragon, and no mistake."
     assert pages[1]["read_text"].startswith("---\n\nThe others were washing.")
     assert pages[2]["read_text"] == "---\n\nThen it was morning."
+
+
+def test_reflow_keeps_the_punctuation_a_page_breaks_off_on(monkeypatch, tmp_path):
+    """A page that stops mid-sentence stops on a dash or an ellipsis, and the
+    source often sets that off with a space. The span runs word to word, so
+    without help the page would come back a beat short."""
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("STORY_APP_DB", str(tmp_path / "storyteller.db"))
+    import webapp.db
+    db = importlib.reload(webapp.db)
+    import webapp.reflow
+    reflow = importlib.reload(webapp.reflow)
+    db.init()
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        z.writestr("META-INF/container.xml",
+                   '<container><rootfiles><rootfile full-path="OEBPS/content.opf"/>'
+                   "</rootfiles></container>")
+        z.writestr("OEBPS/content.opf",
+                   '<package><manifest><item id="c1" href="c1.xhtml"/></manifest>'
+                   '<spine><itemref idref="c1"/></spine></package>')
+        z.writestr("OEBPS/c1.xhtml",
+                   "<html><body><p>He crept toward the door —</p>"
+                   "<p>“AAAAARRRGH!”</p></body></html>")
+    bid = db.create_book("The Book", "", "book.epub", "watercolor", 200,
+                         "application/epub+zip", out.getvalue())
+    db.add_chapter(bid, 0, "One", 0, [])
+    db.add_page(bid, 0, 0, "Creeping", "He crept toward the door —", "", "", [])
+    reflow.reflow_book(bid)
+    assert db.get_pages(bid)[0]["read_text"] == "He crept toward the door —"

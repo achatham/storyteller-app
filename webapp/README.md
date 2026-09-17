@@ -123,11 +123,23 @@ Reads `GEMINI_API_KEY` from `.env` (same as the CLI pipeline).
   `pipeline/markup.py`. Every reader renders it (`markup.to_html`, or its browser
   twin `static/markup.js`, which the static export inlines); everything that feeds
   text to a model strips it with `markup.plain`. Keep the Python and JS renderers
-  in step. A scene break is whatever the source used for one: an `<hr>`, or — as
-  print more often does — a little ornament image repeated all through the book
-  (Fablehaven's dingbat). `extract._divider_images` picks those out by the fact
-  that an ornament recurs while an illustration does not; without that the two
-  sections run together and the break is simply gone from the page.
+  in step.
+- **A scene break is whatever the source used for one.** Print has four ways of
+  breaking a chapter into sections, and every book in the library uses a
+  different one, so extraction reads the book before converting it:
+
+  | The source does this | Recovered by |
+  | :--- | :--- |
+  | `<hr/>` | the parser directly |
+  | an ornament image, over and over (Fablehaven's dingbat) | `extract._divider_images` — an ornament recurs, an illustration doesn't |
+  | an ornament line: `•••`, `■ ■ ■`, a row of dashes | `markup._ORNAMENT_LINE` — a block with no prose in it |
+  | nothing but the setting of the next paragraph: space above, no indent (Harry Potter's `p.break`) | `extract._break_classes` — asks the book's own stylesheet |
+
+  The last one needs the whole stylesheet, not one rule: a class only means "new
+  section" if it has *more* air than an ordinary paragraph of that book, and only
+  in a book that indents its paragraphs at all — otherwise every paragraph of a
+  calibre conversion qualifies. An empty `<p>` is deliberately NOT a signal; the
+  same books use one to space a letter or a stanza of verse.
 
 ### Reformatting a book processed before this
 

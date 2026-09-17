@@ -51,6 +51,11 @@ _SPAN = re.compile(
 
 _HEADING = re.compile(r"(#{1,6})\s+(.*)")
 _QUOTE = re.compile(r"^\s*>\s?")
+# A line the book uses as the ornament between two sections -- bullets, squares,
+# stars, a rule of dashes. It is never prose, whatever it is made of, and often
+# it is a glyph the reader's font hasn't got ("■ ■ ■"). Markers arrive escaped
+# (see `escape`), so allow a backslash in front of each character.
+_ORNAMENT_LINE = re.compile(r"(?:\\?[*·•●○◦■□▪▫◆◇★☆✦✧❖⁂~_+§†‡=–—-]|[ \t])+")
 
 
 # ---------------- HTML -> markup ----------------
@@ -90,9 +95,12 @@ def from_plain(text: str) -> str:
 class _Reader(HTMLParser):
     """Turn one XHTML document into story markup. `dividers` holds the file names
     of the book's ornament images (see `pipeline/extract._divider_images`), which
-    stand in for a scene break rather than illustrating anything."""
+    stand in for a scene break rather than illustrating anything; `breaks` holds
+    the paragraph classes its stylesheet sets a section off with (see
+    `pipeline/extract._break_classes`), which mark a break by how the paragraph
+    AFTER it is set rather than with anything of their own."""
 
-    def __init__(self, dividers=()):
+    def __init__(self, dividers=(), breaks=()):
         super().__init__(convert_charrefs=True)
         self.blocks: list[str] = []
         self.cur = ""
@@ -101,6 +109,7 @@ class _Reader(HTMLParser):
         self.pre = 0
         self.drop = 0
         self.dividers = set(dividers)
+        self.breaks = set(breaks)
         self.ornament = 0
         self.open: list[tuple[str, str, int]] = []   # (tag, marker, offset in cur)
 
@@ -157,6 +166,10 @@ class _Reader(HTMLParser):
             self.heading = 0
             return
         self.ornament = 0    # an ornament beside text is decoration, not a break
+        if len(lines) == 1 and not self.pre and _ORNAMENT_LINE.fullmatch(lines[0].strip()):
+            self.blocks.append("---")      # the ornament IS the break
+            self.heading = 0
+            return
         if self.pre:
             lines = [ln + "\\" for ln in lines[:-1]] + lines[-1:]
         if self.heading:
@@ -193,6 +206,12 @@ class _Reader(HTMLParser):
             return
         if tag in _BLOCK:
             self._flush()
+            # a paragraph the book sets with space above it and no indent starts a
+            # new section -- but inside a quotation that is just how a letter is
+            # laid out, not a break in the story
+            if (tag == "p" and not self.quote
+                    and self.breaks.intersection((dict(attrs).get("class") or "").split())):
+                self.blocks.append("---")
             if tag == "blockquote":
                 self.quote += 1
             elif tag == "pre":
@@ -241,10 +260,11 @@ class _Reader(HTMLParser):
         return "\n\n".join(out)
 
 
-def from_html(raw: str, dividers=()) -> str:
+def from_html(raw: str, dividers=(), breaks=()) -> str:
     """Story markup for one XHTML/HTML document, preserving emphasis, headings,
-    block quotes and hard line breaks. Never raises on malformed markup."""
-    r = _Reader(dividers)
+    block quotes, scene breaks and hard line breaks. Never raises on malformed
+    markup."""
+    r = _Reader(dividers, breaks)
     try:
         r.feed(raw or "")
         r.close()

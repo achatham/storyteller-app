@@ -162,3 +162,30 @@ def test_an_ornament_beside_text_is_decoration_not_a_break():
                             '<figure><img src="orn.png"/></figure></blockquote>'
                             "<p>Harry reread the letter.</p>",
                             {"orn.png"}) == ("> Yours sincerely,\n\nHarry reread the letter.")
+
+
+def test_a_line_of_ornament_is_a_scene_break():
+    # the ornament between two sections, which the reader's font may not even
+    # have a glyph for ("■ ■ ■" in The Westing Game, "•••" in The Martian)
+    text = markup.from_html("<p>He left.</p><p>•••</p><p>She stayed.</p>")
+    assert text == "He left.\n\n---\n\nShe stayed."
+    assert markup.from_html("<p>He left.</p><p>■ ■ ■</p><p>She stayed.</p>") == text
+    # ...and one that merely repeats a rule the source already drew is not a
+    # second break
+    assert markup.from_html("<p>He left.</p><hr/><p>* * *</p><p>She stayed.</p>") == text
+
+
+def test_a_paragraph_the_book_sets_apart_starts_a_new_section():
+    # print marks a scene break by how the NEXT paragraph is set: space above it
+    # and no first-line indent, which the stylesheet names (Harry Potter's
+    # p.break). The class comes from pipeline/extract._break_classes.
+    html = ('<p>Aunt Petunia had to run and get him a large brandy.</p>'
+            '<p class="break">Harry lay in his dark cupboard much later.</p>')
+    assert markup.from_html(html, breaks={"break"}) == (
+        "Aunt Petunia had to run and get him a large brandy.\n\n---\n\n"
+        "Harry lay in his dark cupboard much later.")
+    assert "---" not in markup.from_html(html)
+    # inside a quotation the same setting is just how a letter is laid out
+    assert "---" not in markup.from_html(
+        '<blockquote><p>Dear Harry,</p><p class="break">Yours,</p></blockquote>',
+        breaks={"break"})
