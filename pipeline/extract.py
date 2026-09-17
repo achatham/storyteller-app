@@ -18,10 +18,10 @@ from .config import PDF, PAGES, LABEL, BODY_PAGES, IS_EPUB, CHAPTERS
 
 # ---------------- EPUB ----------------
 
-def _xhtml_to_text(raw: str, dividers=(), breaks=()) -> str:
+def _xhtml_to_text(raw: str, style=None) -> str:
     """One XHTML document as story markup (see pipeline/markup.py): paragraph
     breaks plus the emphasis, headings and block quotes the source marks up."""
-    return markup.from_html(raw, dividers, breaks)
+    return markup.from_html(raw, style)
 
 
 _IMG = re.compile(r"<img\b[^>]*>", re.I)
@@ -164,6 +164,71 @@ def _break_classes(css: str, docs: list[str]) -> set[str]:
     return {name for name in out if not _chapter_opener(name, docs)}
 
 
+# ---- emphasis the book sets in CSS rather than with <i> or <b> ----
+# InDesign and calibre both export <span class="italic"> instead, and a book that
+# does gets NO emphasis at all otherwise -- The Martian alone loses 495 runs.
+
+# an emphasis class changes the face and nothing else; one that also changes the
+# size is the big first words of a chapter, not a word the author stressed
+_FACE_ONLY = {"font-style", "font-weight", "display"}
+_BOLD = re.compile(r"bold|[6-9]00")
+_BLOCK_TAGS = {"p", "div", "blockquote", "h1", "h2", "h3", "h4", "h5", "h6"}
+
+
+def _marker(decls: dict) -> str | None:
+    italic = decls.get("font-style") == "italic"
+    bold = bool(_BOLD.fullmatch(decls.get("font-weight") or ""))
+    return "***" if italic and bold else "**" if bold else "*" if italic else None
+
+
+def _displays(rules: list[tuple[str, dict]]) -> dict[str, set]:
+    """Every `display` a class is given, by any rule that mentions it -- a caption
+    is `span.caption` in the text and `display: block` in a more specific rule,
+    and it is the second one that says it is not a stressed word."""
+    out: dict[str, set] = {}
+    for sel, decls in rules:
+        if "display" not in decls:
+            continue
+        for m in re.finditer(r"\.([A-Za-z0-9_-]+)", sel):
+            out.setdefault(m.group(1), set()).add(decls["display"])
+    return out
+
+
+def _emphasis_classes(css: str) -> tuple[dict, dict]:
+    """(inline, block) class -> marker.
+
+    `inline` is emphasis: a class that only changes the face, on a tag that isn't
+    a block. `block` is a paragraph set in italics outright -- a letter, an
+    epigraph -- where the class may set its size and margins too. Bold is not
+    taken there: a whole bold paragraph is a heading, not a stressed one."""
+    inline, block = {}, {}
+    rules = _css_rules(css)
+    displays = _displays(rules)
+    for sel, decls in rules:
+        mark = _marker(decls)
+        if not mark:
+            continue
+        m = re.fullmatch(r"(\w+)?\.([A-Za-z0-9_-]+)", sel)
+        if not m:
+            continue
+        tag, name = m.group(1), m.group(2)
+        if (tag not in _BLOCK_TAGS and not set(decls) - _FACE_ONLY
+                and displays.get(name, {"inline"}) == {"inline"}):
+            inline[name] = mark
+        if mark == "*" and tag in (None, "p", "div"):
+            block[name] = mark
+    return inline, block
+
+
+def _book_style(css: str, docs: list[str]) -> markup.Style:
+    """How THIS book says the things story markup can carry. Worked out once from
+    the whole book: one document never holds enough to tell."""
+    inline, block = _emphasis_classes(css)
+    return markup.Style(dividers=frozenset(_divider_images(docs)),
+                        breaks=frozenset(_break_classes(css, docs)),
+                        inline=inline, block=block)
+
+
 def _norm(base: str, src: str) -> str:
     """Resolve a TOC/spine href to a normalized archive path (no #fragment)."""
     src = src.split("#", 1)[0]
@@ -198,14 +263,14 @@ def _epub_units(path: Path) -> list[tuple[str, str]]:
             docs.append((p, z.read(p).decode("utf-8", "ignore")))
         except KeyError:
             continue
-    # what marks a scene break is a question about the whole book, not one
-    # document, so every spine document is read before any of them is converted
+    # what marks a scene break -- or emphasis -- is a question about the whole
+    # book, not one document, so every spine document (and every stylesheet) is
+    # read before any of them is converted
     raws = [raw for _p, raw in docs]
-    dividers = _divider_images(raws)
     css = "\n".join(z.read(n).decode("utf-8", "ignore")
                     for n in z.namelist() if n.lower().endswith(".css"))
-    breaks = _break_classes(css, raws)
-    return [(p, _xhtml_to_text(raw, dividers, breaks)) for p, raw in docs]
+    style = _book_style(css, raws)
+    return [(p, _xhtml_to_text(raw, style)) for p, raw in docs]
 
 
 def _epub_toc_titles(path: Path) -> dict[str, str]:

@@ -29,6 +29,19 @@ can never end mid-emphasis and leak a stray marker.
 import html as _html
 import re
 from html.parser import HTMLParser
+from typing import NamedTuple
+
+
+class Style(NamedTuple):
+    """What one book's own markup and stylesheet say its conventions are, worked
+    out once for the whole book by `pipeline/extract._book_style`. Different
+    publishers say the same things in completely different ways, so the reader
+    can only be told; it cannot guess per document."""
+
+    dividers: frozenset = frozenset()   # image file names that mean a scene break
+    breaks: frozenset = frozenset()     # <p> classes that start a new section
+    inline: dict = {}                   # class -> marker: emphasis set in CSS, not <i>
+    block: dict = {}                    # <p> class -> marker: a paragraph set in italics
 
 # characters that mean something in this format, so a book that uses them
 # literally has them backslash-escaped on the way in
@@ -73,6 +86,23 @@ _BLOCK = {"p", "div", "section", "article", "blockquote", "li", "ul", "ol",
           "h1", "h2", "h3", "h4", "h5", "h6", "aside", "header", "footer"}
 
 
+def _unglue(text: str) -> str:
+    """Drop a run the source glued into the middle of a word.
+
+    A drop cap is written `<span class="bold">G</span>regor`, which is not
+    emphasis at all -- and a marker inside a word splits it in two for everything
+    that matches on words (`webapp/reflow`, the illustration anchors)."""
+    def fix(m):
+        before = text[m.start() - 1] if m.start() else ""
+        after = text[m.end()] if m.end() < len(text) else ""
+        return m.group(0).strip("*`") if before.isalnum() or after.isalnum() else m.group(0)
+    return _SPAN.sub(fix, text)
+
+
+def _classes(attrs) -> list[str]:
+    return (dict(attrs).get("class") or "").split()
+
+
 def escape(text: str) -> str:
     """Escape the marker characters in text that came from the book itself."""
     return re.sub(r"([" + re.escape("\\*`") + r"])", r"\\\1", text)
@@ -93,14 +123,10 @@ def from_plain(text: str) -> str:
 
 
 class _Reader(HTMLParser):
-    """Turn one XHTML document into story markup. `dividers` holds the file names
-    of the book's ornament images (see `pipeline/extract._divider_images`), which
-    stand in for a scene break rather than illustrating anything; `breaks` holds
-    the paragraph classes its stylesheet sets a section off with (see
-    `pipeline/extract._break_classes`), which mark a break by how the paragraph
-    AFTER it is set rather than with anything of their own."""
+    """Turn one XHTML document into story markup, told by `style` what this
+    particular book's conventions are (see `Style`)."""
 
-    def __init__(self, dividers=(), breaks=()):
+    def __init__(self, style: Style | None = None):
         super().__init__(convert_charrefs=True)
         self.blocks: list[str] = []
         self.cur = ""
@@ -108,9 +134,9 @@ class _Reader(HTMLParser):
         self.quote = 0
         self.pre = 0
         self.drop = 0
-        self.dividers = set(dividers)
-        self.breaks = set(breaks)
+        self.style = style or Style()
         self.ornament = 0
+        self.block_marker = None
         self.open: list[tuple[str, str, int]] = []   # (tag, marker, offset in cur)
 
     # -- inline emphasis --------------------------------------------------
@@ -166,6 +192,7 @@ class _Reader(HTMLParser):
             self.heading = 0
             return
         self.ornament = 0    # an ornament beside text is decoration, not a break
+        marker, self.block_marker = self.block_marker, None
         if len(lines) == 1 and not self.pre and _ORNAMENT_LINE.fullmatch(lines[0].strip()):
             self.blocks.append("---")      # the ornament IS the break
             self.heading = 0
@@ -179,7 +206,11 @@ class _Reader(HTMLParser):
             body = "\n".join("> " + ln for ln in lines)
         else:
             body = "\n".join(_escape_line_start(ln) for ln in lines)
-        self.blocks.append(body)
+            # a paragraph the book sets in italics outright (a letter, an
+            # epigraph) -- unless it already holds a run, which this would nest
+            if marker and not _SPAN.search(body):
+                body = marker + body + marker
+        self.blocks.append(_unglue(body))
         self.heading = 0
 
     # -- HTMLParser hooks -------------------------------------------------
@@ -198,11 +229,21 @@ class _Reader(HTMLParser):
             return
         if tag == "img":
             src = dict(attrs).get("src") or ""
-            if src.rsplit("/", 1)[-1] in self.dividers:
+            if src.rsplit("/", 1)[-1] in self.style.dividers:
                 self.ornament += 1
             return
         if tag in _INLINE:
             self._open_inline(tag, _INLINE[tag])
+            return
+        if tag not in _BLOCK:
+            marker = next((m for c in _classes(attrs)
+                           if (m := self.style.inline.get(c))), None)
+            if marker:
+                self._open_inline(tag, marker)
+            elif any(t == tag for t, _m, _at in self.open):
+                # a plain <span> inside a styled one has to eat its own </span>,
+                # or the run would close early -- kobo wraps every sentence in one
+                self._open_inline(tag, "")
             return
         if tag in _BLOCK:
             self._flush()
@@ -210,8 +251,11 @@ class _Reader(HTMLParser):
             # new section -- but inside a quotation that is just how a letter is
             # laid out, not a break in the story
             if (tag == "p" and not self.quote
-                    and self.breaks.intersection((dict(attrs).get("class") or "").split())):
+                    and self.style.breaks.intersection(_classes(attrs))):
                 self.blocks.append("---")
+            if tag == "p":
+                self.block_marker = next((m for c in _classes(attrs)
+                                          if (m := self.style.block.get(c))), None)
             if tag == "blockquote":
                 self.quote += 1
             elif tag == "pre":
@@ -225,7 +269,9 @@ class _Reader(HTMLParser):
             return
         if self.drop:
             return
-        if tag in _INLINE:
+        if tag not in _BLOCK:
+            # _INLINE, or a tag opened as a run because its class carries a face
+            # (and the plain ones opened to shadow those -- see handle_starttag)
             self._close_inline(tag)
             return
         if tag in _BLOCK:
@@ -260,11 +306,11 @@ class _Reader(HTMLParser):
         return "\n\n".join(out)
 
 
-def from_html(raw: str, dividers=(), breaks=()) -> str:
+def from_html(raw: str, style: Style | None = None) -> str:
     """Story markup for one XHTML/HTML document, preserving emphasis, headings,
     block quotes, scene breaks and hard line breaks. Never raises on malformed
     markup."""
-    r = _Reader(dividers, breaks)
+    r = _Reader(style)
     try:
         r.feed(raw or "")
         r.close()

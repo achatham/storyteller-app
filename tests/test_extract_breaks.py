@@ -41,3 +41,23 @@ def test_divider_images_are_the_ones_used_over_and_over():
            '<img src="../images/dingbat.png"/><p>Four.</p>'
            '<img src="images/plate1.jpg"/><p>Five.</p>')
     assert extract._divider_images([doc]) == {"dingbat.png"}
+
+
+EMPHASIS_CSS = """
+span.italic { font-style: italic; font-weight: normal; }
+.bold { display: inline; font-weight: bold; }
+.chapterOpenerFirstLetters { display: inline; font-weight: bold; font-size: x-large; }
+.caption { font-weight: bold; }
+div.figcenter span.caption { display: block; }
+p.Letter-middle { font-style: italic; font-size: 0.979em; margin-bottom: 0; }
+p.chapterHead { font-weight: bold; font-size: 1.4em; }
+"""
+
+
+def test_emphasis_classes_are_the_ones_that_only_change_the_face():
+    inline, block = extract._emphasis_classes(EMPHASIS_CSS)
+    # the drop cap's big first letters and the caption (block elsewhere in the
+    # stylesheet) are not stressed words, whatever their weight
+    assert inline == {"italic": "*", "bold": "**"}
+    # a paragraph set in italics outright is one; a bold one is a heading
+    assert block == {"Letter-middle": "*"}

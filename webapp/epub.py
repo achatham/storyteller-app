@@ -58,10 +58,16 @@ def _esc(text: str) -> str:
     return html.escape(text or "", quote=False)
 
 
-def _paragraphs(text: str) -> str:
+def _paragraphs(text: str, opening: bool) -> str:
     """Same rendering as the reader/exporter: the page's story markup as HTML
-    (paragraphs, headings, emphasis, quotes -- see pipeline/markup.py)."""
-    return markup.to_html(text, first_class="first")
+    (paragraphs, headings, emphasis, quotes -- see pipeline/markup.py).
+
+    `opening` suppresses the first line's indent, the way print sets the first
+    paragraph of anything. Only where something really opens: a run of text
+    resumed after an illustration, not one resumed at the next PAGE -- a page is
+    a unit of illustration, invisible in the reading, and an unindented paragraph
+    in indented prose reads as a section break that isn't there."""
+    return markup.to_html(text, first_class="first" if opening else "")
 
 
 def _to_jpeg(data: bytes, max_w: int, quality: int) -> bytes:
@@ -120,13 +126,16 @@ def build_epub(book_id: int, max_w: int = DEFAULT_MAXW,
         if not nodes:
             continue
         parts = [f'<h1 class="chapter">{_esc(ch["title"] or "")}</h1>']
+        opening = True      # the chapter's own first paragraph
         for n in nodes:
             if n["type"] == "text":
-                parts.append(_paragraphs(n["text"]))
+                parts.append(_paragraphs(n["text"], opening))
+                opening = False
             else:
                 parts.append(
                     f'<figure><img src="{n["src"]}" alt="{_esc(n.get("alt") or "")}"/>'
                     f'</figure>')
+                opening = True
         chapters.append({"file": f"chap{ci + 1}.xhtml",
                          "title": ch["title"] or f"Chapter {ci + 1}",
                          "body": "\n".join(parts)})

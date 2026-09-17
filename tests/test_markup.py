@@ -138,7 +138,7 @@ def test_an_ornament_between_sections_is_a_scene_break():
     html = ('<p>He could be sneakier than Kendra knew.</p>'
             '<div><div><span><img src="image/dingbat-11.png" alt=""/></span></div></div>'
             '<p>The fairy balanced on a twig.</p>')
-    assert markup.from_html(html, {"dingbat-11.png"}) == (
+    assert markup.from_html(html, markup.Style(dividers={"dingbat-11.png"})) == (
         "He could be sneakier than Kendra knew.\n\n---\n\nThe fairy balanced on a twig.")
     # an image nobody identified as an ornament is still just dropped
     assert markup.from_html(html) == ("He could be sneakier than Kendra knew.\n\n"
@@ -150,18 +150,19 @@ def test_a_divider_with_nothing_before_it_is_dropped():
     # a rule before the first paragraph divides nothing
     text = markup.from_html('<div><img src="orn.png"/></div><hr/><p>One.</p>'
                             '<p>Two.</p><hr/><div><img src="orn.png"/></div>',
-                            {"orn.png"})
+                            markup.Style(dividers={"orn.png"}))
     assert text == "One.\n\nTwo."
 
 
 def test_an_ornament_beside_text_is_decoration_not_a_break():
     assert markup.from_html('<p><img src="orn.png"/>A dropped cap.</p>',
-                            {"orn.png"}) == "A dropped cap."
+                            markup.Style(dividers={"orn.png"})) == "A dropped cap."
     # ...and a signature at the foot of a letter is not a scene break either
     assert markup.from_html("<blockquote><p>Yours sincerely,</p>"
                             '<figure><img src="orn.png"/></figure></blockquote>'
                             "<p>Harry reread the letter.</p>",
-                            {"orn.png"}) == ("> Yours sincerely,\n\nHarry reread the letter.")
+                            markup.Style(dividers={"orn.png"})) == (
+        "> Yours sincerely,\n\nHarry reread the letter.")
 
 
 def test_a_line_of_ornament_is_a_scene_break():
@@ -181,11 +182,35 @@ def test_a_paragraph_the_book_sets_apart_starts_a_new_section():
     # p.break). The class comes from pipeline/extract._break_classes.
     html = ('<p>Aunt Petunia had to run and get him a large brandy.</p>'
             '<p class="break">Harry lay in his dark cupboard much later.</p>')
-    assert markup.from_html(html, breaks={"break"}) == (
+    assert markup.from_html(html, markup.Style(breaks={"break"})) == (
         "Aunt Petunia had to run and get him a large brandy.\n\n---\n\n"
         "Harry lay in his dark cupboard much later.")
     assert "---" not in markup.from_html(html)
     # inside a quotation the same setting is just how a letter is laid out
     assert "---" not in markup.from_html(
         '<blockquote><p>Dear Harry,</p><p class="break">Yours,</p></blockquote>',
-        breaks={"break"})
+        markup.Style(breaks={"break"}))
+
+
+def test_emphasis_the_stylesheet_carries_instead_of_a_tag():
+    # InDesign and calibre write <span class="italic"> rather than <i>, so the
+    # book's classes come in through Style (see pipeline/extract._emphasis_classes)
+    style = markup.Style(inline={"italic": "*", "bold": "**"}, block={"Letter": "*"})
+    html = ('<p>He said <span class="koboSpan"><span class="italic">no</span></span>'
+            ' to <span class="bold">that</span>.</p>')
+    assert markup.from_html(html, style) == "He said *no* to **that**."
+    # ...and a book that says nothing keeps every span as plain text, as before
+    assert markup.from_html(html) == "He said no to that."
+    # a whole paragraph the book sets in italics (a letter, an epigraph)
+    assert markup.from_html('<p class="Letter">Be vigilant.</p><p>She read it.</p>',
+                            style) == "*Be vigilant.*\n\nShe read it."
+
+
+def test_a_drop_cap_is_not_emphasis():
+    # "<b>G</b>regor" is how a drop cap is written; keeping it would split the
+    # word in two for everything that matches on words (reflow, image anchors)
+    assert markup.from_html("<p><b>G</b>regor had pressed his forehead.</p>") == \
+        "Gregor had pressed his forehead."
+    # a run that ends where the word does is ordinary emphasis and stays
+    assert markup.from_html("<p>The <b>Gregor</b> had pressed.</p>") == \
+        "The **Gregor** had pressed."

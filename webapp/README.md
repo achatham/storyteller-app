@@ -140,6 +140,17 @@ Reads `GEMINI_API_KEY` from `.env` (same as the CLI pipeline).
   in a book that indents its paragraphs at all — otherwise every paragraph of a
   calibre conversion qualifies. An empty `<p>` is deliberately NOT a signal; the
   same books use one to space a letter or a stanza of verse.
+- **Emphasis may not be a tag either.** InDesign and calibre export
+  `<span class="italic">` rather than `<i>`, and a book that does was losing every
+  stressed word — 495 of them in _The Martian_. `extract._emphasis_classes` reads
+  the face out of the stylesheet: a class that changes *only* the face is
+  emphasis, one that also changes the size is a chapter's big opening letters, and
+  a `<p>` class set in italics puts the whole paragraph in italics (a letter, an
+  epigraph — bold there is a heading, not a stressed paragraph). A run the source
+  glued inside a word (`<b>G</b>regor`, a drop cap) is dropped rather than kept:
+  it isn't emphasis, and a marker inside a word splits it for everything that
+  matches on words. All of this is worked out once per book into a
+  `markup.Style`, since one document never holds enough to tell.
 
 ### Reformatting a book processed before this
 
