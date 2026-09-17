@@ -18,10 +18,36 @@ from .config import PDF, PAGES, LABEL, BODY_PAGES, IS_EPUB, CHAPTERS
 
 # ---------------- EPUB ----------------
 
-def _xhtml_to_text(raw: str) -> str:
+def _xhtml_to_text(raw: str, dividers=()) -> str:
     """One XHTML document as story markup (see pipeline/markup.py): paragraph
     breaks plus the emphasis, headings and block quotes the source marks up."""
-    return markup.from_html(raw)
+    return markup.from_html(raw, dividers)
+
+
+_IMG = re.compile(r"<img\b[^>]*>", re.I)
+_SRC = re.compile(r"""\bsrc\s*=\s*["\']([^"\']+)["\']""", re.I)
+# ornaments the book names for what they are, however few times they are used
+_ORNAMENT = re.compile(r"dingbat|ornament|fleuron|flourish|divider|asterism|"
+                       r"(scene|section)[-_]?break", re.I)
+# ...and ones it doesn't: an ornament is the SAME image over and over, while a
+# real illustration (or the art at the head of a chapter) is used once
+_ORNAMENT_USES = 3
+
+
+def _divider_images(docs: list[str]) -> set[str]:
+    """File names of the book's scene-break ornaments -- the little images print
+    puts between two sections of a chapter, in place of a rule. Many epubs mark a
+    scene break with nothing else, so dropping the image drops the break: the two
+    sections then run together as one, which is what the reader sees."""
+    uses: dict[str, int] = {}
+    for raw in docs:
+        for tag in _IMG.findall(raw):
+            m = _SRC.search(tag)
+            if m:
+                name = m.group(1).split("#", 1)[0].rsplit("/", 1)[-1]
+                uses[name] = uses.get(name, 0) + 1
+    return {name for name, n in uses.items()
+            if n >= _ORNAMENT_USES or _ORNAMENT.search(name)}
 
 
 def _norm(base: str, src: str) -> str:
@@ -48,18 +74,20 @@ def _epub_units(path: Path) -> list[tuple[str, str]]:
         h = re.search(r'href="([^"]+)"', tag)
         if i and h:
             href[i.group(1)] = h.group(1)
-    units = []
+    docs = []
     for sid in spine:
         h = href.get(sid, "")
         if not h:
             continue
         p = _norm(base, h)
         try:
-            raw = z.read(p).decode("utf-8", "ignore")
+            docs.append((p, z.read(p).decode("utf-8", "ignore")))
         except KeyError:
             continue
-        units.append((p, _xhtml_to_text(raw)))
-    return units
+    # which images are ornaments is a question about the whole book, not one
+    # document, so every spine document is read before any of them is converted
+    dividers = _divider_images([raw for _p, raw in docs])
+    return [(p, _xhtml_to_text(raw, dividers)) for p, raw in docs]
 
 
 def _epub_toc_titles(path: Path) -> dict[str, str]:

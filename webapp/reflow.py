@@ -3,11 +3,12 @@
     python -m webapp.reflow <book_id> [--dry-run]
 
 Pages segmented before story markup existed hold flat text -- the source's
-italics, section headings and verse line breaks were dropped at extraction. Re-
-processing the book would recover them, but it re-runs segmentation and throws
-away every illustration. This does it for free instead: it re-extracts the
-source (no model calls), finds each stored page's text inside that fresh markup,
-and swaps in the marked-up slice. Pages, page numbering and images are untouched.
+italics, section headings, scene breaks and verse line breaks were dropped at
+extraction. Re-processing the book would recover them, but it re-runs
+segmentation and throws away every illustration. This does it for free instead:
+it re-extracts the source (no model calls), finds each stored page's text inside
+that fresh markup, and swaps in the marked-up slice. Pages, page numbering and
+images are untouched.
 
 A page is only rewritten when the new slice's words match the stored text's words
 EXACTLY -- so the worst case is a page left as it was, never a mangled one.
@@ -36,10 +37,15 @@ def _tokens(text: str) -> list[str]:
 
 # markers/quotes glued to the first word of a page, then the block prefix behind
 # them ("## ", "> "); the token match itself starts at the first WORD, so without
-# this a page that opens a heading or an italic run would lose its marker
-_OPENERS = "*`\\“‘\"'(«¿¡["
+# this a page that opens a heading or an italic run would lose its marker -- or,
+# where a page breaks off mid-sentence, the dash it breaks off on
+_OPENERS = "*`\\“‘\"'(«¿¡[—–"
 _LINE_PREFIX = " #>"
-_TRAILERS = "*`\\.,!?;:…”’\"')]"
+_TRAILERS = "*`\\.,!?;:…”’\"')]—–"
+# A page's slice runs from its first word to its last, so a scene break sitting
+# between two pages falls outside both. This is the gap that holds nothing else:
+# the divider belongs to the page about to start.
+_GAP_DIVIDER = re.compile(r"\s*(?:---\s*)+")
 
 
 def _expand(text: str, start: int, end: int) -> tuple[int, int]:
@@ -116,13 +122,15 @@ def reflow_book(book_id: int, apply: bool = True) -> dict:
             skipped.append(p["idx"])
             continue
         span = _expand(fresh, m.start(), m.end())
-        cursor = span[1]
+        gap, cursor = fresh[cursor:span[0]], span[1]
         # the old page boundaries were chosen on unformatted text, so a slice can
         # begin or end inside an emphasis run -- give the half-run its marker back
         slice_ = markup.balance(fresh[span[0]:span[1]].strip())
         if _key(markup.plain(slice_)) != "".join(kept):   # never trust a fuzzy match
             skipped.append(p["idx"])
             continue
+        if _GAP_DIVIDER.fullmatch(gap):
+            slice_ = "---\n\n" + slice_
         if slice_ != old:
             changed.append((p["idx"], slice_, len(toks) - len(kept)))
     if apply:

@@ -88,9 +88,11 @@ def from_plain(text: str) -> str:
 
 
 class _Reader(HTMLParser):
-    """Turn one XHTML document into story markup."""
+    """Turn one XHTML document into story markup. `dividers` holds the file names
+    of the book's ornament images (see `pipeline/extract._divider_images`), which
+    stand in for a scene break rather than illustrating anything."""
 
-    def __init__(self):
+    def __init__(self, dividers=()):
         super().__init__(convert_charrefs=True)
         self.blocks: list[str] = []
         self.cur = ""
@@ -98,6 +100,8 @@ class _Reader(HTMLParser):
         self.quote = 0
         self.pre = 0
         self.drop = 0
+        self.dividers = set(dividers)
+        self.ornament = 0
         self.open: list[tuple[str, str, int]] = []   # (tag, marker, offset in cur)
 
     # -- inline emphasis --------------------------------------------------
@@ -144,8 +148,15 @@ class _Reader(HTMLParser):
         while lines and not lines[-1].strip():
             lines.pop()
         if not lines:
+            # nothing but an ornament in this block -- that is the scene break,
+            # unless we are inside a quotation, where an image alone on a line is
+            # a signature at the foot of a letter and the story has not moved on
+            if self.ornament and not self.quote:
+                self.blocks.append("---")
+            self.ornament = 0
             self.heading = 0
             return
+        self.ornament = 0    # an ornament beside text is decoration, not a break
         if self.pre:
             lines = [ln + "\\" for ln in lines[:-1]] + lines[-1:]
         if self.heading:
@@ -171,6 +182,11 @@ class _Reader(HTMLParser):
         if tag == "hr":
             self._flush()
             self.blocks.append("---")
+            return
+        if tag == "img":
+            src = dict(attrs).get("src") or ""
+            if src.rsplit("/", 1)[-1] in self.dividers:
+                self.ornament += 1
             return
         if tag in _INLINE:
             self._open_inline(tag, _INLINE[tag])
@@ -213,13 +229,22 @@ class _Reader(HTMLParser):
 
     def result(self) -> str:
         self._flush()
-        return "\n\n".join(b for b in self.blocks if b.strip())
+        out: list[str] = []
+        for b in (b for b in self.blocks if b.strip()):
+            # a divider with nothing before it divides nothing -- it is the art at
+            # the head of the chapter, or a rule the document opened with
+            if b == "---" and (not out or out[-1] == "---"):
+                continue
+            out.append(b)
+        while out and out[-1] == "---":
+            out.pop()
+        return "\n\n".join(out)
 
 
-def from_html(raw: str) -> str:
+def from_html(raw: str, dividers=()) -> str:
     """Story markup for one XHTML/HTML document, preserving emphasis, headings,
     block quotes and hard line breaks. Never raises on malformed markup."""
-    r = _Reader()
+    r = _Reader(dividers)
     try:
         r.feed(raw or "")
         r.close()

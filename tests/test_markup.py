@@ -130,3 +130,35 @@ def test_an_unpairable_marker_never_reaches_the_reader():
         "<p>look at the Daily Prophet tomorrow</p>"
     # ...but a marker the book itself used stays, because it is escaped
     assert markup.to_html(markup.from_html("<p>3 * 4</p>")) == "<p>3 * 4</p>"
+
+
+def test_an_ornament_between_sections_is_a_scene_break():
+    # print marks a scene break with a little image and nothing else, so dropping
+    # the image runs the two sections together (Fablehaven's dingbat)
+    html = ('<p>He could be sneakier than Kendra knew.</p>'
+            '<div><div><span><img src="image/dingbat-11.png" alt=""/></span></div></div>'
+            '<p>The fairy balanced on a twig.</p>')
+    assert markup.from_html(html, {"dingbat-11.png"}) == (
+        "He could be sneakier than Kendra knew.\n\n---\n\nThe fairy balanced on a twig.")
+    # an image nobody identified as an ornament is still just dropped
+    assert markup.from_html(html) == ("He could be sneakier than Kendra knew.\n\n"
+                                      "The fairy balanced on a twig.")
+
+
+def test_a_divider_with_nothing_before_it_is_dropped():
+    # the art at the head of a chapter uses the same markup as the ornament, and
+    # a rule before the first paragraph divides nothing
+    text = markup.from_html('<div><img src="orn.png"/></div><hr/><p>One.</p>'
+                            '<p>Two.</p><hr/><div><img src="orn.png"/></div>',
+                            {"orn.png"})
+    assert text == "One.\n\nTwo."
+
+
+def test_an_ornament_beside_text_is_decoration_not_a_break():
+    assert markup.from_html('<p><img src="orn.png"/>A dropped cap.</p>',
+                            {"orn.png"}) == "A dropped cap."
+    # ...and a signature at the foot of a letter is not a scene break either
+    assert markup.from_html("<blockquote><p>Yours sincerely,</p>"
+                            '<figure><img src="orn.png"/></figure></blockquote>'
+                            "<p>Harry reread the letter.</p>",
+                            {"orn.png"}) == ("> Yours sincerely,\n\nHarry reread the letter.")

@@ -123,7 +123,11 @@ Reads `GEMINI_API_KEY` from `.env` (same as the CLI pipeline).
   `pipeline/markup.py`. Every reader renders it (`markup.to_html`, or its browser
   twin `static/markup.js`, which the static export inlines); everything that feeds
   text to a model strips it with `markup.plain`. Keep the Python and JS renderers
-  in step.
+  in step. A scene break is whatever the source used for one: an `<hr>`, or — as
+  print more often does — a little ornament image repeated all through the book
+  (Fablehaven's dingbat). `extract._divider_images` picks those out by the fact
+  that an ornament recurs while an illustration does not; without that the two
+  sections run together and the break is simply gone from the page.
 
 ### Reformatting a book processed before this
 

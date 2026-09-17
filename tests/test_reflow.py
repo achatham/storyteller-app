@@ -65,3 +65,55 @@ def test_reflow_leaves_a_page_alone_when_it_cannot_match(monkeypatch, tmp_path):
     res = reflow.reflow_book(bid)
     assert res["skipped"] == [2]
     assert db.get_pages(bid)[2]["read_text"] == "This sentence is not in the source."
+
+
+ORNAMENT_CHAPTER = """<html><body>
+<div><img src="images/dingbat.png" alt=""/></div>
+<h2>One</h2>
+<p>He was a dragon, and no mistake.</p>
+<div><img src="images/dingbat.png" alt=""/></div>
+<p>The others were washing. Nobody moved at all.</p>
+<div><img src="images/dingbat.png" alt=""/></div>
+<p>Then it was morning.</p>
+</body></html>"""
+
+
+def book_broken_at_a_scene_break(monkeypatch, tmp_path):
+    """A book whose pages were split exactly where the source puts a scene break
+    -- so the break falls between two pages, outside either one's text."""
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("STORY_APP_DB", str(tmp_path / "storyteller.db"))
+    import webapp.db
+    db = importlib.reload(webapp.db)
+    import webapp.reflow
+    reflow = importlib.reload(webapp.reflow)
+    db.init()
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        z.writestr("META-INF/container.xml",
+                   '<container><rootfiles><rootfile full-path="OEBPS/content.opf"/>'
+                   "</rootfiles></container>")
+        z.writestr("OEBPS/content.opf",
+                   '<package><manifest><item id="c1" href="c1.xhtml"/></manifest>'
+                   '<spine><itemref idref="c1"/></spine></package>')
+        z.writestr("OEBPS/c1.xhtml", ORNAMENT_CHAPTER)
+    bid = db.create_book("The Book", "", "book.epub", "watercolor", 200,
+                         "application/epub+zip", out.getvalue())
+    db.add_chapter(bid, 0, "One", 0, [])
+    db.add_page(bid, 0, 0, "A dragon", "One\n\nHe was a dragon, and no mistake.",
+                "", "", [])
+    db.add_page(bid, 1, 0, "Washing",
+                "The others were washing.\n\nNobody moved at all.", "", "", [])
+    db.add_page(bid, 2, 0, "Morning", "Then it was morning.", "", "", [])
+    return db, reflow, bid
+
+
+def test_reflow_recovers_a_scene_break_that_falls_between_two_pages(monkeypatch, tmp_path):
+    db, reflow, bid = book_broken_at_a_scene_break(monkeypatch, tmp_path)
+    reflow.reflow_book(bid)
+    pages = db.get_pages(bid)
+    # the ornament before the chapter's first line divides nothing, so page 0
+    # opens on its heading; the other two each open on the break above them
+    assert pages[0]["read_text"] == "## One\n\nHe was a dragon, and no mistake."
+    assert pages[1]["read_text"].startswith("---\n\nThe others were washing.")
+    assert pages[2]["read_text"] == "---\n\nThen it was morning."
