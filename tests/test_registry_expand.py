@@ -88,3 +88,145 @@ def test_often_counts_as_a_hedge(registry, capsys):
     durable = {"id": "quest", "delta": "Hair chopped short; battle robes and a scabbard."}
     assert registry.flag_momentary_variant(entity, durable) is False
     assert "momentary_warning" not in durable
+
+
+def _miri():
+    """The Princess Academy protagonist, as the discover pass left her: an entity whose
+    canonical_details are narrative prose, with no age anywhere but the variant deltas."""
+    return {
+        "id": "miri_larendaughter", "type": "character", "name": "Miri Larendaughter",
+        "summary": "Fourteen-year-old protagonist of Mount Eskel.",
+        "canonical_details": (
+            "Tiny from birth, noticeably smaller than girls years younger than her. "
+            "She has bright blue eyes and dark brown hair the color of a hawk feather, "
+            "typically kept in a braid. Described as the spitting image of her deceased "
+            "mother. Her laugh is low and throaty."),
+        "variants": [
+            {"id": "age_fourteen", "kind": "outfit", "label": "Fourteen in worn boots",
+             "delta": "Age fourteen, wearing rough mountain wool leggings and thin-soled boots."},
+            {"id": "age_fifteen", "kind": "outfit", "label": "Fifteen in sturdy boots",
+             "delta": "Turns fifteen at midsummer; the same wool shirt, but new thick-soled boots."},
+        ],
+    }
+
+
+def test_drawable_keeps_only_what_can_be_drawn(registry):
+    d = registry.drawable(_miri()["canonical_details"])
+    assert "bright blue eyes" in d and "hawk feather" in d   # the visual facts survive
+    assert "laugh" not in d                                  # nothing to draw
+    assert "spitting image" not in d                         # a likeness we cannot draw
+    # a sentence that hedges AND carries a visual fact keeps the fact
+    assert "apron" in registry.drawable("He often wears a leather apron.")
+    # ... but a pure habit goes
+    assert registry.drawable("Often rubs her forehead when perplexed.") == ""
+
+
+def test_drawable_strips_distress_worn_as_an_expression(registry):
+    """Gerti's only sheet came out as a frightened child with a hand to her forehead,
+    and that expression then rode all 18 of her pages."""
+    d = registry.drawable("Small and petite, with round, frightened dark eyes.")
+    assert "frightened" not in d
+    assert "round" in d and "dark eyes" in d
+
+
+def test_age_is_read_per_variant(registry):
+    ent = _miri()
+    assert registry.find_age(ent["canonical_details"]) is None   # the details never say
+    assert registry.find_age(ent["summary"]) == 14
+    assert registry.find_age(ent["variants"][1]["delta"]) == 15  # "Turns fifteen"
+    assert registry._figure_noun(ent, 14) == "A 14-year-old girl."
+    assert registry._figure_noun({"type": "prop"}, 14) == ""     # only characters
+
+
+def test_fallback_leads_with_an_age(registry, monkeypatch):
+    """Without an age anchor the generator drew the protagonist as a toddler."""
+    monkeypatch.setattr(registry.gem, "text_json", _blocked)
+    out = registry.expand_one(_miri())
+    by_id = {v["id"]: v for v in out["variants"]}
+    assert by_id["age_fourteen"]["appearance"].startswith("A 14-year-old girl.")
+    assert by_id["age_fifteen"]["appearance"].startswith("A 15-year-old girl.")
+    # the narrative noise never reaches the image prompt
+    assert "throaty" not in by_id["age_fourteen"]["sheet_prompt"]
+    # "Turns fifteen at midsummer" is an event, not a look -- the age was hoisted instead
+    assert "midsummer" not in by_id["age_fifteen"]["appearance"]
+
+
+def _blocked(*a, **kw):
+    raise ValueError("empty model response [finish=PROHIBITED_CONTENT]")
+
+
+def test_wardrobe_rescue_when_the_full_expand_is_refused(registry, monkeypatch):
+    """The safety filter refuses a child's BODY, not their clothes: measured live, the
+    same model answers in full once build/face/skin are out of the request."""
+    calls = []
+
+    def fake(prompt, **kw):
+        calls.append(prompt)
+        if "costume designer" not in prompt:
+            raise ValueError("empty model response [finish=PROHIBITED_CONTENT]")
+        return {"base_outfit": "a loose unbleached wool tunic over grey leggings",
+                "variants": [
+                    {"id": "age_fourteen", "outfit": "rough wool leggings, thin-soled boots"},
+                    {"id": "age_fifteen", "outfit": "the same wool shirt, new thick-soled boots"}]}
+
+    monkeypatch.setattr(registry.gem, "text_json", fake)
+    out = registry.expand_one(_miri())
+
+    assert len(calls) == 2 and out["wardrobe_only"] is True
+    assert "expand_failed" not in out
+    by_id = {v["id"]: v for v in out["variants"]}
+    a14 = by_id["age_fourteen"]["appearance"]
+    assert a14.startswith("A 14-year-old girl.")      # age, from the delta
+    assert "bright blue eyes" in a14                  # body, from the book's own words
+    assert "thin-soled boots" in a14                  # clothes, from the rescue pass
+    assert "throaty" not in a14                       # narrative noise still dropped
+    assert by_id["age_fourteen"]["appearance"] != by_id["age_fifteen"]["appearance"]
+
+
+def test_wardrobe_rescue_failing_too_falls_back(registry, monkeypatch):
+    monkeypatch.setattr(registry.gem, "text_json", _blocked)
+    out = registry.expand_one(_miri())
+    assert out["expand_failed"] is True
+    assert "wardrobe_only" not in out
+    assert "bright blue eyes" in out["variants"][0]["appearance"]
+
+
+def test_a_variant_that_changes_the_age_does_not_contradict_the_base(registry, monkeypatch):
+    """When the expand pass wrote the base look (with an age in it) but skipped a
+    variant, the fallback must not open with a second, different age."""
+    monkeypatch.setattr(registry.gem, "text_json", lambda *a, **kw: {
+        "base_appearance": "A petite fourteen-year-old girl with bright blue eyes.",
+        "base_sheet_prompt": "sheet of a petite girl",
+        "variants": [],                       # the model echoed neither variant id
+    })
+    out = registry.expand_one(_miri())
+    by_id = {v["id"]: v for v in out["variants"]}
+    same = by_id["age_fourteen"]["appearance"]
+    older = by_id["age_fifteen"]["appearance"]
+    assert same.startswith("A petite fourteen-year-old girl")   # no second age bolted on
+    assert "15-year-old" not in same
+    assert older.startswith("A petite fourteen-year-old girl")
+    assert "In this look: now 15 years old;" in older           # the override, stated once
+
+
+def test_wardrobe_rescue_does_not_restate_an_age_the_book_already_gave(registry, monkeypatch):
+    """Gerti's details open with "Barely twelve years old" -- prefixing "A 12-year-old
+    girl." in front of that is noise in a prompt that is already long."""
+    gerti = {"id": "gerti", "type": "character", "name": "Gerti",
+             "summary": "The youngest academy student.",
+             "canonical_details": "Barely twelve years old, small and petite, with round, "
+                                  "frightened dark eyes. Often rubs her forehead when perplexed.",
+             "variants": [{"id": "young_student", "delta": "Oversized homespun leggings."}]}
+
+    def fake(prompt, **kw):
+        if "costume designer" not in prompt:
+            raise ValueError("empty model response [finish=PROHIBITED_CONTENT]")
+        return {"base_outfit": "a cream wool tunic",
+                "variants": [{"id": "young_student", "outfit": "an oversized cream wool tunic"}]}
+
+    monkeypatch.setattr(registry.gem, "text_json", fake)
+    app = registry.expand_one(gerti)["variants"][0]["appearance"]
+    assert app.startswith("Barely twelve years old")
+    assert "12-year-old" not in app
+    assert "frightened" not in app and "perplexed" not in app
+    assert "oversized cream wool tunic" in app

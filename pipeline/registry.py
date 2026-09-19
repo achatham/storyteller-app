@@ -108,6 +108,32 @@ Resolve EVERY variant listed on the entity (echo each variant id). If the entity
 """
 
 
+WARDROBE_PROMPT = """You are the costume designer for a children's picture-book edition of \
+{book_ref}. For the character below, write the WARDROBE AND GROOMING reference for each of their \
+listed looks, so the same outfit is drawn identically on every page it covers.
+
+Describe ONLY clothing, footwear, accessories and hairstyle -- garment by garment, with fabrics, \
+cuts, fastenings and colours, and say how worn or neat each is. Do NOT describe the body, build, \
+face, skin, age or expression: those are fixed elsewhere and must not be repeated here. No art \
+style, medium or rendering words.
+
+Write flowing descriptive prose, not a labelled list -- this text is pasted straight into an \
+illustration prompt, so "a loose unbleached wool tunic over grey woollen leggings, with scuffed \
+brown leather boots" reads correctly and "Top: tunic. Legs: leggings." does not.
+
+An outfit is what the character wears for the WHOLE span of that look. A costume worn for a single \
+scene does not belong in any of these descriptions, and neither does anything torn, bloodied or \
+disarranged by one event: describe the clothes as they are normally worn across the span.
+
+CHARACTER:
+{entity}
+
+Return JSON only:
+{{"base_outfit": "<the character's default everyday outfit and hairstyle>",
+  "variants": [{{"id": "<echo the variant id>", "outfit": "<the full outfit and hairstyle for THIS look>"}}]}}
+Resolve EVERY variant listed, echoing each id.
+"""
+
 REPAIR_PROMPT = """You are refining a children's-book character registry so each character can be \
 drawn correctly in EVERY scene. The whole-book discovery pass sometimes collapses a character \
 into only their dominant look and misses how they appear at their FIRST appearance -- for \
@@ -203,6 +229,103 @@ def neutral_sheet_prompt(name: str, desc: str) -> str:
             "Plain soft off-white background, even lighting, no text.")
 
 
+# --- making narrative text drawable ---------------------------------------
+#
+# `canonical_details` is prose ABOUT a character, written to be read; an appearance is
+# a description of one figure, written to be drawn. The expand pass converts one into
+# the other. When it is refused (see expand_one) the fallback has to do that conversion
+# itself, because whatever it produces is pasted verbatim into a reference-sheet prompt
+# and into the cast block of every page the variant covers. Three things in narrative
+# prose are actively harmful there, and all three shipped in Princess Academy:
+#   "Her laugh is low and throaty"          -- nothing to draw; noise in an image prompt
+#   "round, FRIGHTENED dark eyes"           -- bakes an emotion into every page
+#   "Often rubs her forehead when perplexed" -- a habit drawn as a permanent pose
+# and one thing is missing: an age. "Tiny from birth, noticeably smaller than girls
+# years younger than her" with no age anchor got the protagonist drawn as a toddler.
+
+# A sentence is non-visual if it describes sound, manner or temperament, or claims a
+# likeness to someone we are not drawing -- UNLESS it also carries a visual fact, in
+# which case dropping it would lose that fact.
+NON_VISUAL_RE = re.compile(r"\b(laugh|laughter|voice|accent|tone|sings?|speaks?|smells?|"
+                           r"temper|temperament|personality|spitting image|image of her|"
+                           r"image of his|looks? just like|takes after)\b", re.I)
+VISUAL_RE = re.compile(r"\b(hair|eyes?|skin|face|freckl|scar|beard|braid|cheeks?|build|"
+                       r"tall|short|small|tiny|thin|stout|wears?|wearing|dressed|clothe|"
+                       r"boots?|coat|dress|gown|robes?|shirt|trousers|apron|hat|colou?r)\b", re.I)
+# Distress worn on the face. The expand pass has a SAFE TO DRAW clause for exactly this;
+# the fallback needs its own, or a reference sheet of a frightened child either gets
+# refused by the image model or becomes the character's permanent expression.
+DISTRESS_RE = re.compile(r"\b(frightened|terrified|fearful|scared|anxious|weeping|tearful|"
+                         r"tear-streaked|haunted|grief-stricken|panicked|miserable|"
+                         r"sickly|wretched)\b[,\s]*", re.I)
+
+_AGE_WORDS = {w: i for i, w in enumerate(
+    ("zero one two three four five six seven eight nine ten eleven twelve thirteen "
+     "fourteen fifteen sixteen seventeen eighteen nineteen").split())}
+AGE_RE = re.compile(r"\b(\d{1,2}|" + "|".join(_AGE_WORDS) + r")[-\s]year[s]?[-\s]old\b"
+                    r"|\b(?:age[d]?|turns|turning)\s+(\d{1,2}|" + "|".join(_AGE_WORDS) + r")\b"
+                    r"|\b(\d{1,2}|" + "|".join(_AGE_WORDS) + r")\s+years?\s+old\b", re.I)
+
+
+def find_age(*texts: str) -> int | None:
+    """The character's age in years, from the first text that states one outright."""
+    for t in texts:
+        m = AGE_RE.search(t or "")
+        if not m:
+            continue
+        raw = next(g for g in m.groups() if g)
+        age = int(raw) if raw.isdigit() else _AGE_WORDS.get(raw.lower())
+        if age is not None and 0 < age < 20:
+            return age
+    return None
+
+
+def drawable(text: str) -> str:
+    """Keep only what an illustrator could put on the page: drop clauses that carry no
+    visual fact, and strip distress worn as an expression.
+
+    Judged clause by clause, not sentence by sentence, because deltas habitually join
+    an event to a look with a semicolon ("Turns fifteen at midsummer; the same wool
+    shirt, but new thick-soled boots") and only the second half can be drawn. A clause
+    is dropped only when it BOTH matches something unillustratable and contains no
+    visual anchor of its own -- an age statement is unillustratable on its own, but
+    `find_age` has already hoisted it into the leading noun phrase by this point.
+    """
+    # split keeping the separators, so text that loses nothing comes back unchanged
+    parts = re.split(r"((?<=[.!?])\s+|;\s*)", (text or "").strip())
+    out = ""
+    for i in range(0, len(parts), 2):
+        seg, sep = parts[i].strip(), (parts[i + 1] if i + 1 < len(parts) else "")
+        if not seg:
+            continue
+        if not VISUAL_RE.search(seg) and (NON_VISUAL_RE.search(seg) or HEDGE_RE.search(seg)
+                                          or AGE_RE.search(seg)):
+            continue
+        seg = DISTRESS_RE.sub("", seg).strip()
+        if not seg:
+            continue
+        out += (seg if out else seg[0].upper() + seg[1:]) + sep
+    out = out.strip().rstrip(";").strip()
+    if out and not out.endswith((".", "!", "?")):
+        out += "."
+    return out
+
+
+def _figure_noun(entity: dict, age: int | None) -> str:
+    """A leading noun phrase for a character with a known age, so the image model has
+    something concrete to size the figure against. The gendered noun comes from the
+    pronouns the book itself uses about this character -- never from the name."""
+    if age is None or entity.get("type") != "character":
+        return ""
+    text = f"{entity.get('canonical_details', '')} {entity.get('summary', '')}"
+    she = len(re.findall(r"\b(she|her|hers|daughter|girl|sister|mother)\b", text, re.I))
+    he = len(re.findall(r"\b(he|him|his|son|boy|brother|father)\b", text, re.I))
+    who = "girl" if she > he else "boy" if he > she else "child"
+    if age > 15:
+        who = {"girl": "young woman", "boy": "young man", "child": "youth"}[who]
+    return f"A {age}-year-old {who}."
+
+
 def fill_variant_fallback(entity: dict, variant: dict) -> None:
     """Give one variant whatever appearance/sheet_prompt the expand pass didn't:
     the entity's base look with THIS variant's delta appended.
@@ -213,15 +336,82 @@ def fill_variant_fallback(entity: dict, variant: dict) -> None:
     same picture two or three times, with nothing on screen to say why. "In this look:"
     marks the delta as the override, so a delta that contradicts the base (shorn hair
     over a base that says long hair) reads as the later state rather than a conflict.
+
+    The age is resolved per variant: a variant whose delta says "turns fifteen" must
+    lead with fifteen even though the entity's own details say fourteen.
     """
     base = (entity.get("base_appearance") or "").strip()
     delta = (variant.get("delta") or "").strip()
-    desc = variant.get("appearance") or " ".join(
-        x for x in (base, f"In this look: {delta}" if delta else "") if x)
+    if not variant.get("appearance"):
+        base_age, delta_txt, lead = find_age(base), drawable(delta), ""
+        age = find_age(delta) or base_age or find_age(entity.get("summary", ""))
+        if base_age is None:
+            lead = _figure_noun(entity, age)           # nothing states an age yet
+        elif age != base_age:
+            # the base already names an age and this look changes it -- say so in the
+            # delta, where "In this look:" already marks it as the override, rather
+            # than opening with a second age that contradicts the sentence after it
+            delta_txt = " ".join(x for x in (f"now {age} years old;", delta_txt) if x)
+        desc = " ".join(x for x in (lead, base,
+                                    f"In this look: {delta_txt}" if delta_txt else "") if x)
+    else:
+        desc = variant["appearance"]
     variant["appearance"] = desc
     if not variant.get("sheet_prompt"):
         variant["sheet_prompt"] = neutral_sheet_prompt(
             entity.get("name", "the subject"), desc)
+
+
+def expand_wardrobe(entity: dict) -> dict:
+    """The rescue pass for an entity the full expand refused: ask for CLOTHING AND
+    HAIR ONLY, and take the body from the book's own words.
+
+    Measured against the live API on the two entities that were refused in Princess
+    Academy (book 26): the block is not about the entity, the wording, or the call's
+    shape -- grouping several entities into one call is refused too, and takes the
+    healthy ones down with it, and anonymising the child changes nothing. It is about
+    being asked to describe a child's BODY. Drop build/face/skin from the request and
+    the same model, same entity, same moment answers in full detail.
+
+    That is most of what was lost anyway: the outfit is what actually differs between
+    a character's variants, and it is what a reference sheet is FOR. The physical facts
+    come from `canonical_details` (which the book stated), cleaned by `drawable`.
+    """
+    stub = {k: entity.get(k) for k in ("id", "name", "summary", "canonical_details")}
+    stub["variants"] = [{k: v.get(k) for k in ("id", "label", "when", "delta")}
+                        for v in entity.get("variants", [])]
+    rich = gem.text_json(
+        WARDROBE_PROMPT.format(book_ref=BOOK_REF, entity=json.dumps(stub, ensure_ascii=False)),
+        model=REGISTRY_MODEL, thinking_level=REGISTRY_THINK)
+    out = dict(entity)
+    body = drawable(entity.get("canonical_details", "") or entity.get("summary", ""))
+    outfits = {v.get("id"): (v.get("outfit") or "").strip()
+               for v in rich.get("variants", []) if isinstance(v, dict)}
+
+    body_age = find_age(body)
+
+    def compose(outfit: str, age: int | None) -> str:
+        # the book's own words often already give the age ("Barely twelve years old");
+        # only add the leading noun phrase when nothing else states one
+        lead = _figure_noun(entity, age) if body_age is None else ""
+        older = f"Now {age} years old." if body_age is not None and age != body_age else ""
+        return " ".join(x for x in (lead, body, older,
+                                    f"Wearing: {outfit}" if outfit else "") if x)
+
+    base_age = find_age(entity.get("canonical_details", ""), entity.get("summary", ""))
+    out["base_appearance"] = compose((rich.get("base_outfit") or "").strip(), base_age)
+    out["base_sheet_prompt"] = neutral_sheet_prompt(
+        entity.get("name", "the subject"), out["base_appearance"])
+    for v in out.get("variants", []):
+        outfit = outfits.get(v["id"], "")
+        if outfit:
+            v["appearance"] = compose(outfit, find_age(v.get("delta", "")) or base_age)
+            v["sheet_prompt"] = neutral_sheet_prompt(
+                entity.get("name", "the subject"), v["appearance"])
+        fill_variant_fallback(out, v)      # the model skipped this variant id
+        flag_momentary_variant(out, v)
+    out["wardrobe_only"] = True
+    return out
 
 
 def expand_one(entity: dict) -> dict:
@@ -235,18 +425,28 @@ def expand_one(entity: dict) -> dict:
     except Exception as e:  # noqa: BLE001 -- never let one entity sink the whole summary
         # Reliably reached: Gemini's child-safety filter refuses to write a detailed
         # physical description of a named child (PROHIBITED_CONTENT on the *output*, so
-        # gem's retries can't help, and softer wording doesn't move it -- it fires on
-        # the density of the description, not any one word). The delta-aware fallback
-        # below is what keeps such a character's variants distinguishable.
+        # gem's retries can't help). Every occurrence to date -- 11 across 11 books --
+        # has been a girl child, twice the book's own protagonist. Retry for the
+        # clothes alone, which is not refused; see expand_wardrobe.
         print(f"[registry] expand FAILED for {entity.get('id')}: "
-              f"{type(e).__name__}: {str(e)[:120]} -- using canonical_details fallback", flush=True)
-        fallback = entity.get("canonical_details", "") or entity.get("summary", "")
+              f"{type(e).__name__}: {str(e)[:120]} -- retrying wardrobe-only", flush=True)
+        try:
+            out = expand_wardrobe(entity)
+            print(f"[registry] wardrobe-only expand rescued {entity.get('id')} "
+                  f"({len(out.get('variants', []))} variants)", flush=True)
+            return out
+        except Exception as e2:  # noqa: BLE001
+            print(f"[registry] wardrobe-only expand ALSO failed for {entity.get('id')}: "
+                  f"{type(e2).__name__}: {str(e2)[:120]} -- using canonical_details fallback",
+                  flush=True)
+        fallback = drawable(entity.get("canonical_details", "") or entity.get("summary", ""))
         out["base_appearance"] = fallback
         out["base_sheet_prompt"] = neutral_sheet_prompt(
             entity.get("name", "the subject"), fallback)
         out["expand_failed"] = True
         for v in out.get("variants", []):
             fill_variant_fallback(out, v)
+            flag_momentary_variant(out, v)
         return out
     out["base_appearance"] = rich.get("base_appearance", "")
     out["base_sheet_prompt"] = rich.get("base_sheet_prompt", "")
