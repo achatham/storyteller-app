@@ -106,6 +106,16 @@ Reads `GEMINI_API_KEY` from `.env` (same as the CLI pipeline).
   on the strong text model at `thinking_level=high`) → **segment** each chapter
   into read-aloud pages. Finally it **warms the first `STORY_WARM_PAGES` page
   images** (default 2) so the book opens instantly. Status is shown live on the hub.
+- **A refused character design falls back to the wardrobe.** The safety filter
+  refuses to write a detailed physical description of a named child, reliably
+  enough that it has hit 11 books so far — every time a girl, twice the book's own
+  protagonist. It is the *body* it objects to: asked for clothing and hair alone,
+  the same model answers in full, so `registry.expand_wardrobe` retries for the
+  outfit and takes the physical facts from the book's own `canonical_details`.
+  Rewording, anonymising the child, or batching several entities into one call do
+  not help (the batch is refused whole, taking the healthy entities with it).
+  Entities that went down this path are marked `wardrobe_only` in the registry;
+  ones where even that was refused are marked `expand_failed`.
 - **Roster reference sheets are drawn lazily** (pro image model), the first time a
   page needs a given character/variant — so a variant no read page uses is never
   drawn. When a character already has one sheet, a sibling variant is attached as a
