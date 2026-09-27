@@ -43,7 +43,7 @@ h2 + p, h3 + p, h4 + p, blockquote + p, hr.scene + p { text-indent: 0; }
 blockquote { margin: 1em 2.2em; font-size: .95em; }
 blockquote p { text-indent: 0; margin: 0 0 0.5em; }
 code { font-family: monospace; font-size: .95em; }
-hr.scene { border: 0; margin: 1.4em auto; width: 30%; border-top: 1px solid #bbb; }
+hr.scene { border: 0; margin: 1.4em auto; width: 30%; border-top: 2px solid #888; }
 figure { margin: 1.1em 0; text-align: center; page-break-inside: avoid; }
 figure img { max-width: 100%; height: auto; }
 .title-page { text-align: center; margin-top: 22%; }
