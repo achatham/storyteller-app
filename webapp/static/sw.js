@@ -1,6 +1,8 @@
 // Service worker. Two strategies:
 //  - /api/*  : NETWORK-FIRST (data must be fresh; fall back to the offline store
-//              / cache when the network is gone).
+//              / cache when the network is gone -- or, for a saved book, when it
+//              hasn't answered within SLOW_NET_MS, since a dead wifi link hangs
+//              long before it fails).
 //  - shell   : STALE-WHILE-REVALIDATE (HTML/JS/CSS/icons) -- serve the cached copy
 //              instantly so reloads are fast even on a slow/flaky connection, and
 //              refresh the cache in the background for next time. (Use the in-app
@@ -12,7 +14,8 @@
 // saved book reads with zero reader-side offline logic.
 importScripts("/static/offline-idb.js");
 
-const CACHE = "storyteller-v27";   // bumped: recognise the gate's 401 sign-in bounce
+const CACHE = "storyteller-v28";   // bumped: saved books stop waiting on a stalled network
+const SLOW_NET_MS = 4000;          // how long /api/* waits on the network before a saved copy wins
 
 // The app shell, fetched at install time. Without this the cache only ever held
 // what happened to be requested while a previous worker was already in control --
@@ -140,25 +143,17 @@ self.addEventListener("fetch", (e) => {
 
   if (url.pathname.startsWith("/api/")) {           // network-first
     e.respondWith((async () => {
-      try {
-        const res = await fetch(req);
-        // Expired session. Treat it like being offline: serve the saved copy so
-        // a downloaded book keeps reading, and ping open pages to raise the
-        // sign-in overlay -- images can't do that themselves, they're <img>
-        // loads, not Auth.bounced fetches.
-        const login = authBounce(res);
-        if (login) {
-          notifyAuthBounce(login);
-          return (await fromOffline(url)) || res;
-        }
-        // A 202 means "not drawn yet". If we have the page saved offline, prefer
-        // the saved image over the placeholder so a bake-in-progress book still
-        // shows its saved pictures.
-        if (res.status === 202) return (await fromOffline(url)) || res;
-        return maybeCache(req, res);
-      } catch (_) {
-        return (await fromOffline(url)) || (await caches.match(req)) || Response.error();
-      }
+      const net = apiFromNetwork(req, url);
+      // Network-first is not network-only. "Offline" on a tablet is often a wifi
+      // link that is up but dead (asleep, out of range, captive), where fetch
+      // doesn't fail for a long time -- it just hangs. A saved book sat on that
+      // for the whole wait before its own copy was consulted. Give the network a
+      // short head start, then serve the saved copy if we hold one; the network
+      // response, if it ever lands, still refreshes the cache.
+      const slow = new Promise((r) => setTimeout(() => r(null), SLOW_NET_MS));
+      const first = await Promise.race([net, slow]);
+      if (first) return first;
+      return (await fromOffline(url)) || net;
     })());
     return;
   }
@@ -181,3 +176,27 @@ self.addEventListener("fetch", (e) => {
     }
   })());
 });
+
+// The /api/* network path: fresh from the server when it answers, the saved or
+// cached copy when it can't. Never rejects.
+async function apiFromNetwork(req, url) {
+  try {
+    const res = await fetch(req);
+    // Expired session. Treat it like being offline: serve the saved copy so
+    // a downloaded book keeps reading, and ping open pages to raise the
+    // sign-in overlay -- images can't do that themselves, they're <img>
+    // loads, not Auth.bounced fetches.
+    const login = authBounce(res);
+    if (login) {
+      notifyAuthBounce(login);
+      return (await fromOffline(url)) || res;
+    }
+    // A 202 means "not drawn yet". If we have the page saved offline, prefer
+    // the saved image over the placeholder so a bake-in-progress book still
+    // shows its saved pictures.
+    if (res.status === 202) return (await fromOffline(url)) || res;
+    return maybeCache(req, res);
+  } catch (_) {
+    return (await fromOffline(url)) || (await caches.match(req)) || Response.error();
+  }
+}

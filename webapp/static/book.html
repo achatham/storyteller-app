@@ -66,6 +66,13 @@
   #bar { position:fixed; left:0; bottom:0; height:3px; background:var(--muted); z-index:20; transition:width .2s; }
   #pageno { position:fixed; bottom:6px; left:50%; transform:translateX(-50%); z-index:20;
           font-family:system-ui,sans-serif; font-size:.72rem; color:var(--muted); }
+  /* "loading the next chapter…" / "you're offline" pill, so a turn that has to wait
+     on the network visibly registered instead of looking ignored */
+  #note { position:fixed; bottom:28px; left:50%; transform:translateX(-50%); z-index:21;
+          background:rgba(43,38,34,.82); color:#fffdf8; font-family:system-ui,sans-serif;
+          font-size:.8rem; padding:7px 14px; border-radius:999px; pointer-events:none;
+          white-space:nowrap; max-width:90vw; overflow:hidden; text-overflow:ellipsis; }
+  #note[hidden] { display:none; }
   #menuBtn { position:fixed; top:10px; right:10px; z-index:30; width:40px; height:40px; border-radius:50%;
           border:1px solid var(--line); background:rgba(255,253,248,.82); color:var(--ink);
           font-size:1.15rem; cursor:pointer; backdrop-filter:blur(3px); }
@@ -103,7 +110,7 @@
 <div id="viewport"><div id="flow"></div></div>
 <div class="edge left">&#8249;</div><div class="edge right">&#8250;</div>
 <div id="turn"></div>
-<div id="bar"></div><div id="pageno"></div>
+<div id="bar"></div><div id="pageno"></div><div id="note" hidden></div>
 <button id="menuBtn">&#9776;</button>
 <div id="menu" hidden><div class="card">
   <div class="bk" id="bk"></div>
@@ -184,9 +191,84 @@ async function boot(){
   await loadChapter(start.ch || 0, start.page || 0, startFrac);
 }
 
+// Chapter flows are fetched once per visit and kept in memory, and the chapters
+// either side of the one being read are fetched ahead -- so the turn at a
+// chapter's last page costs no more than any other. It used to be a fresh round
+// trip to the server, often on a connection the tablet had let go idle, which on
+// weak wifi meant a many-second stall with nothing on screen to show the tap
+// had registered. A failed fetch is forgotten so the next attempt retries it.
+const chapterCache = new Map();   // idx -> Promise<chapter flow>
+const CHAPTER_TIMEOUT_MS = 20000;
+function fetchChapter(ci){
+  if (chapterCache.has(ci)) return chapterCache.get(ci);
+  const p = (async () => {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), CHAPTER_TIMEOUT_MS);
+    try {
+      const r = await fetch(`${API}/chapter/${ci}`, { signal: ctl.signal });
+      if (Auth.bounced(r)) throw new Error("signed out");
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return await r.json();
+    } finally { clearTimeout(t); }
+  })();
+  p.catch(() => chapterCache.delete(ci));
+  chapterCache.set(ci, p);
+  return p;
+}
+function prefetchChapters(){
+  const n = (META.chapters || []).length;
+  for (const ci of [CH + 1, CH - 1]){
+    if (ci < 0 || ci >= n) continue;
+    fetchChapter(ci).then(d => {
+      // warm the next chapter's opening picture too, so its first page isn't a
+      // pulsing placeholder on arrival (same URL the <img> will ask for = cache hit)
+      if (ci !== CH + 1) return;
+      const first = (d.nodes || []).find(x => x.type === "image");
+      if (first && !prefetched.has(first.src)){ prefetched.add(first.src); new Image().src = first.src; }
+    }).catch(() => {});
+  }
+}
+
+let noteT = null;
+function note(msg, ms){
+  clearTimeout(noteT);
+  const el = $("#note");
+  if (!msg){ el.hidden = true; return; }
+  el.textContent = msg; el.hidden = false;
+  if (ms) noteT = setTimeout(() => { el.hidden = true; }, ms);
+}
+
+// One chapter change at a time. A second tap or swipe while the flow was still
+// arriving used to call loadChapter again against the OLD chapter's page count,
+// with CH already advanced -- so it loaded the chapter after the one requested
+// and the one in between was skipped (the server log shows the pair of requests
+// milliseconds apart). CH now moves only once the flow is actually in hand.
+let loading = false;
 async function loadChapter(ci, toPage, frac){
+  if (loading) return;
+  loading = true;
+  const slow = setTimeout(() => note(CH < 0 ? "Loading…" : ci > CH ? "Loading the next chapter…" : "Loading chapter…"), 350);
+  let data;
+  try {
+    data = await fetchChapter(ci);
+  } catch (e) {
+    clearTimeout(slow); loading = false;
+    const why = e && e.message === "signed out" ? null
+      : navigator.onLine === false ? "You’re offline and this chapter isn’t saved on this device"
+      : e && e.name === "AbortError" ? "The server isn’t answering — tap to try again"
+      : "Couldn’t load that chapter — tap to try again";
+    if (CH < 0){ $("#splash").hidden = false; $("#splash").textContent = why || "Please sign in"; }
+    else if (why) note(why, 4000);
+    return;
+  }
+  clearTimeout(slow); note(null);
+  try { await showChapter(ci, data, toPage, frac); }
+  finally { loading = false; }
+  prefetchChapters();
+}
+
+async function showChapter(ci, data, toPage, frac){
   CH = ci;
-  const data = await (await fetch(`${API}/chapter/${ci}`)).json();
   const flow = $("#flow");
   setX(0, false);   // jump (no transition) to the start so a new chapter doesn't
                     // animate a long slide back from the previous chapter's last page
