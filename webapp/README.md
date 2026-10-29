@@ -261,6 +261,7 @@ generations for the pages it redraws.
 | `STORY_MAX_BOOK_BYTES` | `52428800` | maximum PDF/EPUB upload size (50 MiB) |
 | `STORY_MAX_UPLOADS_PER_MINUTE` | `6` | per-client upload rate limit |
 | `STORY_BOOK_BUDGET_USD` | unset | optional hard USD cap for each book's recorded Gemini calls |
+| `STORY_BOOK_BUDGETS` | unset | per-book overrides of that cap, `"28:140,31:60"` |
 | `STORY_SCENE_TRIES` | `3` | max image attempts per scene; if none pass the critic, a vision judge picks the best of them |
 | `STORY_SCENE_REVISE` | `1` | revise a broadly-good near-miss with an img2img edit; set `0` to always regenerate from scratch |
 | `STORY_WEBP_QUALITY` | `72` | lossy WebP quality for stored art (1–100) |

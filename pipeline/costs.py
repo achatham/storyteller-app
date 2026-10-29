@@ -97,6 +97,12 @@ class BudgetExceeded(RuntimeError):
 def _book_budget(run: str) -> float | None:
     if not run.startswith("book:"):
         return None
+    # per-book overrides, "28:140,31:60" -- for raising one big book's ceiling
+    # deliberately without raising it for every book
+    for item in os.environ.get("STORY_BOOK_BUDGETS", "").split(","):
+        bid, _, amt = item.partition(":")
+        if bid.strip() and bid.strip() == run[5:] and amt.strip():
+            return float(amt)
     raw = os.environ.get("STORY_BOOK_BUDGET_USD", "").strip()
     if not raw:
         return None
