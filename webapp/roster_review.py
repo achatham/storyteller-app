@@ -163,8 +163,8 @@ def gather(book_id: int) -> dict:
     for ch in chapters:
         for cc in db.get_chapter_cast(book_id, ch["idx"]):
             eid = cc.get("entity_id")
-            if not eid or eid in reg_ids or cc.get("from_registry"):
-                continue
+            if not eid or eid in reg_ids:   # NOT from_registry: chapters mis-flag ids the
+                continue                    # registry lacks, and those need mapping most
             loc = locals_.setdefault(eid, {"name": cc.get("name") or eid, "chapters": [], "defs": []})
             loc["chapters"].append(ch["idx"])
             loc["defs"].append(cc)
