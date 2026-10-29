@@ -539,6 +539,12 @@ def run(book_id: int):
         from . import scene
         db.set_status(book_id, "roster", "drawing the full roster")
         scene.draw_all_sheets(book_id)
+        # whole-book roster review over the drawn sheets: merge minor characters the
+        # chapters named separately, drop entities no page uses, un-double props a
+        # variant already wears, redraw sheets that are plainly wrong (webapp/roster_review)
+        from . import roster_review
+        db.set_status(book_id, "roster_check", "reviewing the roster across the whole book")
+        roster_review.run(book_id)
         db.bake_upsert(book_id, "roster_review", total_pages=n)
         db.set_status(book_id, "roster_review",
                       f"roster ready ({n} pages) — review it, then illustrate the book")
@@ -546,7 +552,13 @@ def run(book_id: int):
         print(f"[process] book {book_id} roster ready: {n} pages (awaiting bake)", flush=True)
         return
 
-    # 3'. lazy mode: warm the first few page images (drawing just the roster sheets
+    # 3'. lazy mode: the same review, before any sheet is drawn -- text fixes only
+    # (draw=False); sheets are then drawn on demand from the corrected roster
+    from . import roster_review
+    db.set_status(book_id, "roster_check", "reviewing the roster across the whole book")
+    roster_review.run(book_id, draw=False)
+
+    # 3''. lazy mode: warm the first few page images (drawing just the roster sheets
     # they need) so the book opens instantly.
     warm = min(int(os.environ.get("STORY_WARM_PAGES", "2")), n)
     if warm > 0:

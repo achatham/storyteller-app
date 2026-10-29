@@ -142,7 +142,7 @@ def main():
 <h3 class="section">The Story</h3>
 {''.join(spreads_html)}
 <footer style="text-align:center;padding:40px;color:#b3a690;">
-  Illustrations generated with Gemini 3 Pro Image (Nano Banana 2 Pro).{f" Text &copy; {html.escape(BOOK_AUTHOR)}." if BOOK_AUTHOR else ""}
+  Illustrations generated with Gemini image models.{f" Text &copy; {html.escape(BOOK_AUTHOR)}." if BOOK_AUTHOR else ""}
 </footer>
 </body></html>"""
 

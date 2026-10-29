@@ -29,7 +29,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from pipeline import gem, costs, markup
-from pipeline.config import TEXT_MODEL, STYLES
+from pipeline.config import CONTINUITY_MODEL, STYLES
 from . import db
 
 WINDOW = 5            # pages per review call
@@ -39,7 +39,7 @@ WINDOW = 5            # pages per review call
 REVIEW_WORKERS = int(os.environ.get("STORY_REVIEW_WORKERS", "3"))
 MAX_SHEETS = 8        # reference sheets attached per window (identity anchors)
 SRC_CHARS = 2600      # per-page source text cap
-REVIEW_MODEL = TEXT_MODEL
+REVIEW_MODEL = CONTINUITY_MODEL
 
 REVIEW_PROMPT = """You are the continuity editor for a children's read-aloud picture-book \
 edition of a novel. You are shown {n} CONSECUTIVE pages -- for each, \

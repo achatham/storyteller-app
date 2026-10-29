@@ -103,7 +103,7 @@ Reads `GEMINI_API_KEY` from `.env` (same as the CLI pipeline).
 - **Upload** (`POST /api/books`) stores the file in SQLite and spawns
   `python -m webapp.process <id>`, which reuses the env-driven pipeline to:
   extract text → build the entity **registry** (the character/variant catalogue,
-  on the strong text model at `thinking_level=high`) → **segment** each chapter
+  on the strong text model, Gemini 4 Argon, at `thinking_level=high`) → **segment** each chapter
   into read-aloud pages. Finally it **warms the first `STORY_WARM_PAGES` page
   images** (default 2) so the book opens instantly. Status is shown live on the hub.
 - **A refused character design falls back to the wardrobe.** The safety filter
@@ -178,12 +178,47 @@ A page is only rewritten when its words match the re-extracted text exactly, so 
 page it can't place is left as it was. Readers pick the new text up on reload; a
 saved offline copy needs re-saving.
 
+## Roster review (one look at the whole cast)
+
+Every other planning step sees part of the book, and it shows in the roster. The
+registry is catalogued from the whole source *file*, so sequel excerpts at the back
+leak in: _The Golden Compass_ got Will Parry and Cittàgazze. Each chapter is planned
+separately and invents its own minor characters, so one Bolvangar girl came out as
+`annie` and `annie_captive`, and one Svalbard guard came out under three ids across
+four pages. Every extra id is a separate sheet, and the same person ends up looking
+like different people.
+
+`webapp/roster_review.py` runs once per import, on the strong text model
+(`STORY_ROSTER_REVIEW_MODEL`, Gemini 4 Argon). It sees every registry look with its
+page count, every chapter-local character, **and the drawn reference sheets as
+images**. It returns fixes, which code validates before anything is written:
+
+| Fix | Guard-rail |
+| :--- | :--- |
+| map a local onto the registry entity it duplicates | the target entity/variant must exist |
+| merge locals that are the same individual into one registry entity, keeping one member's look + sheet (`keep_id`) | ids must be real locals; one fix per local |
+| drop entities/variants from another book | only with **zero** page uses |
+| strip a prop from pages where a variant already wears it (Iorek's armor) | only where a covering variant is on the page |
+| redraw a sheet that's plainly wrong, with a one-line correction folded into its description | capped at `STORY_ROSTER_REVIEW_REDRAWS` (12) |
+
+It needs the sheets, so in **batch mode** it runs after the roster is drawn and
+before the review gate. Any sheet a fix leaves missing is then drawn, so the
+roster the user reviews is complete. In **lazy mode** it runs before warming with
+`draw=False`: it makes the text fixes only, and sheets are drawn later from the
+corrected roster. A failed review is logged and skipped, never fatal. The model's
+notes and what was applied are stored in the registry under `roster_review`.
+
+```sh
+docker compose exec storyteller python -m webapp.roster_review <book_id>            # dry run
+docker compose exec storyteller python -m webapp.roster_review <book_id> --apply    # + redraws
+```
+
 ## Continuity review (a critic reads 5 pages at a time)
 
 The per-page critic judges each picture alone, so it cannot see drift that only
 shows across pages: the same room drawn three ways, a character whose clothes
 change between pages the story keeps them in, a prop changing colour. The
-continuity review (`webapp/continuity.py`) shows a text model **five consecutive
+continuity review (`webapp/continuity.py`) shows the strong text model **five consecutive
 pages together** — each page's source text, the plan it was drawn from (setting,
 brief, cast) and the illustration — plus the reference sheets the illustrator was
 given, and asks for the root cause of each inconsistency rather than a redraw:
@@ -211,7 +246,7 @@ then redraws only the pages marked *revise* / *regenerate* (revise seeds the dra
 loop with the current picture + the critic's edit instruction; a revise the critic
 rejects falls through to the normal escalate/redraw path). New reference sheets
 are drawn lazily the first time a redrawn page needs them. "Apply plan only" skips
-the redraws. A review is text-model only (~$0.03 per window); applying costs image
+the redraws. A review is text-model only (~$0.08 per window on Argon); applying costs image
 generations for the pages it redraws.
 
 ## Config (env)
@@ -240,10 +275,14 @@ generations for the pages it redraws.
 | `STORY_COVER_CAST` | `3` | max characters on a cover |
 | `STORY_TEXT_MODEL` | `gemini-3.8-flash` | default for all text steps |
 | `STORY_ANALYZE_MODEL` | = text model | segmentation (page anchors + briefs) |
-| `STORY_REGISTRY_MODEL` | = text model | entity discovery/expansion (identity-critical) |
+| `STORY_STRONG_TEXT_MODEL` | `gemini-4-argon` | the once-per-book judgement steps below default to it |
+| `STORY_REGISTRY_MODEL` | = strong model | entity discovery/expansion (identity-critical) |
+| `STORY_CONTINUITY_MODEL` | = strong model | the 5-page continuity review |
 | `STORY_REGISTRY_THINK` | `high` | thinking level for the registry step (minimal/low/medium/high) |
 | `STORY_CRITIQUE_MODEL` | = text model | image quality scoring (low-sensitivity) |
 | `STORY_CHAPTER_MODEL` | = text model | chapter skeleton classification (low-sensitivity) |
+| `STORY_ROSTER_REVIEW_MODEL` | = strong model | whole-book roster review (sees every sheet) |
+| `STORY_ROSTER_REVIEW` / `STORY_ROSTER_REVIEW_REDRAWS` | `1` / `12` | turn the roster review off (`0`); cap on sheets it may redraw |
 
 Per-book choices (art style, illustration cadence, audience age) are set in the
 upload form. Token/image costs are recorded to `costs.db` (`python -m pipeline.costs`).

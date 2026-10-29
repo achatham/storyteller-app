@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS books (
     style         TEXT,
     words_per_page INTEGER,
     age           TEXT,
-    status        TEXT,        -- queued|extracting|registry|roster|segmenting|ready|failed
+    status        TEXT,        -- queued|extracting|registry|roster|segmenting|roster_check|ready|failed
     detail        TEXT,        -- human progress detail / error message
     num_pages     INTEGER DEFAULT 0,
     seg_ver       INTEGER DEFAULT 0,   -- bumps on re-segmentation (cache-busts image URLs)
@@ -458,7 +458,7 @@ def delete_book(book_id):
 
 
 IN_PROGRESS = ("queued", "extracting", "registry", "roster", "segmenting",
-               "processing", "warming")
+               "roster_check", "processing", "warming")
 
 
 def books_in_progress() -> list[int]:
@@ -555,6 +555,15 @@ def get_pages(book_id) -> list[dict]:
             "SELECT idx,chapter_idx,title,read_text,image_anchor FROM pages "
             "WHERE book_id=? ORDER BY idx", (book_id,)).fetchall()
         return [dict(r) for r in rows]
+
+
+def page_casts(book_id) -> list[tuple[int, list[dict]]]:
+    """(idx, parsed cast) for every page, in order -- the whole-book cast view the
+    roster review needs without loading every page's text."""
+    with conn() as c:
+        rows = c.execute("SELECT idx,cast_json FROM pages WHERE book_id=? ORDER BY idx",
+                         (book_id,)).fetchall()
+        return [(r["idx"], json.loads(r["cast_json"]) if r["cast_json"] else []) for r in rows]
 
 
 def page_briefs(book_id, limit: int = 6, skip_blank: bool = True) -> list[str]:

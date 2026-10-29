@@ -247,13 +247,18 @@ LITE_IMAGE_MODEL = os.environ.get("STORY_LITE_IMAGE_MODEL", "gemini-3.1-flash-li
 # general default (used when a caller doesn't specify) = the page model
 IMAGE_MODEL = os.environ.get("STORY_IMAGE_MODEL", PAGE_IMAGE_MODEL)
 TEXT_MODEL = os.environ.get("STORY_TEXT_MODEL", "gemini-3.8-flash")
+# The strongest text model, for the few once-per-book (or once-per-window) steps where
+# judgement matters more than volume: cataloguing the registry, the whole-book roster
+# review, the continuity review. Gemini 4 Argon (~2.7x flash per token). Its output cap
+# is 32K, half of flash's -- fine here, the largest registry call has needed ~13K.
+STRONG_TEXT_MODEL = os.environ.get("STORY_STRONG_TEXT_MODEL", "gemini-4-argon")
 # Per-step text models (default to TEXT_MODEL). Low-sensitivity steps -- image
 # critique and the chapter-skeleton classification -- can be pointed at a cheaper
 # model (e.g. gemini-3.1-flash-lite) without much quality risk. Segmentation now
 # only emits page-start anchors (not verbatim text), so it is much cheaper and
 # also tolerant of a lighter model; registry/discovery is identity-critical.
 ANALYZE_MODEL = os.environ.get("STORY_ANALYZE_MODEL", TEXT_MODEL)
-REGISTRY_MODEL = os.environ.get("STORY_REGISTRY_MODEL", TEXT_MODEL)
+REGISTRY_MODEL = os.environ.get("STORY_REGISTRY_MODEL", STRONG_TEXT_MODEL)
 # Building the entity registry (cataloguing every character + their distinct
 # looks across the whole book) is the reasoning-heaviest text step, so run it at
 # a raised thinking level (Gemini 3: minimal|low|medium|high; default medium).
@@ -266,6 +271,11 @@ PROP_MODEL = os.environ.get("STORY_PROP_MODEL", "gemini-3.1-flash-lite")
 # Cleaning a book's title/author out of its filename + container metadata is a
 # trivial normalization, so it defaults to the cheap model too.
 META_MODEL = os.environ.get("STORY_META_MODEL", "gemini-3.1-flash-lite")
+# The whole-book roster review (webapp/roster_review) runs once per book and has to
+# reason across every chapter's cast (and every sheet) at once.
+ROSTER_REVIEW_MODEL = os.environ.get("STORY_ROSTER_REVIEW_MODEL", STRONG_TEXT_MODEL)
+# The continuity review (webapp/continuity) judges five pages' pictures as a sequence.
+CONTINUITY_MODEL = os.environ.get("STORY_CONTINUITY_MODEL", STRONG_TEXT_MODEL)
 MAX_REFS = int(os.environ.get("STORY_MAX_REFS", "8"))
 # Gemini image_size is a discrete enum: "1K", "2K", "4K". Each step doubles
 # each dimension. "1K" (~1280px long edge) keeps files small for remote loading.
