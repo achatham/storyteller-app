@@ -39,6 +39,9 @@ def submit_image_batch(book_id: int, round: int, kind: str, reqs: list[dict], mo
         job = existing["job_name"]
         log(f"{tag}: reattaching {job} ({existing['state']})")
     else:
+        # the whole batch is committed at submission, so cap it here, not per result
+        costs.check_budget(f"book:{book_id}",
+                           upcoming=len(reqs) * costs.cost_for(model, 0, 1120, batch=True))
         job = gem.batch_generate_images(reqs, model=model, display_name=display)
         db.bjob_upsert(book_id, round, kind, job, "JOB_STATE_PENDING")
         log(f"{tag}: submitted {job} ({len(reqs)} reqs, model={model})")

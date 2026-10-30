@@ -116,11 +116,25 @@ def _run_cost(run: str) -> float:
     return float(row[0] or 0)
 
 
+def check_budget(run: str | None = None, upcoming: float = 0.0):
+    """Raise BudgetExceeded if `run` has already spent its book budget (plus an
+    optional estimate of what is about to be spent). For spend that is committed up
+    front -- a Batch API submission -- where record() would only find out after."""
+    run = run if run is not None else _resolve_run()
+    budget = _book_budget(run)
+    if budget is not None and _run_cost(run) + upcoming > budget:
+        raise BudgetExceeded(f"book budget ${budget:.2f} reached "
+                             f"(${_run_cost(run):.2f} spent, ~${upcoming:.2f} more requested)")
+
+
 def record(model: str, kind: str, input_tokens: int, output_tokens: int,
            total_tokens: int | None = None, images: int = 0,
            run: str | None = None, batch: bool = False) -> float:
     """Record one API call. Returns its USD cost. Thread- and process-safe.
-    batch=True prices the call at the 50% Batch-API discount."""
+    batch=True prices the call at the 50% Batch-API discount, and never raises: a
+    batch result was paid for when the job ran, so refusing to record it only throws
+    away an image we already bought (and every later result in the same job). Batch
+    spend is capped at submission instead (check_budget)."""
     cost = cost_for(model, input_tokens, output_tokens, batch=batch)
     total = total_tokens if total_tokens is not None else input_tokens + output_tokens
     # key each row by its run (per-book tag / output dir / label) so per-book and
@@ -129,7 +143,7 @@ def record(model: str, kind: str, input_tokens: int, output_tokens: int,
         run = _resolve_run()
     with _lock:
         budget = _book_budget(run)
-        if budget is not None and _run_cost(run) + cost > budget:
+        if not batch and budget is not None and _run_cost(run) + cost > budget:
             raise BudgetExceeded(f"book budget ${budget:.2f} reached (next call ${cost:.4f})")
         with _conn() as c:
             c.execute(

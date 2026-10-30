@@ -30,3 +30,19 @@ def test_per_book_override_beats_the_global_cap(monkeypatch):
     assert costs._book_budget("book:28") == 140
     assert costs._book_budget("book:3") == 20
     assert costs._book_budget("book:280") == 100     # no prefix match
+
+
+def test_paid_batch_results_are_recorded_past_the_cap(tmp_path, monkeypatch):
+    """A batch result was billed when the job ran; refusing to record it would throw
+    the image away. The cap stops the NEXT batch at submission instead."""
+    monkeypatch.setenv("STORY_COST_DB", str(tmp_path / "costs.db"))
+    monkeypatch.setenv("STORY_BOOK_BUDGET_USD", "0.01")
+    import pipeline.costs as costs
+    importlib.reload(costs)
+
+    costs.record("gemini-3.5-flash", "text", 0, 1_000, run="book:7")
+    for _ in range(3):   # over the cap, but already paid for
+        assert costs.record("gemini-3.1-flash-image", "image", 0, 1120,
+                            images=1, run="book:7", batch=True) > 0
+    with pytest.raises(costs.BudgetExceeded):
+        costs.check_budget("book:7")
