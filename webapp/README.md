@@ -208,6 +208,16 @@ roster the user reviews is complete. In **lazy mode** it runs before warming wit
 corrected roster. A failed review is logged and skipped, never fatal. The model's
 notes and what was applied are stored in the registry under `roster_review`.
 
+**Companions that change shape.** A companion that always looks the same (a settled
+dæmon, a familiar) is drawn *into* its owner's sheet: it is always present and never
+uses up a reference slot. One that changes form can't be: _The Golden Compass_ pinned
+Pantalaimon as an ermine in Lyra's sheets, and on 80 of the 143 pages whose text names
+his form, the drawing contradicted it. He is a separate entity there, with one sheet
+per recurring form, all drawn against the ermine as an identity reference that keeps
+only a shared signature (honey-amber eyes, a golden-russet blaze between them).
+Each page's cast adds the form its text names; rare forms go into the brief instead.
+This was done for one book by hand, not by the pipeline.
+
 ```sh
 docker compose exec storyteller python -m webapp.roster_review <book_id>            # dry run
 docker compose exec storyteller python -m webapp.roster_review <book_id> --apply    # + redraws
