@@ -305,3 +305,39 @@ def test_export_flags_position_jumps_without_dropping_them(monkeypatch, tmp_path
     assert jump["looks_like_jump"] is True
     assert real["pages_per_turn"] == 0.91
     assert real["looks_like_jump"] is False
+
+
+def test_vocab_word_strips_punctuation_possessive_and_case(monkeypatch, tmp_path):
+    module = server(monkeypatch, tmp_path)
+    assert module._vocab_word("“Melancholy,”") == "melancholy"
+    assert module._vocab_word("Scrooge’s") == "scrooge"
+    assert module._vocab_word("good-humoured.") == "good-humoured"
+    assert module._vocab_word("don't") == "don't"
+    for junk in ["", "—", "1843", "x" * 65]:
+        with pytest.raises(HTTPException):
+            module._vocab_word(junk)
+
+
+def test_vocab_api_dedupes_per_book_and_filters_by_day(monkeypatch, tmp_path):
+    module = server(monkeypatch, tmp_path)
+    module.db.init()
+    a = module.db.create_book("A", "", "a.pdf", "watercolor", 200, "application/pdf", b"%PDF-")
+    b = module.db.create_book("B", "", "b.pdf", "watercolor", 200, "application/pdf", b"%PDF-")
+
+    first = module.api_vocab_add(a, {"word": "Gruel,", "context": "A bowl of gruel.", "page": 3})
+    assert first["new"] and first["word"] == "gruel" and first["page"] == 3
+    again = module.api_vocab_add(a, {"word": "gruel", "context": "More gruel.", "page": 9})
+    assert not again["new"] and again["seen_count"] == 2
+    assert again["context"] == "A bowl of gruel."      # the sentence it was new in
+    assert module.api_vocab_add(b, {"word": "gruel"})["new"]   # other book, other list
+
+    assert {w["title"] for w in module.api_vocab_list()} == {"A", "B"}
+    assert [w["book_id"] for w in module.api_vocab_list(book_id=a)] == [a]
+    assert module.api_vocab_list(since=first["created_at"] + 3600) == []
+
+    module.api_vocab_delete(first["id"])
+    assert [w["book_id"] for w in module.api_vocab_list()] == [b]
+    with pytest.raises(HTTPException):
+        module.api_vocab_delete(first["id"])
+    with pytest.raises(HTTPException):
+        module.api_vocab_add(999, {"word": "gruel"})

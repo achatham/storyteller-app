@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storyteller — vocabulary</title>
+<link rel="manifest" href="/static/manifest.webmanifest" crossorigin="use-credentials">
+<meta name="theme-color" content="#7a5c3e">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Storyteller">
+<style>
+  :root { --bg:#f4efe6; --ink:#2b2622; --muted:#9a8a70; --panel:#fffdf8; --line:#e0d4bd; --accent:#7a5c3e; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font-family:Georgia,'Times New Roman',serif; }
+  header { padding:28px 24px 8px; max-width:760px; margin:0 auto; }
+  h1 { margin:0; font-size:2rem; }
+  .sub { color:var(--muted); font-family:system-ui,sans-serif; font-size:.9rem; }
+  main { max-width:760px; margin:0 auto; padding:8px 24px 60px; }
+  a.back { font-family:system-ui,sans-serif; font-size:.85rem; color:var(--accent); text-decoration:none; }
+  .controls { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:14px 0 4px;
+              font-family:system-ui,sans-serif; }
+  .seg { display:inline-flex; border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .seg button { font:inherit; font-size:.9rem; padding:8px 14px; border:0; background:var(--panel);
+                color:var(--ink); cursor:pointer; }
+  .seg button.on { background:var(--accent); color:#fff; }
+  select { font:inherit; font-size:.9rem; padding:8px; border:1px solid var(--line); border-radius:10px;
+           background:var(--panel); color:var(--ink); max-width:100%; }
+  .hint { font-family:system-ui,sans-serif; font-size:.8rem; color:var(--muted); margin:6px 0 0; }
+  .book { display:flex; align-items:baseline; gap:10px; margin:24px 0 8px; }
+  .book h2 { margin:0; font-size:1.15rem; font-weight:normal; }
+  .book .n { font-family:system-ui,sans-serif; font-size:.78rem; color:var(--muted); }
+  .book a { margin-left:auto; font-family:system-ui,sans-serif; font-size:.8rem; color:var(--accent);
+            text-decoration:none; white-space:nowrap; }
+  .w { display:flex; align-items:flex-start; gap:12px; background:var(--panel); border:1px solid var(--line);
+       border-radius:12px; padding:12px 8px 12px 16px; margin-bottom:8px; }
+  .w .body { flex:1; min-width:0; }
+  .w .word { font-size:1.35rem; }
+  .w .ctx { font-size:.95rem; line-height:1.45; color:#5c4b38; margin-top:3px; }
+  .w .ctx mark { background:rgba(240,196,90,.45); color:inherit; border-radius:3px; padding:0 2px; }
+  .w .meta { font-family:system-ui,sans-serif; font-size:.75rem; color:var(--muted); margin-top:5px; }
+  .w .del { font:inherit; font-size:1.1rem; line-height:1; color:var(--muted); background:none;
+            border:0; padding:6px 10px; cursor:pointer; border-radius:8px; }
+  .w .del:hover { color:#9b3d2e; background:#fbf1ec; }
+  .empty { color:var(--muted); font-family:system-ui,sans-serif; padding:24px 0; line-height:1.5; }
+</style>
+</head><body>
+<header>
+  <h1>📝 Vocabulary</h1>
+  <div class="sub"><a class="back" href="/">← Library</a></div>
+</header>
+<main>
+  <div class="controls">
+    <div class="seg" role="tablist">
+      <button id="today" class="on" type="button">Today’s new words</button>
+      <button id="all" type="button">All words</button>
+    </div>
+    <select id="book"><option value="">All books</option></select>
+  </div>
+  <div class="hint">Long-press a word while reading to add it. Each book keeps its own list.</div>
+  <div id="list"><div class="empty">Loading…</div></div>
+</main>
+<script src="/static/auth.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let WORDS = [];
+let view = { today: true, book: new URLSearchParams(location.search).get("book") || "" };
+
+function midnight(){ const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() / 1000; }
+function when(t){
+  const d = new Date(t*1000);
+  return t >= midnight() ? d.toLocaleTimeString([], {hour:"numeric", minute:"2-digit"})
+                         : d.toLocaleDateString([], {month:"short", day:"numeric"});
+}
+// the saved sentence with the word picked out (any case, possessive included)
+function context(w){
+  if (!w.context) return "";
+  const re = new RegExp(`(^|[^\\p{L}])(${w.word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})(?=[^\\p{L}]|$)`, "iu");
+  const m = re.exec(w.context);
+  if (!m) return esc(w.context);
+  const at = m.index + m[1].length, end = at + m[2].length;
+  return esc(w.context.slice(0, at)) + "<mark>" + esc(w.context.slice(at, end)) + "</mark>" + esc(w.context.slice(end));
+}
+
+function render(){
+  $("#today").classList.toggle("on", view.today);
+  $("#all").classList.toggle("on", !view.today);
+  const since = midnight();
+  const rows = WORDS.filter(w => (!view.today || w.created_at >= since) &&
+                                 (!view.book || String(w.book_id) === view.book));
+  if (!rows.length){
+    $("#list").innerHTML = `<div class="empty">${view.today ? "No new words yet today." : "No words saved yet."}<br>
+      Hold your finger on a word in the reader to add it here.</div>`;
+    return;
+  }
+  // group by book, keeping the order of each book's newest word
+  const groups = new Map();
+  for (const w of rows){
+    if (!groups.has(w.book_id)) groups.set(w.book_id, { title: w.title, words: [] });
+    groups.get(w.book_id).words.push(w);
+  }
+  let html = "";
+  for (const [bid, g] of groups){
+    html += `<div class="book"><h2>${esc(g.title || "Untitled")}</h2>
+      <span class="n">${g.words.length} word${g.words.length === 1 ? "" : "s"}</span>
+      <a href="/book/${bid}">Open book ›</a></div>`;
+    for (const w of g.words){
+      const meta = [when(w.created_at), w.page != null ? `page ${w.page + 1}` : "",
+                    w.seen_count > 1 ? `picked ${w.seen_count}×` : ""].filter(Boolean).join(" · ");
+      html += `<div class="w"><div class="body">
+          <div class="word">${esc(w.word)}</div>
+          ${w.context ? `<div class="ctx">${context(w)}</div>` : ""}
+          <div class="meta">${meta}</div>
+        </div><button class="del" data-id="${w.id}" title="Remove" aria-label="Remove ${esc(w.word)}">✕</button></div>`;
+    }
+  }
+  $("#list").innerHTML = html;
+}
+
+function fillBooks(){
+  const seen = new Map();
+  for (const w of WORDS) if (!seen.has(w.book_id)) seen.set(w.book_id, w.title);
+  if (view.book && !seen.has(+view.book)) view.book = "";
+  $("#book").innerHTML = `<option value="">All books</option>` +
+    [...seen].sort((a, b) => (a[1]||"").localeCompare(b[1]||""))
+      .map(([id, t]) => `<option value="${id}">${esc(t || "Untitled")}</option>`).join("");
+  $("#book").value = view.book;
+}
+
+async function load(){
+  try {
+    const r = await fetch("/api/vocab", {cache:"no-store"});
+    if (Auth.bounced(r)) return;   // expired session -> sign-in overlay
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    WORDS = await r.json();        // a login page is HTML -> throws, handled below
+    if (!Array.isArray(WORDS)) throw new Error("not signed in");
+  } catch(e){
+    Auth.fail({offline: true});
+    return;
+  }
+  fillBooks();
+  render();
+}
+
+$("#today").onclick = () => { view.today = true; render(); };
+$("#all").onclick = () => { view.today = false; render(); };
+$("#book").onchange = e => {
+  view.book = e.target.value;
+  const u = new URL(location.href);
+  view.book ? u.searchParams.set("book", view.book) : u.searchParams.delete("book");
+  history.replaceState(null, "", u);
+  render();
+};
+$("#list").addEventListener("click", async e => {
+  const b = e.target.closest(".del");
+  if (!b) return;
+  const w = WORDS.find(x => x.id === +b.dataset.id);
+  if (!w || !confirm(`Remove “${w.word}” from the list?`)) return;
+  const r = await fetch(`/api/vocab/${w.id}`, {method:"DELETE"}).catch(() => null);
+  if (r && Auth.bounced(r)) return;
+  if (!r || (!r.ok && r.status !== 404)){ alert("Couldn’t remove that word — try again."); return; }
+  WORDS = WORDS.filter(x => x !== w);
+  fillBooks();
+  render();
+});
+load();
+</script>
+</body></html>

@@ -270,6 +270,25 @@ CREATE TABLE IF NOT EXISTS continuity_reviews (
     applied_json TEXT
 );
 CREATE INDEX IF NOT EXISTS continuity_book ON continuity_reviews(book_id, created_at);
+-- Vocabulary words picked out while reading (long-press a word in the reader).
+-- Kept per book because each book is read to a particular kid, so the book is
+-- what keeps one child's list apart from another's. `word` is the lowercased
+-- form a word is deduplicated on; `context` is the sentence it was found in and
+-- `page` the global page index, so a later review can show it in place.
+-- seen_count/last_seen_at record re-picks of a word already on the list, which a
+-- future spaced-repetition pass can read as "still unsure of this one".
+CREATE TABLE IF NOT EXISTS vocab (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id      INTEGER REFERENCES books(id) ON DELETE CASCADE,
+    word         TEXT NOT NULL,
+    context      TEXT,
+    page         INTEGER,
+    created_at   REAL,
+    last_seen_at REAL,
+    seen_count   INTEGER DEFAULT 1,
+    UNIQUE (book_id, word)
+);
+CREATE INDEX IF NOT EXISTS vocab_created ON vocab(created_at);
 """
 
 
@@ -1510,6 +1529,51 @@ def reading_history(limit=200, start=None, end=None) -> list[dict]:
             f"WHERE {' AND '.join(where)} "
             "ORDER BY l.updated_at DESC LIMIT ?", params).fetchall()
         return [dict(r) for r in rows]
+
+
+# ---------------- vocabulary ----------------
+
+def vocab_add(book_id, word, context=None, page=None) -> dict:
+    """Add a word to a book's vocabulary list, or note that it was picked again.
+
+    Returns the row plus `new`: False when the word was already on this book's
+    list, in which case its original sentence and date are kept (that's when it
+    was *new*) and only the re-pick is counted."""
+    now = time.time()
+    with conn() as c:
+        cur = c.execute("INSERT INTO vocab(book_id,word,context,page,created_at,last_seen_at) "
+                        "VALUES (?,?,?,?,?,?) ON CONFLICT(book_id,word) DO NOTHING",
+                        (book_id, word, context, page, now, now))
+        new = cur.rowcount == 1
+        if not new:
+            c.execute("UPDATE vocab SET seen_count=seen_count+1, last_seen_at=? "
+                      "WHERE book_id=? AND word=?", (now, book_id, word))
+        r = c.execute("SELECT * FROM vocab WHERE book_id=? AND word=?",
+                      (book_id, word)).fetchone()
+    return {**dict(r), "new": new}
+
+
+def vocab_list(book_id=None, since=None) -> list[dict]:
+    """Vocabulary words newest first, with their book's title. `since` (epoch
+    seconds) keeps only words first added at or after it -- the "today's new
+    words" view passes the reader's local midnight."""
+    where, params = [], []
+    if book_id is not None:
+        where.append("v.book_id=?")
+        params.append(book_id)
+    if since is not None:
+        where.append("v.created_at>=?")
+        params.append(since)
+    sql = ("SELECT v.*, b.title AS title FROM vocab v JOIN books b ON b.id=v.book_id"
+           + (f" WHERE {' AND '.join(where)}" if where else "")
+           + " ORDER BY v.created_at DESC")
+    with conn() as c:
+        return [dict(r) for r in c.execute(sql, params)]
+
+
+def vocab_delete(vocab_id) -> bool:
+    with conn() as c:
+        return c.execute("DELETE FROM vocab WHERE id=?", (vocab_id,)).rowcount == 1
 
 
 # ---------------- continuity reviews ----------------

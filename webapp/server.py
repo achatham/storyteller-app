@@ -16,6 +16,10 @@
   GET  /api/history               reading history (recent sessions across all books)
   GET  /api/history/export        reading history as JSON for export (?start=&end=)
   GET  /history                   reading-history viewer page
+  POST /api/books/{id}/vocab      save a long-pressed word to that book's vocab list
+  GET  /api/vocab                 vocab words, newest first (?since=&book_id=)
+  DELETE /api/vocab/{vid}         drop a vocab word
+  GET  /vocab                     vocab list page (today's new words / all)
 
 Scene images are generated on demand and prefetched N pages ahead (PREFETCH).
 Concurrent generations are capped by a semaphore; duplicate work is coalesced by
@@ -352,6 +356,11 @@ def hub():
 @app.get("/history", response_class=HTMLResponse)
 def history_page():
     return (STATIC / "history.html").read_text()
+
+
+@app.get("/vocab", response_class=HTMLResponse)
+def vocab_page():
+    return (STATIC / "vocab.html").read_text()
 
 
 @app.get("/read/{book_id}", response_class=HTMLResponse)
@@ -1201,6 +1210,54 @@ async def api_set_progress(book_id: int, body: dict):
     pos = max(0, min(pos, max(0, (book["num_pages"] or 1) - 1)))
     db.set_progress(book_id, pos)
     db.log_reading(book_id, pos)
+    return {"ok": True}
+
+
+# Edges of a picked word that aren't part of it: quotes, dashes, punctuation.
+_WORD_EDGES = re.compile(r"^[\W_]+|[\W_]+$")
+_POSSESSIVE = re.compile(r"['’]s$")
+
+
+def _vocab_word(raw) -> str:
+    """The form a picked word is stored and deduplicated on: no surrounding
+    punctuation, no possessive 's, lowercase. Raises 400 if nothing word-like is
+    left (a long-press that landed on a dash or a stray quote)."""
+    w = _WORD_EDGES.sub("", str(raw or "").strip())
+    w = _POSSESSIVE.sub("", w).lower()
+    if not w or len(w) > 64 or not any(ch.isalpha() for ch in w):
+        raise HTTPException(400, "not a word")
+    return w
+
+
+@app.post("/api/books/{book_id}/vocab")
+def api_vocab_add(book_id: int, body: dict = Body(...)):
+    """Save a word from this book to its vocabulary list (the reader's
+    long-press). Re-picking a word already on the list is not an error; the
+    response says `new: false`."""
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    word = _vocab_word(body.get("word"))
+    context = (str(body.get("context") or "").strip() or None)
+    if context:
+        context = context[:400]
+    try:
+        page = int(body["page"]) if body.get("page") is not None else None
+    except (TypeError, ValueError):
+        page = None
+    return db.vocab_add(book_id, word, context, page)
+
+
+@app.get("/api/vocab")
+def api_vocab_list(book_id: int | None = None, since: float | None = None):
+    """Vocabulary words, newest first. ?since= is epoch seconds (the client sends
+    its local midnight for "today"); ?book_id= narrows to one book."""
+    return db.vocab_list(book_id=book_id, since=since)
+
+
+@app.delete("/api/vocab/{vocab_id}")
+def api_vocab_delete(vocab_id: int):
+    if not db.vocab_delete(vocab_id):
+        raise HTTPException(404, "no such word")
     return {"ok": True}
 
 

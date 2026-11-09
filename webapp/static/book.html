@@ -121,6 +121,7 @@
     <span id="fsval">100%</span>
     <button id="fsup" aria-label="Larger text">A+</button></div>
   <a class="btn" id="classic">Switch to single-page view</a>
+  <a class="btn" id="vocab">&#128221; Vocabulary words</a>
   <button id="offline">&#8681; Save for offline reading</button>
   <div id="offmeta" style="font-size:.78rem;color:var(--muted);text-align:center;min-height:1em;margin-top:-6px"></div>
   <button id="fs">&#9974; Full screen</button>
@@ -134,6 +135,7 @@
 <script src="/static/markup.js"></script>
 <script src="/static/offline-idb.js"></script>
 <script src="/static/offline.js"></script>
+<script src="/static/vocab.js"></script>
 <script>
 const BOOK_ID = __BOOK_ID__;
 const BUILD = "__BUILD__";   // front-end build this page was served with
@@ -468,6 +470,9 @@ $("#update").onclick = async e=>{
   else { btn.textContent = "✓ Up to date"; setTimeout(()=>{ btn.innerHTML = label; }, 2000); }
 };
 $("#classic").href = "/read/" + BOOK_ID;
+$("#vocab").href = "/vocab?book=" + BOOK_ID;
+// long-press a word to save it to this book's vocabulary list
+if (window.Vocab) Vocab.attach({ root: $("#flow"), bookId: BOOK_ID, getPage: bookPos });
 
 // ---- save-for-offline (stores the whole book + pictures in IndexedDB) ----
 let offBusy = false, offAbort = null;

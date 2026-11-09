@@ -259,6 +259,22 @@ are drawn lazily the first time a redrawn page needs them. "Apply plan only" ski
 the redraws. A review is text-model only (~$0.08 per window on Argon); applying costs image
 generations for the pages it redraws.
 
+## Vocabulary words
+
+Long-press a word in either reader to save it to that book's vocabulary list,
+along with the sentence it came from and the page. `/vocab` (linked from the
+library and the reader menu) shows today's new words, or every word, grouped by
+book. Lists are per book rather than per child because each book is read to one
+child, so the book already keeps their words apart. Picking a word already on
+the list keeps its original sentence and date and counts the repeat
+(`seen_count`), which a later spaced-repetition pass can read as a word that
+hasn't stuck yet.
+
+The word under the finger is found with `caretPositionFromPoint` /
+`caretRangeFromPoint` rather than by wrapping words in spans, and text selection
+is turned off inside the reader text so the browser's own long-press (select +
+magnifier) doesn't compete. See `static/vocab.js`.
+
 ## Config (env)
 
 | var | default | meaning |

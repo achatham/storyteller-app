@@ -126,6 +126,7 @@
         <span class="pos" id="pos"></span>
         <button id="next">Next &#8250;</button>
       </div>
+      <button id="vocab">&#128221; Vocabulary words</button>
       <button id="bookview">&#128214; Book view (two-column)</button>
       <button id="offline">&#8681; Save for offline reading</button>
       <div id="offmeta" style="color:var(--muted);font-size:.78rem;text-align:center;min-height:1em;margin-top:-8px"></div>
@@ -140,6 +141,7 @@
 <script src="/static/markup.js"></script>
 <script src="/static/offline-idb.js"></script>
 <script src="/static/offline.js"></script>
+<script src="/static/vocab.js"></script>
 <script>
 const BOOK_ID = __BOOK_ID__;
 // Markup.toHtml renders the book's own formatting; an offline copy saved before
@@ -289,6 +291,9 @@ function toggleFS(){ try {
 function syncFS(){ $("#fs").textContent = (inFS() ? "⛶ Exit full screen" : "⛶ Full screen"); }
 if (!fsSupported()) $("#fs").style.display = "none";
 $("#fs").onclick = e => { e.stopPropagation(); toggleFS(); };
+$("#vocab").onclick = e => { e.stopPropagation(); window.location.href = "/vocab?book=" + BOOK_ID; };
+// long-press a word to save it to this book's vocabulary list
+if (window.Vocab) Vocab.attach({ root: document.querySelector(".read"), bookId: BOOK_ID, getPage: () => state.i });
 $("#bookview").onclick = e => { e.stopPropagation(); window.location.href = "/book/" + BOOK_ID; };
 
 // ---- save-for-offline (stores the whole book + pictures in IndexedDB) ----

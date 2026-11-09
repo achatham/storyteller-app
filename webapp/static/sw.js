@@ -14,7 +14,7 @@
 // saved book reads with zero reader-side offline logic.
 importScripts("/static/offline-idb.js");
 
-const CACHE = "storyteller-v28";   // bumped: saved books stop waiting on a stalled network
+const CACHE = "storyteller-v29";   // bumped: vocab.js joins the shell
 const SLOW_NET_MS = 4000;          // how long /api/* waits on the network before a saved copy wins
 
 // The app shell, fetched at install time. Without this the cache only ever held
@@ -30,6 +30,7 @@ const SHELL = [
   "/static/markup.js",
   "/static/offline-idb.js",
   "/static/offline.js",
+  "/static/vocab.js",
   "/static/manifest.webmanifest",
   "/static/icon-192.png",
   "/static/icon-512.png",
