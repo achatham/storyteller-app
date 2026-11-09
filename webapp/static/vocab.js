@@ -15,6 +15,11 @@
 // swallowed here (capture phase, before their handlers see it). Text selection
 // and the iOS callout are turned off inside root, or the browser's own
 // long-press (select + magnifier) would fight this one.
+//
+// Words already on the book's list are marked wherever they appear in the text.
+// That does wrap text in <mark>s, but only the few saved words, not every word.
+// A MutationObserver re-marks whenever the reader swaps in a new page or chapter,
+// so the readers don't need to call anything after they render.
 (function () {
   const HOLD_MS = 500;
   const SLOP_PX = 10;
@@ -88,7 +93,9 @@
     #vocabToast b { font-family:Georgia,serif; font-size:1rem; }
     #vocabToast button { font:inherit; font-size:.85rem; color:#f0c45a; background:none;
       border:1px solid rgba(240,196,90,.5); border-radius:999px; padding:5px 12px; cursor:pointer; }
-    #vocabToast button[hidden] { display:none; }`;
+    #vocabToast button[hidden] { display:none; }
+    mark.vocab-word { background:rgba(240,196,90,.3); color:inherit; border-radius:3px;
+      box-shadow:0 1px 0 rgba(200,150,40,.55); }`;
   document.head.appendChild(css);
 
   let toast, toastT;
@@ -123,6 +130,68 @@
     setTimeout(() => m.remove(), 1400);
   }
 
+  // ---- marking saved words in the text ----
+  const saved = new Set();
+  let markRoot = null, observer = null;
+
+  // One regex for the whole list, longest words first so "good-humoured" wins over
+  // "good". Words are stored lowercase without a possessive, so the possessive is
+  // matched here and an edge can't be a word character, apostrophe or hyphen.
+  function savedRe() {
+    if (!saved.size) return null;
+    const alts = [...saved].sort((a, b) => b.length - a.length)
+      .map(w => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    return new RegExp(`(?<![\\p{L}\\p{M}\\p{N}'’\\-])(?:${alts.join("|")})(?:['’]s)?` +
+                      `(?![\\p{L}\\p{M}\\p{N}'’\\-])`, "giu");
+  }
+
+  function markSaved() {
+    const root = markRoot;
+    if (!root) return;
+    observer.disconnect();   // our own edits mustn't re-trigger us
+    for (const m of root.querySelectorAll("mark.vocab-word")) {
+      const p = m.parentNode;
+      p.replaceChild(document.createTextNode(m.textContent), m);
+      p.normalize();
+    }
+    const re = savedRe();
+    if (re) {
+      const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const nodes = [];
+      for (let n; (n = walk.nextNode());) if (n.data.trim()) nodes.push(n);
+      for (const n of nodes) {
+        re.lastIndex = 0;
+        let m, last = 0, frag = null;
+        while ((m = re.exec(n.data))) {
+          frag = frag || document.createDocumentFragment();
+          frag.append(n.data.slice(last, m.index));
+          const el = document.createElement("mark");
+          el.className = "vocab-word";
+          el.textContent = m[0];
+          frag.append(el);
+          last = m.index + m[0].length;
+        }
+        if (frag) { frag.append(n.data.slice(last)); n.replaceWith(frag); }
+      }
+    }
+    observer.observe(root, { childList: true, subtree: true });
+  }
+
+  function watch(root, bookId) {
+    markRoot = root;
+    let queued = false;
+    // a microtask, so marks land before the reader's next paint/paginate
+    observer = new MutationObserver(() => {
+      if (queued) return;
+      queued = true;
+      queueMicrotask(() => { queued = false; markSaved(); });
+    });
+    observer.observe(root, { childList: true, subtree: true });
+    fetch(`/api/vocab?book_id=${bookId}`).then(r => r.ok ? r.json() : [])
+      .then(rows => { for (const w of rows) saved.add(w.word); markSaved(); })
+      .catch(() => {});
+  }
+
   const esc = s => s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
   async function save(opts, hit) {
@@ -141,13 +210,19 @@
       return;
     }
     if (!row.new) { showToast(`<b>${esc(row.word)}</b> is already on the list`); return; }
-    showToast(`Saved <b>${esc(row.word)}</b>`, () =>
-      fetch(`/api/vocab/${row.id}`, { method: "DELETE" }).catch(() => {}));
+    saved.add(row.word);
+    markSaved();
+    showToast(`Saved <b>${esc(row.word)}</b>`, () => {
+      saved.delete(row.word);
+      markSaved();
+      fetch(`/api/vocab/${row.id}`, { method: "DELETE" }).catch(() => {});
+    });
   }
 
   function attach(opts) {
     const root = opts.root;
     root.classList.add("vocab-root");
+    watch(root, opts.bookId);
     let timer = null, sx = 0, sy = 0, fired = false, swallowUntil = 0;
     const cancel = () => { clearTimeout(timer); timer = null; };
     // a long press just ended: eat the click the browser may send after it

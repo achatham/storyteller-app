@@ -275,6 +275,11 @@ The word under the finger is found with `caretPositionFromPoint` /
 is turned off inside the reader text so the browser's own long-press (select +
 magnifier) doesn't compete. See `static/vocab.js`.
 
+Saved words are highlighted wherever they come up again in that book, in either
+reader, including a possessive form ("captain's"). Those few words are wrapped
+in `<mark>`s, and a MutationObserver re-marks each newly rendered page or
+chapter, so the readers don't have to call anything after they render.
+
 ## Config (env)
 
 | var | default | meaning |
