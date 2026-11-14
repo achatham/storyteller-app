@@ -4,11 +4,15 @@ Reviews happen at reading time with a child, so at most about once a day. FSRS's
 default minute-scale learning steps ("see it again in 10 minutes") make no sense
 there, so they are off: the very first grade already schedules in days. With the
 default parameters that is: knew it -> 2 days, then ~11, ~46, ...; didn't know it
--> tomorrow, and a miss later on shortens the interval again.
+-> tomorrow, and a miss later on shortens the interval again; easy -> ~8 days.
 
-Two buttons, mapped onto FSRS's four ratings: "knew it" = Good, "didn't know" =
-Again. Each word's card is stored as JSON on its vocab row, and every review also
-goes to vocab_reviews, so per-child parameters can later be fitted with the FSRS
+The four FSRS ratings, one button each: "didn't know" = Again, "took a while" =
+Hard, "knew it" = Good, "easy" = Easy. All four matter for difficulty: in FSRS-6
+Good leaves it where it is, so only Hard/Easy (and Again) move it -- with two
+buttons a word missed once would stay "hard" forever.
+
+Each word's card is stored as JSON on its vocab row, and every review also goes
+to vocab_reviews, so per-child parameters can later be fitted with the FSRS
 optimizer once there is enough history.
 """
 import json
@@ -21,22 +25,23 @@ from . import db
 
 SCHEDULER = Scheduler(learning_steps=(), relearning_steps=())
 _lock = threading.Lock()   # read-modify-write of a word's card
+RATINGS = {"again": Rating.Again, "hard": Rating.Hard, "good": Rating.Good, "easy": Rating.Easy}
 
 
-def review(vocab_id: int, knew: bool, now: datetime | None = None) -> dict | None:
-    """Grade one word and reschedule it. Returns the word's new schedule, or None
-    if there is no such word."""
+def review(vocab_id: int, rating: str, now: datetime | None = None) -> dict | None:
+    """Grade one word ("again" | "hard" | "good" | "easy") and reschedule it.
+    Returns the word's new schedule, or None if there is no such word."""
+    rating = RATINGS[rating]
     now = now or datetime.now(timezone.utc)
     with _lock:
         w = db.vocab_get(vocab_id)
         if not w:
             return None
         card = Card.from_json(w["srs"]) if w["srs"] else Card(card_id=vocab_id)
-        rating = Rating.Good if knew else Rating.Again
         card, log = SCHEDULER.review_card(card, rating, now)
         due = card.due.timestamp()
         db.vocab_record_review(vocab_id, w["book_id"], card.to_json(), due, int(rating),
                                json.dumps(log.to_dict()), now.timestamp())
     return {"id": vocab_id, "due_at": due, "reviewed_at": now.timestamp(),
-            "reviews": (w["reviews"] or 0) + 1,
+            "reviews": (w["reviews"] or 0) + 1, "difficulty": round(card.difficulty, 2),
             "interval_days": round((due - now.timestamp()) / 86400, 1)}

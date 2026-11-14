@@ -42,11 +42,15 @@
                border:1.5px dashed var(--line); border-radius:10px; padding:12px; }
   .w .reveal[hidden] { display:none; }
   .w .ans { margin-top:8px; padding-top:8px; border-top:1px solid var(--line); }
-  .w .grade { display:flex; gap:10px; margin-top:12px; font-family:system-ui,sans-serif; }
-  .w .grade button { flex:1; font:inherit; font-size:.95rem; padding:11px 8px; border-radius:10px;
+  .w .grade { display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; margin-top:12px;
+             font-family:system-ui,sans-serif; }
+  @media (max-width:560px) { .w .grade { grid-template-columns:repeat(2, 1fr); } }
+  .w .grade button { font:inherit; font-size:.95rem; padding:11px 6px; border-radius:10px;
                      cursor:pointer; border:1px solid var(--line); background:var(--panel); color:var(--ink); }
-  .w .grade button.no { border-color:#e3c0b0; background:#fbf1ec; color:#9b3d2e; }
-  .w .grade button.yes { border-color:#bcd3b0; background:#eef6ea; color:#3d6b2e; }
+  .w .grade button.again { border-color:#e3c0b0; background:#fbf1ec; color:#9b3d2e; }
+  .w .grade button.hard { border-color:#e6d2a4; background:#fbf5e6; color:#87631f; }
+  .w .grade button.good { border-color:#bcd3b0; background:#eef6ea; color:#3d6b2e; }
+  .w .grade button.easy { border-color:#b3c8dc; background:#ecf2f8; color:#2e5576; }
   .w .grade button:disabled { opacity:.5; }
   .w .graded { margin-top:10px; font-family:system-ui,sans-serif; font-size:.85rem; color:var(--muted); }
   .w.done { opacity:.6; }
@@ -90,11 +94,18 @@ let view = { tab: ["today", "review", "all"].includes(QS.get("tab")) ? QS.get("t
              book: QS.get("book") || "" };
 const HINTS = {
   today: "Long-press a word while reading to add it. Each book keeps its own list.",
-  review: "Words due today. Tap to see the meaning, then say whether you knew it — the ones you miss come back sooner.",
+  review: "Words due today. Tap to see the meaning, then say how well you knew it — the ones you miss come back sooner, easy ones much later.",
   all: "Every saved word. Each book keeps its own list.",
 };
 const REVEALED = new Set();   // ids whose definition has been tapped open
-const GRADED = new Map();     // id -> {knew, due_at} graded this visit
+const GRADED = new Map();     // id -> {rating, due_at} graded this visit
+// The four FSRS grades, in button order. `done` is what the card says afterwards.
+const GRADES = [
+  {rating: "again", label: "✗ Didn’t know", done: "✗ Not yet"},
+  {rating: "hard",  label: "Took a while",  done: "Got there"},
+  {rating: "good",  label: "✓ Knew it",     done: "✓ Knew it"},
+  {rating: "easy",  label: "★ Easy!",       done: "★ Easy"},
+];
 
 function midnight(){ const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() / 1000; }
 // Due = never reviewed, or scheduled for any time today. Reviews happen once a
@@ -137,14 +148,13 @@ function card(w){
       <div class="ans" ${open ? "" : "hidden"}>
         <div class="def wait" data-def="${w.id}">Looking it up…</div>
         <div class="ex"></div>
-        ${g ? graded(g) : `<div class="grade">
-          <button class="no" data-id="${w.id}">✗ Didn’t know it</button>
-          <button class="yes" data-id="${w.id}">✓ Knew it</button></div>`}
+        ${g ? graded(g) : `<div class="grade">${GRADES.map(x =>
+          `<button class="${x.rating}" data-id="${w.id}" data-rating="${x.rating}">${x.label}</button>`).join("")}</div>`}
       </div>
       <div class="meta">${meta}</div>
     </div><button class="del" data-id="${w.id}" title="Remove" aria-label="Remove ${esc(w.word)}">✕</button></div>`;
 }
-const graded = g => `<div class="graded">${g.knew ? "✓ Knew it" : "✗ Not yet"} — we’ll ask again ${dueLabel(g.due_at)}</div>`;
+const graded = g => `<div class="graded">${GRADES.find(x => x.rating === g.rating).done} — we’ll ask again ${dueLabel(g.due_at)}</div>`;
 
 function render(){
   const inBook = w => !view.book || String(w.book_id) === view.book;
@@ -254,12 +264,12 @@ for (const b of document.querySelectorAll(".seg button"))
   b.onclick = () => { view.tab = b.dataset.tab; GRADED.clear(); syncUrl(); render(); };
 $("#book").onchange = e => { view.book = e.target.value; syncUrl(); render(); };
 
-async function grade(id, knew, cardEl){
+async function grade(id, rating, cardEl){
   for (const b of cardEl.querySelectorAll(".grade button")) b.disabled = true;
   let out = null;
   try {
     const r = await fetch(`/api/vocab/${id}/review`, {method:"POST",
-      headers:{"Content-Type":"application/json"}, body:JSON.stringify({knew})});
+      headers:{"Content-Type":"application/json"}, body:JSON.stringify({rating})});
     if (Auth.bounced(r)) return;
     if (r.ok) out = await r.json();
   } catch (_) {}
@@ -270,7 +280,7 @@ async function grade(id, knew, cardEl){
   }
   const w = WORDS.find(x => x.id === id);
   Object.assign(w, {due_at: out.due_at, reviewed_at: out.reviewed_at, reviews: out.reviews});
-  GRADED.set(id, {knew, due_at: out.due_at});
+  GRADED.set(id, {rating, due_at: out.due_at});
   render();
 }
 
@@ -284,7 +294,7 @@ $("#list").addEventListener("click", async e => {
     return;
   }
   const gb = e.target.closest(".grade button");
-  if (gb){ grade(+gb.dataset.id, gb.classList.contains("yes"), gb.closest(".w")); return; }
+  if (gb){ grade(+gb.dataset.id, gb.dataset.rating, gb.closest(".w")); return; }
   const b = e.target.closest(".del");
   if (!b) return;
   const w = WORDS.find(x => x.id === +b.dataset.id);

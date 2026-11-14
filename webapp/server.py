@@ -19,7 +19,7 @@
   POST /api/books/{id}/vocab      save a long-pressed word to that book's vocab list
   GET  /api/vocab                 vocab words, newest first (?since=&book_id=)
   GET  /api/vocab/{vid}/definition  child-friendly definition (LLM on demand, cached)
-  POST /api/vocab/{vid}/review    grade a word {knew: bool} -> FSRS schedules the next review
+  POST /api/vocab/{vid}/review    grade a word {rating: again|hard|good|easy} -> FSRS reschedules
   DELETE /api/vocab/{vid}         drop a vocab word
   GET  /vocab                     vocab list page (today's new words / all)
 
@@ -1281,12 +1281,15 @@ def api_vocab_definition(vocab_id: int):
 
 @app.post("/api/vocab/{vocab_id}/review")
 def api_vocab_review(vocab_id: int, body: dict = Body(...)):
-    """Grade a word after revealing its definition: {"knew": true|false}. Feeds
-    the FSRS scheduler (webapp/srs.py) and returns when the word is next due."""
-    knew = body.get("knew")
-    if not isinstance(knew, bool):
-        raise HTTPException(400, "knew must be true or false")
-    out = srs.review(vocab_id, knew)
+    """Grade a word after revealing its definition: {"rating": "again" | "hard" |
+    "good" | "easy"} (the older {"knew": bool} still means good/again). Feeds the
+    FSRS scheduler (webapp/srs.py) and returns when the word is next due."""
+    rating = body.get("rating")
+    if rating is None and isinstance(body.get("knew"), bool):
+        rating = "good" if body["knew"] else "again"
+    if rating not in srs.RATINGS:
+        raise HTTPException(400, "rating must be again, hard, good or easy")
+    out = srs.review(vocab_id, rating)
     if out is None:
         raise HTTPException(404, "no such word")
     return out

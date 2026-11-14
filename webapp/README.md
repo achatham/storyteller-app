@@ -300,19 +300,25 @@ and served, and caching is tried again on the next request.
 
 ### Spaced repetition (FSRS)
 
-Revealing a word's meaning on `/vocab` offers two buttons, **Didn't know it** and
-**Knew it**, which grade it for an [FSRS](https://github.com/open-spaced-repetition/py-fsrs)
-scheduler (`webapp/srs.py`; Again and Good). The **Review** tab lists the words
-due today (never-graded words count as due) with a count badge, filtered by the
-book picker like the other tabs, so each child reviews their own book's words.
+Revealing a word's meaning on `/vocab` offers FSRS's four grades as buttons --
+**Didn't know** (Again), **Took a while** (Hard), **Knew it** (Good), **Easy!**
+(Easy) -- which feed an [FSRS](https://github.com/open-spaced-repetition/py-fsrs)
+scheduler (`webapp/srs.py`). All four are there because of how FSRS-6 tracks
+difficulty: Good leaves it unchanged and only Hard/Easy/Again move it, so with just
+two buttons a word missed once would stay "hard" forever. The **Review** tab lists
+the words due today (never-graded words count as due) with a count badge, filtered
+by the book picker like the other tabs, so each child reviews their own book's
+words.
 
-Reviews happen with a child at reading time, about once a day, so FSRS's
-minute-scale learning steps are turned off and the first grade already schedules
-in days: knew it -> 2 days, then ~11, ~46; didn't know -> tomorrow. "Due" means
-due at any time today, so a word scheduled for 7pm still shows up at 6pm.
-Each word's card state is JSON in `vocab.srs` (with `due_at` beside it for
-queries), and every grade is also kept in `vocab_reviews` with FSRS's review log,
-which is what the FSRS optimizer needs to fit per-child parameters later.
+Reviews happen with a child at reading time, about once a day, so FSRS's minute-
+scale learning steps are turned off and the first grade already schedules in days.
+For a new word: didn't know -> tomorrow, took a while -> 1 day, knew it -> 2 days
+(then ~11, ~46), easy -> ~8 days. Grading a word before it's due counts for less, so
+the gaps it gets are shorter. "Due" means due at any time today, so a word scheduled
+for 7pm still shows up at 6pm. Each word's card state is JSON in `vocab.srs` (with
+`due_at` beside it for queries), and every grade is also kept in `vocab_reviews`
+with FSRS's review log, which is what the FSRS optimizer needs to fit per-child
+parameters later.
 
 ## Config (env)
 
