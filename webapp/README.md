@@ -261,14 +261,26 @@ generations for the pages it redraws.
 
 ## Vocabulary words
 
-Long-press a word in either reader to save it to that book's vocabulary list,
-along with the sentence it came from and the page. `/vocab` (linked from the
-library and the reader menu) shows today's new words, or every word, grouped by
-book. Lists are per book rather than per child because each book is read to one
-child, so the book already keeps their words apart. Picking a word already on
-the list keeps its original sentence and date and counts the repeat
-(`seen_count`), which a later spaced-repetition pass can read as a word that
-hasn't stuck yet.
+Long-press a word in either reader to save it, along with the sentence it came
+from and the page. Words belong to **kids**: add them on `/vocab` (linked from the
+library and the reader menu), and give each book a default kid from the reader
+menu ("Vocabulary words for"). A save goes to that kid; books read together are
+set to "ask each time", and the toast after a long-press shows the kids as chips
+to tap -- also how a word in someone's book is given to a sibling instead. Words
+nobody picked land in a **Needs a kid** list on `/vocab`, with buttons to sort
+them; setting a book's default kid sorts that book's unassigned words too.
+
+A kid has one copy of each word across all their books, since it's one thing to
+learn and one spaced-repetition card. Meeting it again in another book counts as
+a re-pick; moving a word to a kid who already has it merges the two (keeping
+that kid's card and first sentence, and taking over the review history). While
+reading, the highlights are the book's own saved words plus every word of its
+default kid's, wherever they were first met. Deleting a book keeps the kids'
+words (their book just shows as deleted); deleting a kid removes their words.
+
+`/vocab` filters by kid (and by book), and shows today's new words, the words
+due for review, or all of them. Picking a word already on that kid's list keeps
+its original sentence and date and counts the repeat (`seen_count`).
 
 The word under the finger is found with `caretPositionFromPoint` /
 `caretRangeFromPoint` rather than by wrapping words in spans, and text selection
@@ -306,9 +318,8 @@ Revealing a word's meaning on `/vocab` offers FSRS's four grades as buttons --
 scheduler (`webapp/srs.py`). All four are there because of how FSRS-6 tracks
 difficulty: Good leaves it unchanged and only Hard/Easy/Again move it, so with just
 two buttons a word missed once would stay "hard" forever. The **Review** tab lists
-the words due today (never-graded words count as due) with a count badge, filtered
-by the book picker like the other tabs, so each child reviews their own book's
-words.
+the words due today (never-graded words count as due) with a count badge, for the kid
+(and book) picked above it.
 
 Reviews happen with a child at reading time, about once a day, so FSRS's minute-
 scale learning steps are turned off and the first grade already schedules in days.

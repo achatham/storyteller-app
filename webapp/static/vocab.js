@@ -1,6 +1,11 @@
 // Long-press a word in the reader to save it to the book's vocabulary list.
 //
 //   Vocab.attach({ root, bookId, getPage })
+//   Vocab.bindKidSelect(selectEl)   // the reader menu's "vocabulary for" picker
+//
+// Words belong to kids. A save goes to the book's default kid; the toast shows
+// the kids as chips so a word from a book read together can be given to one of
+// them (or moved, if the default was wrong).
 //
 // root is the element holding the book text, getPage() returns the current
 // global page index (or null). Both readers share this file.
@@ -97,28 +102,84 @@
     #vocabToast .txt { flex:1; min-width:0; }
     #vocabToast b { font-family:Georgia,serif; font-size:1.05rem; }
     #vocabToast i { color:#c9b896; font-size:.8rem; margin-left:4px; }
+    #vocabToast .ask { color:#f0c45a; }
     #vocabToast .def { font-family:Georgia,serif; font-size:1rem; line-height:1.4; margin-top:4px; }
     #vocabToast .def:empty { display:none; }
     #vocabToast .def.wait { color:#c9b896; font-family:system-ui,sans-serif; font-size:.85rem; }
+    #vocabToast .kids { display:flex; flex-wrap:wrap; gap:6px; margin-top:7px; }
+    #vocabToast .kids:empty { display:none; }
     #vocabToast button { font:inherit; font-size:.85rem; color:#f0c45a; background:none; align-self:center;
       border:1px solid rgba(240,196,90,.5); border-radius:999px; padding:5px 12px; cursor:pointer; }
+    #vocabToast .kids button { color:#fffdf8; border-color:rgba(255,253,248,.35); padding:4px 12px; }
+    #vocabToast .kids button.on { background:#f0c45a; border-color:#f0c45a; color:#2b2622; font-weight:600; }
     #vocabToast button[hidden] { display:none; }
     mark.vocab-word { background:rgba(240,196,90,.3); color:inherit; border-radius:3px;
       box-shadow:0 1px 0 rgba(200,150,40,.55); }`;
   document.head.appendChild(css);
 
-  // The toast says what happened and offers the word's meaning behind a tap (so
-  // the child gets a chance to guess first). Each showing gets a token so a
-  // definition that comes back late can't land in a newer toast. Tapping the
-  // toast (outside Undo) reveals the meaning if one is on offer, else dismisses.
+  const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  // What the reader knows about this book's vocab (from /api/books/{id}/vocab):
+  // the kids, the book's default kid (null = read together, ask per word), and
+  // the words to highlight.
+  const ctx = { bookId: null, kids: [], kidId: null, loaded: null };
+  const saved = new Set();
+  const kidName = id => (ctx.kids.find(k => k.id === id) || {}).name;
+
+  function loadContext() {
+    ctx.loaded = fetch(`/api/books/${ctx.bookId}/vocab`).then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (!d) return;
+        ctx.kids = d.kids || []; ctx.kidId = d.kid_id ?? null;
+        saved.clear();
+        for (const w of d.words || []) saved.add(w);
+        markSaved();
+        fillKidSelects();
+      }).catch(() => {});
+    return ctx.loaded;
+  }
+
+  // ---- "vocabulary for" picker in the reader menu ----
+  const kidSelects = [];
+  function fillKidSelects() {
+    for (const sel of kidSelects) {
+      sel.innerHTML = ctx.kids.length
+        ? `<option value="">Ask each time (read together)</option>` +
+          ctx.kids.map(k => `<option value="${k.id}">${esc(k.name)}</option>`).join("")
+        : `<option value="">Add kids on the Vocabulary page first</option>`;
+      sel.disabled = !ctx.kids.length;
+      sel.value = ctx.kidId == null ? "" : String(ctx.kidId);
+    }
+  }
+  function bindKidSelect(sel) {
+    if (!sel) return;
+    kidSelects.push(sel);
+    fillKidSelects();
+    sel.addEventListener("change", async () => {
+      const kid = sel.value ? +sel.value : null;
+      try {
+        const r = await fetch(`/api/books/${ctx.bookId}/kid`, { method: "PUT",
+          headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kid_id: kid }) });
+        if (window.Auth && Auth.bounced(r)) return;
+        if (!r.ok) throw new Error();
+      } catch (_) { fillKidSelects(); alert("Couldn’t change that — try again."); return; }
+      loadContext();   // the new kid's words are now the ones to highlight
+    });
+  }
+
+  // The toast says what happened, lets you say whose word it is, and offers the
+  // meaning behind a tap (so the child gets a chance to guess first). Each
+  // showing gets a token so a late answer can't land in a newer toast. Tapping
+  // the toast (outside its buttons) reveals the meaning if one is on offer, else
+  // dismisses it.
   let toast, toastT, toastTok = 0, reveal = null;
   function showToast(html, undo, ms) {
     if (!toast) {
       toast = document.createElement("div");
       toast.id = "vocabToast";
       toast.hidden = true;
-      toast.innerHTML = `<div class="txt"><div class="head"></div><div class="def"></div></div>` +
-                        `<button type="button">Undo</button>`;
+      toast.innerHTML = `<div class="txt"><div class="head"></div><div class="kids"></div>` +
+                        `<div class="def"></div></div><button type="button" class="undo">Undo</button>`;
       // keep taps on the toast from reaching the reader's page-turn handlers
       for (const ev of ["click", "touchstart", "touchend", "pointerdown"])
         toast.addEventListener(ev, e => e.stopPropagation());
@@ -129,10 +190,11 @@
       document.body.appendChild(toast);
     }
     toast.querySelector(".head").innerHTML = html;
+    toast.querySelector(".kids").innerHTML = "";
     const def = toast.querySelector(".def");
     def.textContent = ""; def.className = "def";
     reveal = null;
-    const btn = toast.querySelector("button");
+    const btn = toast.querySelector(".undo");
     btn.hidden = !undo;
     btn.onclick = undo ? () => { undo(); toast.hidden = true; } : null;
     toast.hidden = false;
@@ -144,18 +206,56 @@
     toastT = setTimeout(() => { toast.hidden = true; }, ms);
   }
 
+  // The saved word's headline: whose list it's on, or a nudge to pick someone.
+  function headline(cur) {
+    const name = cur.kid_id != null ? kidName(cur.kid_id) : null;
+    const w = `<b>${esc(cur.word)}</b>`;
+    if (!cur.isNew) return name ? `${w} <span style="opacity:.7">· on ${esc(name)}’s list</span>`
+                                : `${w} <span style="opacity:.7">· on the list</span>`;
+    if (name) return `Saved ${w} for ${esc(name)}`;
+    return ctx.kids.length ? `Saved ${w} — <span class="ask">whose word?</span>` : `Saved ${w}`;
+  }
+
+  // Kid chips in toast `tok`: tap one to give the word to that kid. The server
+  // may merge it into that kid's existing copy, so `cur.id` can change.
+  function offerKids(cur, tok) {
+    const box = toast.querySelector(".kids");
+    const paint = () => {
+      box.innerHTML = ctx.kids.map(k =>
+        `<button type="button" data-kid="${k.id}" class="${k.id === cur.kid_id ? "on" : ""}">${esc(k.name)}</button>`).join("");
+      toast.querySelector(".head").innerHTML = headline(cur);
+    };
+    box.onclick = async e => {
+      const b = e.target.closest("button[data-kid]");
+      if (!b || +b.dataset.kid === cur.kid_id) return;
+      holdToast(9000);
+      try {
+        const r = await fetch(`/api/vocab/${cur.id}`, { method: "PATCH",
+          headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kid_id: +b.dataset.kid }) });
+        if (window.Auth && Auth.bounced(r)) return;
+        if (!r.ok) throw new Error();
+        const row = await r.json();
+        cur.id = row.id; cur.kid_id = row.kid_id;
+      } catch (_) { return; }
+      if (tok === toastTok) paint();
+    };
+    paint();
+    if (ctx.kids.length && cur.kid_id == null) holdToast(10000);   // give time to choose
+  }
+
   // Offer the word's definition in toast `tok`: fetched straight away so the
-  // reveal is instant, shown only when the toast is tapped.
-  function offerDefinition(id, tok) {
+  // reveal is instant, shown only when the toast is tapped. (Fetched again at
+  // the reveal if a kid change merged the word into a different row.)
+  function offerDefinition(cur, tok) {
     const def = toast.querySelector(".def");
-    const got = fetch(`/api/vocab/${id}/definition`)
-      .then(r => r.ok ? r.json() : null).catch(() => null);
+    const firstId = cur.id;
+    const get = id => fetch(`/api/vocab/${id}/definition`).then(r => r.ok ? r.json() : null).catch(() => null);
+    const got = get(firstId);
     def.className = "def wait"; def.textContent = "Tap to see what it means";
-    holdToast(7000);
     reveal = async () => {
       def.textContent = "Looking it up…";
       holdToast(12000);
-      const d = await got;
+      const d = await (cur.id === firstId ? got : get(cur.id));
       if (tok !== toastTok || toast.hidden) return;
       if (!d || !d.definition) { def.textContent = "Couldn’t look that one up just now"; holdToast(2500); return; }
       def.className = "def";
@@ -178,7 +278,6 @@
   }
 
   // ---- marking saved words in the text ----
-  const saved = new Set();
   let markRoot = null, observer = null;
 
   // One regex for the whole list, longest words first so "good-humoured" wins over
@@ -224,7 +323,7 @@
     observer.observe(root, { childList: true, subtree: true });
   }
 
-  function watch(root, bookId) {
+  function watch(root) {
     markRoot = root;
     let queued = false;
     // a microtask, so marks land before the reader's next paint/paginate
@@ -234,14 +333,12 @@
       queueMicrotask(() => { queued = false; markSaved(); });
     });
     observer.observe(root, { childList: true, subtree: true });
-    fetch(`/api/vocab?book_id=${bookId}`).then(r => r.ok ? r.json() : [])
-      .then(rows => { for (const w of rows) saved.add(w.word); markSaved(); })
-      .catch(() => {});
+    loadContext();
   }
 
-  const esc = s => s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-
   async function save(opts, hit) {
+    // the word goes to the book's default kid (server-side); the toast's kid
+    // chips move it if this one is someone else's
     const body = { word: hit.word, context: sentenceOf(opts.root, hit.node, hit.start),
                    page: opts.getPage ? opts.getPage() : null };
     let r, row;
@@ -256,24 +353,30 @@
                                            : "Couldn’t save that word");
       return;
     }
+    await ctx.loaded;   // kid names for the toast
+    const cur = { id: row.id, word: row.word, kid_id: row.kid_id ?? null, isNew: row.new };
+    let tok;
     if (!row.new) {
-      offerDefinition(row.id, showToast(`<b>${esc(row.word)}</b> <span style="opacity:.7">· on the list</span>`));
-      return;
-    }
-    saved.add(row.word);
-    markSaved();
-    const tok = showToast(`Saved <b>${esc(row.word)}</b>`, () => {
-      saved.delete(row.word);
+      tok = showToast(headline(cur));
+    } else {
+      saved.add(row.word);
       markSaved();
-      fetch(`/api/vocab/${row.id}`, { method: "DELETE" }).catch(() => {});
-    });
-    offerDefinition(row.id, tok);
+      tok = showToast(headline(cur), () => {
+        saved.delete(row.word);
+        markSaved();
+        fetch(`/api/vocab/${cur.id}`, { method: "DELETE" }).catch(() => {});
+      });
+    }
+    offerKids(cur, tok);
+    offerDefinition(cur, tok);
+    holdToast(ctx.kids.length && cur.kid_id == null ? 10000 : 7000);
   }
 
   function attach(opts) {
     const root = opts.root;
     root.classList.add("vocab-root");
-    watch(root, opts.bookId);
+    ctx.bookId = opts.bookId;
+    watch(root);
     let timer = null, sx = 0, sy = 0, fired = false, swallowUntil = 0;
     const cancel = () => { clearTimeout(timer); timer = null; };
     // a long press just ended: eat the click the browser may send after it
@@ -312,5 +415,5 @@
     }, true);
   }
 
-  window.Vocab = { attach };
+  window.Vocab = { attach, bindKidSelect };
 })();

@@ -66,6 +66,30 @@
             border:0; padding:6px 10px; cursor:pointer; border-radius:8px; }
   .w .del:hover { color:#9b3d2e; background:#fbf1ec; }
   .empty { color:var(--muted); font-family:system-ui,sans-serif; padding:24px 0; line-height:1.5; }
+  .kidrow { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:14px 0 0;
+            font-family:system-ui,sans-serif; }
+  .chip { font:inherit; font-size:.92rem; padding:7px 14px; border-radius:999px; cursor:pointer;
+          border:1px solid var(--line); background:var(--panel); color:var(--ink); }
+  .chip.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .chip.todo { border-color:#e6d2a4; background:#fbf5e6; color:#87631f; }
+  .chip.todo.on { background:#87631f; border-color:#87631f; color:#fff; }
+  .chip.gear { color:var(--muted); }
+  #manage { margin:10px 0 0; padding:12px 14px; background:var(--panel); border:1px solid var(--line);
+            border-radius:12px; font-family:system-ui,sans-serif; font-size:.9rem; }
+  #manage[hidden] { display:none; }
+  #manage .k { display:flex; align-items:center; gap:8px; padding:4px 0; }
+  #manage .k span { flex:1; font-family:Georgia,serif; font-size:1.05rem; }
+  #manage button, #manage input { font:inherit; font-size:.85rem; padding:6px 10px; border-radius:8px;
+            border:1px solid var(--line); background:var(--bg); color:var(--ink); cursor:pointer; }
+  #manage input { cursor:text; flex:1; min-width:0; background:#fff; }
+  #manage .add { display:flex; gap:8px; margin-top:8px; }
+  #manage .note { color:var(--muted); font-size:.8rem; margin-top:8px; line-height:1.4; }
+  .w .assign { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-top:10px;
+               font-family:system-ui,sans-serif; font-size:.85rem; color:#87631f; }
+  .w .assign button { font:inherit; padding:6px 14px; border-radius:999px; cursor:pointer;
+                      border:1px solid #e6d2a4; background:#fbf5e6; color:#87631f; }
+  .w .meta select { font:inherit; font-size:.75rem; color:var(--muted); background:none; border:0;
+                    border-bottom:1px dotted var(--muted); padding:0; cursor:pointer; }
 </style>
 </head><body>
 <header>
@@ -73,6 +97,8 @@
   <div class="sub"><a class="back" href="/">← Library</a></div>
 </header>
 <main>
+  <div class="kidrow" id="kids"></div>
+  <div id="manage" hidden></div>
   <div class="controls">
     <div class="seg" role="tablist">
       <button data-tab="today" type="button">Today’s new words</button>
@@ -90,12 +116,18 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 let WORDS = [];
 const QS = new URLSearchParams(location.search);
+let KIDS = [];
 let view = { tab: ["today", "review", "all"].includes(QS.get("tab")) ? QS.get("tab") : "today",
-             book: QS.get("book") || "" };
+             book: QS.get("book") || "",
+             // "" = all kids, "none" = words nobody has been given yet, else a kid id
+             kid: QS.get("kid") ?? (localStorage.getItem("vocab:kid") || "") };
+const kidName = id => (KIDS.find(k => k.id === id) || {}).name || "?";
+const inKid = w => view.kid === "" ? true : view.kid === "none" ? w.kid_id == null
+                                          : String(w.kid_id) === view.kid;
 const HINTS = {
-  today: "Long-press a word while reading to add it. Each book keeps its own list.",
+  today: "Long-press a word while reading to add it.",
   review: "Words due today. Tap to see the meaning, then say how well you knew it — the ones you miss come back sooner, easy ones much later.",
-  all: "Every saved word. Each book keeps its own list.",
+  all: "Every saved word.",
 };
 const REVEALED = new Set();   // ids whose definition has been tapped open
 const GRADED = new Map();     // id -> {rating, due_at} graded this visit
@@ -151,13 +183,18 @@ function card(w){
         ${g ? graded(g) : `<div class="grade">${GRADES.map(x =>
           `<button class="${x.rating}" data-id="${w.id}" data-rating="${x.rating}">${x.label}</button>`).join("")}</div>`}
       </div>
-      <div class="meta">${meta}</div>
+      ${w.kid_id == null && KIDS.length ? `<div class="assign">Whose word? ${KIDS.map(k =>
+        `<button data-assign="${w.id}" data-kid="${k.id}">${esc(k.name)}</button>`).join("")}</div>` : ""}
+      <div class="meta">${meta}${w.kid_id != null && KIDS.length ? ` · for <select class="kidsel" data-id="${w.id}">${
+        KIDS.map(k => `<option value="${k.id}"${k.id === w.kid_id ? " selected" : ""}>${esc(k.name)}</option>`).join("")
+      }<option value="">nobody yet</option></select>` : ""}</div>
     </div><button class="del" data-id="${w.id}" title="Remove" aria-label="Remove ${esc(w.word)}">✕</button></div>`;
 }
 const graded = g => `<div class="graded">${GRADES.find(x => x.rating === g.rating).done} — we’ll ask again ${dueLabel(g.due_at)}</div>`;
 
 function render(){
-  const inBook = w => !view.book || String(w.book_id) === view.book;
+  renderKids();
+  const inBook = w => (!view.book || String(w.book_id) === view.book) && inKid(w);
   const nDue = WORDS.filter(w => inBook(w) && isDue(w)).length;
   for (const b of document.querySelectorAll(".seg button")){
     b.classList.toggle("on", b.dataset.tab === view.tab);
@@ -174,6 +211,7 @@ function render(){
   if (!rows.length){
     $("#list").innerHTML = `<div class="empty">${
       view.tab === "today" ? "No new words yet today.<br>Hold your finger on a word in the reader to add it here." :
+      view.kid === "none" ? "Every word has a kid. 🎉" :
       view.tab === "review" ? "Nothing to review today. 🎉" :
       "No words saved yet.<br>Hold your finger on a word in the reader to add it here."}</div>`;
     return;
@@ -186,9 +224,9 @@ function render(){
   }
   let html = "";
   for (const [bid, g] of groups){
-    html += `<div class="book"><h2>${esc(g.title || "Untitled")}</h2>
+    html += `<div class="book"><h2>${esc(g.title || (bid ? "Untitled" : "A deleted book"))}</h2>
       <span class="n">${g.words.length} word${g.words.length === 1 ? "" : "s"}</span>
-      <a href="/book/${bid}">Open book ›</a></div>`;
+      ${bid ? `<a href="/book/${bid}">Open book ›</a>` : ""}</div>`;
     for (const w of g.words) html += card(w);
   }
   $("#list").innerHTML = html;
@@ -231,7 +269,7 @@ async function pumpDefs(){
 
 function fillBooks(){
   const seen = new Map();
-  for (const w of WORDS) if (!seen.has(w.book_id)) seen.set(w.book_id, w.title);
+  for (const w of WORDS) if (w.book_id != null && !seen.has(w.book_id)) seen.set(w.book_id, w.title);
   if (view.book && !seen.has(+view.book)) view.book = "";
   $("#book").innerHTML = `<option value="">All books</option>` +
     [...seen].sort((a, b) => (a[1]||"").localeCompare(b[1]||""))
@@ -246,18 +284,86 @@ async function load(){
     if (!r.ok) throw new Error("HTTP " + r.status);
     WORDS = await r.json();        // a login page is HTML -> throws, handled below
     if (!Array.isArray(WORDS)) throw new Error("not signed in");
+    KIDS = await (await fetch("/api/kids", {cache:"no-store"})).json();
   } catch(e){
     Auth.fail({offline: true});
     return;
   }
+  if (view.kid && view.kid !== "none" && !KIDS.some(k => String(k.id) === view.kid)) view.kid = "";
   fillBooks();
   render();
+  if (!KIDS.length) openManage();
+}
+
+// ---- kids: filter chips + the manage panel ----
+function renderKids(){
+  const loose = WORDS.filter(w => w.kid_id == null).length;
+  const chip = (val, label, cls = "") =>
+    `<button class="chip ${cls}${view.kid === val ? " on" : ""}" data-kid="${val}">${label}</button>`;
+  $("#kids").innerHTML = (KIDS.length ? chip("", "All kids") + KIDS.map(k => chip(String(k.id), esc(k.name))).join("") : "")
+    + (loose && KIDS.length ? chip("none", `Needs a kid · ${loose}`, "todo") : "")
+    + `<button class="chip gear" id="gear">${KIDS.length ? "⚙ Kids" : "+ Add your kids"}</button>`;
+}
+function openManage(){
+  const m = $("#manage");
+  m.hidden = false;
+  m.innerHTML = KIDS.map(k => `<div class="k"><span>${esc(k.name)}</span>
+      <button data-rename="${k.id}">Rename</button><button data-remove="${k.id}">Remove</button></div>`).join("")
+    + `<div class="add"><input id="newkid" placeholder="Kid’s name" maxlength="40">
+       <button id="addkid">Add</button><button id="donekids">Done</button></div>
+       <div class="note">Each kid gets their own word list and reviews. Pick a book’s kid from
+       the reader menu (“Vocabulary words for”); books you read together can ask each time.</div>`;
+}
+async function kidApi(url, method, body){
+  const r = await fetch(url, {method, headers:{"Content-Type":"application/json"},
+                              body: body ? JSON.stringify(body) : undefined}).catch(() => null);
+  if (r && Auth.bounced(r)) return null;
+  if (!r || !r.ok){ alert("Couldn’t save that — try again."); return null; }
+  return r.json();
+}
+$("#kids").addEventListener("click", e => {
+  if (e.target.closest("#gear")){ $("#manage").hidden ? openManage() : ($("#manage").hidden = true); return; }
+  const c = e.target.closest(".chip[data-kid]");
+  if (!c) return;
+  view.kid = c.dataset.kid;
+  try { localStorage.setItem("vocab:kid", view.kid === "none" ? "" : view.kid); } catch (_) {}
+  GRADED.clear(); syncUrl(); render();
+});
+$("#manage").addEventListener("click", async e => {
+  const t = e.target;
+  if (t.id === "donekids"){ $("#manage").hidden = true; return; }
+  if (t.id === "addkid"){
+    const name = $("#newkid").value.trim();
+    if (!name) return;
+    if (await kidApi("/api/kids", "POST", {name})) { await load(); openManage(); $("#newkid").focus(); }
+    return;
+  }
+  if (t.dataset.rename){
+    const k = KIDS.find(x => x.id === +t.dataset.rename);
+    const name = prompt("New name", k.name);
+    if (name && name.trim() && await kidApi(`/api/kids/${k.id}`, "PATCH", {name})) { await load(); openManage(); }
+    return;
+  }
+  if (t.dataset.remove){
+    const k = KIDS.find(x => x.id === +t.dataset.remove);
+    const n = WORDS.filter(w => w.kid_id === k.id).length;
+    if (!confirm(`Remove ${k.name}${n ? ` and their ${n} word${n === 1 ? "" : "s"} (with review history)` : ""}?`)) return;
+    if (await kidApi(`/api/kids/${k.id}`, "DELETE")) { await load(); openManage(); }
+  }
+});
+$("#manage").addEventListener("keydown", e => { if (e.key === "Enter" && e.target.id === "newkid") $("#addkid").click(); });
+
+// Give a word to a kid. The server may merge it into that kid's own copy of the
+// word (new id), so reload the list rather than patching it locally.
+async function assign(id, kid){
+  if (await kidApi(`/api/vocab/${id}`, "PATCH", {kid_id: kid})) await load();
 }
 
 function syncUrl(){
   const u = new URL(location.href);
   view.book ? u.searchParams.set("book", view.book) : u.searchParams.delete("book");
   view.tab !== "today" ? u.searchParams.set("tab", view.tab) : u.searchParams.delete("tab");
+  view.kid ? u.searchParams.set("kid", view.kid) : u.searchParams.delete("kid");
   history.replaceState(null, "", u);
 }
 for (const b of document.querySelectorAll(".seg button"))
@@ -293,6 +399,8 @@ $("#list").addEventListener("click", async e => {
     el.querySelector(".ans").hidden = false;
     return;
   }
+  const ab = e.target.closest("[data-assign]");
+  if (ab){ assign(+ab.dataset.assign, +ab.dataset.kid); return; }
   const gb = e.target.closest(".grade button");
   if (gb){ grade(+gb.dataset.id, gb.dataset.rating, gb.closest(".w")); return; }
   const b = e.target.closest(".del");
@@ -305,6 +413,10 @@ $("#list").addEventListener("click", async e => {
   WORDS = WORDS.filter(x => x !== w);
   fillBooks();
   render();
+});
+$("#list").addEventListener("change", e => {
+  const sel = e.target.closest(".kidsel");
+  if (sel) assign(+sel.dataset.id, sel.value ? +sel.value : null);
 });
 load();
 </script>

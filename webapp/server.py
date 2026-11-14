@@ -16,7 +16,11 @@
   GET  /api/history               reading history (recent sessions across all books)
   GET  /api/history/export        reading history as JSON for export (?start=&end=)
   GET  /history                   reading-history viewer page
-  POST /api/books/{id}/vocab      save a long-pressed word to that book's vocab list
+  GET  /api/kids                  the kids vocab words are kept for (POST/PATCH/DELETE /api/kids/{kid})
+  PUT  /api/books/{id}/kid        a book's default kid ({kid_id: null} = ask per word)
+  GET  /api/books/{id}/vocab      kids + default kid + words to highlight, for the reader
+  POST /api/books/{id}/vocab      save a long-pressed word (to the default kid unless kid_id given)
+  PATCH /api/vocab/{vid}          give a word to another kid (merges if they already have it)
   GET  /api/vocab                 vocab words, newest first (?since=&book_id=)
   GET  /api/vocab/{vid}/definition  child-friendly definition (LLM on demand, cached)
   POST /api/vocab/{vid}/review    grade a word {rating: again|hard|good|easy} -> FSRS reschedules
@@ -511,6 +515,7 @@ def api_book(book_id: int):
         "chapters": db.get_chapters(book_id),
         "scenes_done": db.scene_progress(book_id).get("done", 0),
         "illustration_mode": b["illustration_mode"] if "illustration_mode" in b.keys() else "lazy",
+        "kid_id": b.get("kid_id"),
         "jobs": db.jobs_for_book(book_id),
         "bake": (lambda bk: {"status": bk["status"], "round": bk["round"],
                              "total_pages": bk["total_pages"],
@@ -1232,12 +1237,81 @@ def _vocab_word(raw) -> str:
     return w
 
 
+def _kid_ref(value):
+    """A kid id from a request body: an existing kid's id, or None for nobody."""
+    if value is None:
+        return None
+    try:
+        kid_id = int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "kid_id must be a kid's id or null")
+    if not any(k["id"] == kid_id for k in db.kids_list()):
+        raise HTTPException(404, "no such kid")
+    return kid_id
+
+
+def _kid_name(body) -> str:
+    name = " ".join(str(body.get("name") or "").split())[:40]
+    if not name:
+        raise HTTPException(400, "name is required")
+    return name
+
+
+@app.get("/api/kids")
+def api_kids():
+    return db.kids_list()
+
+
+@app.post("/api/kids")
+def api_kid_add(body: dict = Body(...)):
+    return db.kid_add(_kid_name(body))
+
+
+@app.patch("/api/kids/{kid_id}")
+def api_kid_rename(kid_id: int, body: dict = Body(...)):
+    if not db.kid_rename(kid_id, _kid_name(body)):
+        raise HTTPException(404, "no such kid")
+    return {"ok": True}
+
+
+@app.delete("/api/kids/{kid_id}")
+def api_kid_delete(kid_id: int):
+    """Remove a kid together with their words and review history."""
+    if not db.kid_delete(kid_id):
+        raise HTTPException(404, "no such kid")
+    return {"ok": True}
+
+
+@app.put("/api/books/{book_id}/kid")
+def api_book_kid(book_id: int, body: dict = Body(...)):
+    """Set the kid a book's words go to by default ({"kid_id": null} = ask per
+    word, for books read together). The book's unassigned words go to the new
+    default as well."""
+    if not db.get_book(book_id):
+        raise HTTPException(404, "no such book")
+    kid_id = _kid_ref(body.get("kid_id"))
+    return {"kid_id": kid_id, "assigned": db.book_set_kid(book_id, kid_id)}
+
+
+@app.get("/api/books/{book_id}/vocab")
+def api_book_vocab(book_id: int):
+    """What the reader needs for vocab: the kids, this book's default kid, and
+    the words to highlight (this book's, plus the default kid's from any book)."""
+    b = db.get_book(book_id)
+    if not b:
+        raise HTTPException(404, "no such book")
+    return {"kids": db.kids_list(), "kid_id": b.get("kid_id"),
+            "words": db.vocab_words_for_reader(book_id)}
+
+
 @app.post("/api/books/{book_id}/vocab")
 def api_vocab_add(book_id: int, body: dict = Body(...)):
-    """Save a word from this book to its vocabulary list (the reader's
-    long-press). Re-picking a word already on the list is not an error; the
+    """Save a word from this book (the reader's long-press). It goes to
+    `kid_id` if the body names one (null = unassigned), else to the book's
+    default kid. Re-picking a word already on that list is not an error; the
     response says `new: false`."""
-    if not db.get_book(book_id):
+    book = db.get_book(book_id)
+    if not book:
         raise HTTPException(404, "no such book")
     word = _vocab_word(body.get("word"))
     context = (str(body.get("context") or "").strip() or None)
@@ -1247,7 +1321,22 @@ def api_vocab_add(book_id: int, body: dict = Body(...)):
         page = int(body["page"]) if body.get("page") is not None else None
     except (TypeError, ValueError):
         page = None
-    return db.vocab_add(book_id, word, context, page)
+    kid_id = _kid_ref(body["kid_id"]) if "kid_id" in body else book.get("kid_id")
+    return db.vocab_add(book_id, word, context, page, kid_id)
+
+
+@app.patch("/api/vocab/{vocab_id}")
+def api_vocab_assign(vocab_id: int, body: dict = Body(...)):
+    """Give a word to another kid ({"kid_id": n}, or null to unassign). If that
+    kid already has the word the two merge, so the returned row's id can differ
+    from the one asked about (`merged: true`)."""
+    if "kid_id" not in body:
+        raise HTTPException(400, "kid_id is required")
+    row = db.vocab_assign(vocab_id, _kid_ref(body["kid_id"]))
+    if row is None:
+        raise HTTPException(404, "no such word")
+    row.pop("srs", None)
+    return row
 
 
 @app.get("/api/vocab")

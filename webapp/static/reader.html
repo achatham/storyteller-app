@@ -126,6 +126,7 @@
         <span class="pos" id="pos"></span>
         <button id="next">Next &#8250;</button>
       </div>
+      <label>Vocabulary words for <select id="vkid"></select></label>
       <button id="vocab">&#128221; Vocabulary words</button>
       <button id="bookview">&#128214; Book view (two-column)</button>
       <button id="offline">&#8681; Save for offline reading</button>
@@ -294,6 +295,7 @@ $("#fs").onclick = e => { e.stopPropagation(); toggleFS(); };
 $("#vocab").onclick = e => { e.stopPropagation(); window.location.href = "/vocab?book=" + BOOK_ID; };
 // long-press a word to save it to this book's vocabulary list
 if (window.Vocab) Vocab.attach({ root: document.querySelector(".read"), bookId: BOOK_ID, getPage: () => state.i });
+if (window.Vocab && Vocab.bindKidSelect) Vocab.bindKidSelect($("#vkid"));
 $("#bookview").onclick = e => { e.stopPropagation(); window.location.href = "/book/" + BOOK_ID; };
 
 // ---- save-for-offline (stores the whole book + pictures in IndexedDB) ----
