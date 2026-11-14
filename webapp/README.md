@@ -283,9 +283,10 @@ chapter, so the readers don't have to call anything after they render.
 ### Definitions
 
 Each saved word gets a child-friendly definition (plus part of speech and a fresh
-example sentence) from the text model, generated the first time anyone asks:
-the reader's toast fetches it right after a long-press, and `/vocab` fills them
-in as the list loads. `webapp/define.py` asks for the meaning the word has *in
+example sentence) from the text model, generated the first time anyone asks.
+It is always behind a tap, so the child gets a chance to guess first: the
+reader's toast says "Tap to see what it means", and each card on `/vocab` has a
+reveal button. Both fetch the definition ahead of the tap so the reveal is instant. `webapp/define.py` asks for the meaning the word has *in
 the sentence it was saved from*, so the cache key is the word plus a hash of that
 sentence (and a prompt version) -- "spot" in "the black spot" and in "a spot of
 tea" are cached separately. A definition costs about a tenth of a cent and is
@@ -296,6 +297,22 @@ The cache is Firestore when `STORY_FIRESTORE_PROJECT` is set (collection
 `~/.secrets/storyteller/firestore.json`), otherwise the `definitions` table in
 the app DB. A Firestore error never fails a lookup: the definition is generated
 and served, and caching is tried again on the next request.
+
+### Spaced repetition (FSRS)
+
+Revealing a word's meaning on `/vocab` offers two buttons, **Didn't know it** and
+**Knew it**, which grade it for an [FSRS](https://github.com/open-spaced-repetition/py-fsrs)
+scheduler (`webapp/srs.py`; Again and Good). The **Review** tab lists the words
+due today (never-graded words count as due) with a count badge, filtered by the
+book picker like the other tabs, so each child reviews their own book's words.
+
+Reviews happen with a child at reading time, about once a day, so FSRS's
+minute-scale learning steps are turned off and the first grade already schedules
+in days: knew it -> 2 days, then ~11, ~46; didn't know -> tomorrow. "Due" means
+due at any time today, so a word scheduled for 7pm still shows up at 6pm.
+Each word's card state is JSON in `vocab.srs` (with `due_at` beside it for
+queries), and every grade is also kept in `vocab_reviews` with FSRS's review log,
+which is what the FSRS optimizer needs to fit per-child parameters later.
 
 ## Config (env)
 

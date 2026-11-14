@@ -5,9 +5,9 @@
 // root is the element holding the book text, getPage() returns the current
 // global page index (or null). Both readers share this file.
 //
-// After a save the toast fetches a child-friendly definition of the word
-// (/api/vocab/{id}/definition, generated once and cached server-side), so it can
-// be read out on the spot. Long-pressing a word already on the list shows it too.
+// After a save the toast offers a child-friendly definition of the word behind a
+// tap (/api/vocab/{id}/definition, generated once and cached server-side), so it
+// can be read out on the spot. Long-pressing a word already on the list offers it too.
 //
 // The word under the finger is found with the caret-from-point APIs rather than
 // by wrapping every word in a <span>: the text is laid out in CSS columns and
@@ -107,10 +107,11 @@
       box-shadow:0 1px 0 rgba(200,150,40,.55); }`;
   document.head.appendChild(css);
 
-  // The toast says what happened and then, once it arrives, what the word means.
-  // Each showing gets a token so a definition that comes back late can't land in
-  // a newer toast. Tapping the toast (outside Undo) dismisses it.
-  let toast, toastT, toastTok = 0;
+  // The toast says what happened and offers the word's meaning behind a tap (so
+  // the child gets a chance to guess first). Each showing gets a token so a
+  // definition that comes back late can't land in a newer toast. Tapping the
+  // toast (outside Undo) reveals the meaning if one is on offer, else dismisses.
+  let toast, toastT, toastTok = 0, reveal = null;
   function showToast(html, undo, ms) {
     if (!toast) {
       toast = document.createElement("div");
@@ -121,12 +122,16 @@
       // keep taps on the toast from reaching the reader's page-turn handlers
       for (const ev of ["click", "touchstart", "touchend", "pointerdown"])
         toast.addEventListener(ev, e => e.stopPropagation());
-      toast.addEventListener("click", e => { if (!e.target.closest("button")) toast.hidden = true; });
+      toast.addEventListener("click", e => {
+        if (e.target.closest("button")) return;
+        if (reveal) { const r = reveal; reveal = null; r(); } else toast.hidden = true;
+      });
       document.body.appendChild(toast);
     }
     toast.querySelector(".head").innerHTML = html;
     const def = toast.querySelector(".def");
     def.textContent = ""; def.className = "def";
+    reveal = null;
     const btn = toast.querySelector("button");
     btn.hidden = !undo;
     btn.onclick = undo ? () => { undo(); toast.hidden = true; } : null;
@@ -139,23 +144,26 @@
     toastT = setTimeout(() => { toast.hidden = true; }, ms);
   }
 
-  // Fetch the word's definition into the toast `tok`, if it's still showing.
-  async function showDefinition(id, tok) {
+  // Offer the word's definition in toast `tok`: fetched straight away so the
+  // reveal is instant, shown only when the toast is tapped.
+  function offerDefinition(id, tok) {
     const def = toast.querySelector(".def");
-    def.className = "def wait"; def.textContent = "Looking it up…";
-    holdToast(12000);
-    let d = null;
-    try {
-      const r = await fetch(`/api/vocab/${id}/definition`);
-      if (r.ok) d = await r.json();
-    } catch (_) {}
-    if (tok !== toastTok || toast.hidden) return;
-    if (!d || !d.definition) { def.textContent = "Couldn’t look that one up just now"; holdToast(2500); return; }
-    def.className = "def";
-    def.textContent = d.definition;
-    if (d.part_of_speech) toast.querySelector(".head").insertAdjacentHTML("beforeend", `<i>${esc(d.part_of_speech)}</i>`);
-    // long enough to read aloud: ~4s plus a beat per word
-    holdToast(4000 + 350 * d.definition.split(/\s+/).length);
+    const got = fetch(`/api/vocab/${id}/definition`)
+      .then(r => r.ok ? r.json() : null).catch(() => null);
+    def.className = "def wait"; def.textContent = "Tap to see what it means";
+    holdToast(7000);
+    reveal = async () => {
+      def.textContent = "Looking it up…";
+      holdToast(12000);
+      const d = await got;
+      if (tok !== toastTok || toast.hidden) return;
+      if (!d || !d.definition) { def.textContent = "Couldn’t look that one up just now"; holdToast(2500); return; }
+      def.className = "def";
+      def.textContent = d.definition;
+      if (d.part_of_speech) toast.querySelector(".head").insertAdjacentHTML("beforeend", `<i>${esc(d.part_of_speech)}</i>`);
+      // long enough to read aloud: ~4s plus a beat per word
+      holdToast(4000 + 350 * d.definition.split(/\s+/).length);
+    };
   }
 
   function mark(rect) {
@@ -249,7 +257,7 @@
       return;
     }
     if (!row.new) {
-      showDefinition(row.id, showToast(`<b>${esc(row.word)}</b> <span style="opacity:.7">· on the list</span>`));
+      offerDefinition(row.id, showToast(`<b>${esc(row.word)}</b> <span style="opacity:.7">· on the list</span>`));
       return;
     }
     saved.add(row.word);
@@ -259,7 +267,7 @@
       markSaved();
       fetch(`/api/vocab/${row.id}`, { method: "DELETE" }).catch(() => {});
     });
-    showDefinition(row.id, tok);
+    offerDefinition(row.id, tok);
   }
 
   function attach(opts) {

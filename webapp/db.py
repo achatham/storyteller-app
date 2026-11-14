@@ -275,8 +275,10 @@ CREATE INDEX IF NOT EXISTS continuity_book ON continuity_reviews(book_id, create
 -- what keeps one child's list apart from another's. `word` is the lowercased
 -- form a word is deduplicated on; `context` is the sentence it was found in and
 -- `page` the global page index, so a later review can show it in place.
--- seen_count/last_seen_at record re-picks of a word already on the list, which a
--- future spaced-repetition pass can read as "still unsure of this one".
+-- seen_count/last_seen_at record re-picks of a word already on the list.
+-- Spaced repetition (FSRS, see webapp/srs.py): `srs` is the scheduler's card
+-- state as JSON, `due_at` when it next wants the word (NULL = never reviewed,
+-- which counts as due), `reviews` how many times it has been graded.
 CREATE TABLE IF NOT EXISTS vocab (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     book_id      INTEGER REFERENCES books(id) ON DELETE CASCADE,
@@ -286,9 +288,26 @@ CREATE TABLE IF NOT EXISTS vocab (
     created_at   REAL,
     last_seen_at REAL,
     seen_count   INTEGER DEFAULT 1,
+    srs          TEXT,
+    due_at       REAL,
+    reviewed_at  REAL,
+    reviews      INTEGER DEFAULT 0,
     UNIQUE (book_id, word)
 );
 CREATE INDEX IF NOT EXISTS vocab_created ON vocab(created_at);
+-- Every grade given to a vocab word ("knew it" = FSRS Good, "didn't know" =
+-- Again), with the scheduler's review log. The card state in vocab.srs is
+-- enough to schedule; this history is what an FSRS optimizer fits per-child
+-- parameters from once there are enough reviews.
+CREATE TABLE IF NOT EXISTS vocab_reviews (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    vocab_id    INTEGER REFERENCES vocab(id) ON DELETE CASCADE,
+    book_id     INTEGER,
+    rating      INTEGER,
+    reviewed_at REAL,
+    log         TEXT
+);
+CREATE INDEX IF NOT EXISTS vocab_reviews_vocab ON vocab_reviews(vocab_id, reviewed_at);
 -- Local fallback cache for child-friendly vocab definitions, used only when
 -- Firestore isn't configured (see webapp/define.py). Keyed by word + a hash of
 -- the sentence it came from; `json` is the same record Firestore would hold.
@@ -345,6 +364,11 @@ def init():
         if "progress" not in bcols:   # live phase/step/ETA inputs (JSON), see bake_progress
             c.execute("ALTER TABLE batch_bake ADD COLUMN progress TEXT")
         lcols = {r["name"] for r in c.execute("PRAGMA table_info(reading_log)")}
+        vcols = {r["name"] for r in c.execute("PRAGMA table_info(vocab)")}
+        for col, decl in (("srs", "TEXT"), ("due_at", "REAL"), ("reviewed_at", "REAL"),
+                          ("reviews", "INTEGER DEFAULT 0")):
+            if col not in vcols:
+                c.execute(f"ALTER TABLE vocab ADD COLUMN {col} {decl}")
         if "max_pos" not in lcols:
             c.execute("ALTER TABLE reading_log ADD COLUMN max_pos INTEGER")
             # Best available backfill: pre-existing rows only recorded where the
@@ -1584,6 +1608,15 @@ def vocab_get(vocab_id) -> dict | None:
         r = c.execute("SELECT v.*, b.title AS title FROM vocab v JOIN books b ON b.id=v.book_id "
                       "WHERE v.id=?", (vocab_id,)).fetchone()
     return dict(r) if r else None
+
+
+def vocab_record_review(vocab_id, book_id, srs_json, due_at, rating, log_json, now):
+    """Store a graded review: the new card state on the word, plus a history row."""
+    with conn() as c:
+        c.execute("UPDATE vocab SET srs=?, due_at=?, reviewed_at=?, reviews=reviews+1 "
+                  "WHERE id=?", (srs_json, due_at, now, vocab_id))
+        c.execute("INSERT INTO vocab_reviews(vocab_id,book_id,rating,reviewed_at,log) "
+                  "VALUES (?,?,?,?,?)", (vocab_id, book_id, rating, now, log_json))
 
 
 def definition_get(key) -> dict | None:

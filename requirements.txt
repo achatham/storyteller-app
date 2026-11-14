@@ -3,6 +3,7 @@ fastapi==0.115.12
 uvicorn[standard]==0.34.1
 python-multipart==0.0.20
 google-genai==2.8.0
+fsrs==6.3.3                      # vocab spaced repetition
 google-cloud-firestore==2.34.1   # vocab definition cache (optional at runtime)
 pillow==11.1.0
 pypdf==5.3.0

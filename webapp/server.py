@@ -19,6 +19,7 @@
   POST /api/books/{id}/vocab      save a long-pressed word to that book's vocab list
   GET  /api/vocab                 vocab words, newest first (?since=&book_id=)
   GET  /api/vocab/{vid}/definition  child-friendly definition (LLM on demand, cached)
+  POST /api/vocab/{vid}/review    grade a word {knew: bool} -> FSRS schedules the next review
   DELETE /api/vocab/{vid}         drop a vocab word
   GET  /vocab                     vocab list page (today's new words / all)
 
@@ -48,7 +49,7 @@ from fastapi.staticfiles import StaticFiles
 from pipeline import costs
 from pipeline.config import STYLES
 
-from . import bake_progress, continuity, cover, db, define, flow, scene
+from . import bake_progress, continuity, cover, db, define, flow, scene, srs
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 
@@ -1253,7 +1254,9 @@ def api_vocab_add(book_id: int, body: dict = Body(...)):
 def api_vocab_list(book_id: int | None = None, since: float | None = None):
     """Vocabulary words, newest first. ?since= is epoch seconds (the client sends
     its local midnight for "today"); ?book_id= narrows to one book."""
-    return db.vocab_list(book_id=book_id, since=since)
+    # the FSRS card JSON is the scheduler's business; due_at/reviews are enough here
+    return [{k: v for k, v in w.items() if k != "srs"}
+            for w in db.vocab_list(book_id=book_id, since=since)]
 
 
 @app.get("/api/vocab/{vocab_id}/definition")
@@ -1274,6 +1277,19 @@ def api_vocab_definition(vocab_id: int):
     return {"id": vocab_id, "word": d["word"], "definition": d["definition"],
             "part_of_speech": d["part_of_speech"], "example": d["example"],
             "cached": d["cached"]}
+
+
+@app.post("/api/vocab/{vocab_id}/review")
+def api_vocab_review(vocab_id: int, body: dict = Body(...)):
+    """Grade a word after revealing its definition: {"knew": true|false}. Feeds
+    the FSRS scheduler (webapp/srs.py) and returns when the word is next due."""
+    knew = body.get("knew")
+    if not isinstance(knew, bool):
+        raise HTTPException(400, "knew must be true or false")
+    out = srs.review(vocab_id, knew)
+    if out is None:
+        raise HTTPException(404, "no such word")
+    return out
 
 
 @app.delete("/api/vocab/{vocab_id}")

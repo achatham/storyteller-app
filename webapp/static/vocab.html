@@ -36,7 +36,22 @@
        border-radius:12px; padding:12px 8px 12px 16px; margin-bottom:8px; }
   .w .body { flex:1; min-width:0; }
   .w .word { font-size:1.35rem; }
-  .w .word i { font-size:.8rem; color:var(--muted); margin-left:6px; font-family:system-ui,sans-serif; }
+  .w .def i { font-size:.8rem; color:var(--muted); margin-right:4px; font-family:system-ui,sans-serif; }
+  .w .reveal { display:block; width:100%; margin-top:10px; font:inherit; font-family:system-ui,sans-serif;
+               font-size:.92rem; color:var(--accent); background:var(--bg); cursor:pointer;
+               border:1.5px dashed var(--line); border-radius:10px; padding:12px; }
+  .w .reveal[hidden] { display:none; }
+  .w .ans { margin-top:8px; padding-top:8px; border-top:1px solid var(--line); }
+  .w .grade { display:flex; gap:10px; margin-top:12px; font-family:system-ui,sans-serif; }
+  .w .grade button { flex:1; font:inherit; font-size:.95rem; padding:11px 8px; border-radius:10px;
+                     cursor:pointer; border:1px solid var(--line); background:var(--panel); color:var(--ink); }
+  .w .grade button.no { border-color:#e3c0b0; background:#fbf1ec; color:#9b3d2e; }
+  .w .grade button.yes { border-color:#bcd3b0; background:#eef6ea; color:#3d6b2e; }
+  .w .grade button:disabled { opacity:.5; }
+  .w .graded { margin-top:10px; font-family:system-ui,sans-serif; font-size:.85rem; color:var(--muted); }
+  .w.done { opacity:.6; }
+  .seg button .n { display:inline-block; min-width:1.4em; margin-left:4px; padding:0 5px; border-radius:999px;
+                   background:#f0c45a; color:var(--ink); font-size:.75rem; }
   .w .def { font-size:1.05rem; line-height:1.45; margin-top:4px; }
   .w .def.wait { color:var(--muted); font-family:system-ui,sans-serif; font-size:.85rem; }
   .w .ex { font-size:.92rem; font-style:italic; color:#5c4b38; margin-top:3px; }
@@ -56,12 +71,13 @@
 <main>
   <div class="controls">
     <div class="seg" role="tablist">
-      <button id="today" class="on" type="button">Today’s new words</button>
-      <button id="all" type="button">All words</button>
+      <button data-tab="today" type="button">Today’s new words</button>
+      <button data-tab="review" type="button">Review</button>
+      <button data-tab="all" type="button">All words</button>
     </div>
     <select id="book"><option value="">All books</option></select>
   </div>
-  <div class="hint">Long-press a word while reading to add it. Each book keeps its own list.</div>
+  <div class="hint" id="hint"></div>
   <div id="list"><div class="empty">Loading…</div></div>
 </main>
 <script src="/static/auth.js"></script>
@@ -69,9 +85,30 @@
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 let WORDS = [];
-let view = { today: true, book: new URLSearchParams(location.search).get("book") || "" };
+const QS = new URLSearchParams(location.search);
+let view = { tab: ["today", "review", "all"].includes(QS.get("tab")) ? QS.get("tab") : "today",
+             book: QS.get("book") || "" };
+const HINTS = {
+  today: "Long-press a word while reading to add it. Each book keeps its own list.",
+  review: "Words due today. Tap to see the meaning, then say whether you knew it — the ones you miss come back sooner.",
+  all: "Every saved word. Each book keeps its own list.",
+};
+const REVEALED = new Set();   // ids whose definition has been tapped open
+const GRADED = new Map();     // id -> {knew, due_at} graded this visit
 
 function midnight(){ const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() / 1000; }
+// Due = never reviewed, or scheduled for any time today. Reviews happen once a
+// day at reading time, so a word due at 7pm shouldn't wait if you read at 6.
+const endOfToday = () => midnight() + 86400;
+const isDue = w => !w.due_at || w.due_at < endOfToday();
+function dueLabel(t){
+  const days = Math.round((new Date(t*1000).setHours(0,0,0,0) - new Date().setHours(0,0,0,0)) / 86400000);
+  if (days <= 0) return "today";
+  if (days === 1) return "tomorrow";
+  if (days < 14) return `in ${days} days`;
+  if (days < 60) return `in ${Math.round(days/7)} weeks`;
+  return `in ${Math.round(days/30)} months`;
+}
 function when(t){
   const d = new Date(t*1000);
   return t >= midnight() ? d.toLocaleTimeString([], {hour:"numeric", minute:"2-digit"})
@@ -87,18 +124,51 @@ function context(w){
   return esc(w.context.slice(0, at)) + "<mark>" + esc(w.context.slice(at, end)) + "</mark>" + esc(w.context.slice(end));
 }
 
+function card(w){
+  const meta = [when(w.created_at), w.page != null ? `page ${w.page + 1}` : "",
+                !w.reviews ? "new" : `reviewed ${w.reviews}×`,
+                w.due_at && !isDue(w) ? `next ${dueLabel(w.due_at)}` : (w.reviews ? "due today" : "")
+               ].filter(Boolean).join(" · ");
+  const open = REVEALED.has(w.id), g = GRADED.get(w.id);
+  return `<div class="w${g && view.tab === "review" ? " done" : ""}" data-w="${w.id}"><div class="body">
+      <div class="word">${esc(w.word)}</div>
+      ${w.context ? `<div class="ctx">From the book: ${context(w)}</div>` : ""}
+      <button class="reveal" data-id="${w.id}" ${open ? "hidden" : ""}>Tap to see what it means</button>
+      <div class="ans" ${open ? "" : "hidden"}>
+        <div class="def wait" data-def="${w.id}">Looking it up…</div>
+        <div class="ex"></div>
+        ${g ? graded(g) : `<div class="grade">
+          <button class="no" data-id="${w.id}">✗ Didn’t know it</button>
+          <button class="yes" data-id="${w.id}">✓ Knew it</button></div>`}
+      </div>
+      <div class="meta">${meta}</div>
+    </div><button class="del" data-id="${w.id}" title="Remove" aria-label="Remove ${esc(w.word)}">✕</button></div>`;
+}
+const graded = g => `<div class="graded">${g.knew ? "✓ Knew it" : "✗ Not yet"} — we’ll ask again ${dueLabel(g.due_at)}</div>`;
+
 function render(){
-  $("#today").classList.toggle("on", view.today);
-  $("#all").classList.toggle("on", !view.today);
+  const inBook = w => !view.book || String(w.book_id) === view.book;
+  const nDue = WORDS.filter(w => inBook(w) && isDue(w)).length;
+  for (const b of document.querySelectorAll(".seg button")){
+    b.classList.toggle("on", b.dataset.tab === view.tab);
+    if (b.dataset.tab === "review") b.innerHTML = "Review" + (nDue ? `<span class="n">${nDue}</span>` : "");
+  }
+  $("#hint").textContent = HINTS[view.tab];
   const since = midnight();
-  const rows = WORDS.filter(w => (!view.today || w.created_at >= since) &&
-                                 (!view.book || String(w.book_id) === view.book));
+  let rows = WORDS.filter(w => inBook(w) && (
+    view.tab === "today" ? w.created_at >= since :
+    view.tab === "review" ? isDue(w) || GRADED.has(w.id) : true));
+  // review: words you've already met first (most overdue first), then new ones
+  if (view.tab === "review")
+    rows = rows.slice().sort((a, b) => (!a.reviews - !b.reviews) || ((a.due_at||0) - (b.due_at||0)));
   if (!rows.length){
-    $("#list").innerHTML = `<div class="empty">${view.today ? "No new words yet today." : "No words saved yet."}<br>
-      Hold your finger on a word in the reader to add it here.</div>`;
+    $("#list").innerHTML = `<div class="empty">${
+      view.tab === "today" ? "No new words yet today.<br>Hold your finger on a word in the reader to add it here." :
+      view.tab === "review" ? "Nothing to review today. 🎉" :
+      "No words saved yet.<br>Hold your finger on a word in the reader to add it here."}</div>`;
     return;
   }
-  // group by book, keeping the order of each book's newest word
+  // group by book, keeping each book's first word's place in the order
   const groups = new Map();
   for (const w of rows){
     if (!groups.has(w.book_id)) groups.set(w.book_id, { title: w.title, words: [] });
@@ -109,17 +179,7 @@ function render(){
     html += `<div class="book"><h2>${esc(g.title || "Untitled")}</h2>
       <span class="n">${g.words.length} word${g.words.length === 1 ? "" : "s"}</span>
       <a href="/book/${bid}">Open book ›</a></div>`;
-    for (const w of g.words){
-      const meta = [when(w.created_at), w.page != null ? `page ${w.page + 1}` : "",
-                    w.seen_count > 1 ? `picked ${w.seen_count}×` : ""].filter(Boolean).join(" · ");
-      html += `<div class="w"><div class="body">
-          <div class="word">${esc(w.word)}<i></i></div>
-          <div class="def wait" data-def="${w.id}">${DEFS.has(w.id) ? "" : "Looking it up…"}</div>
-          <div class="ex"></div>
-          ${w.context ? `<div class="ctx">From the book: ${context(w)}</div>` : ""}
-          <div class="meta">${meta}</div>
-        </div><button class="del" data-id="${w.id}" title="Remove" aria-label="Remove ${esc(w.word)}">✕</button></div>`;
-    }
+    for (const w of g.words) html += card(w);
   }
   $("#list").innerHTML = html;
   loadDefinitions(rows);
@@ -135,8 +195,7 @@ function paintDef(id){
   const d = DEFS.get(id), card = el.closest(".w");
   if (!d){ el.textContent = "Couldn’t look this one up — reload to try again"; return; }
   el.classList.remove("wait");
-  el.textContent = d.definition;
-  card.querySelector(".word i").textContent = d.part_of_speech || "";
+  el.innerHTML = (d.part_of_speech ? `<i>${esc(d.part_of_speech)}</i> ` : "") + esc(d.definition);
   card.querySelector(".ex").textContent = d.example ? `“${d.example}”` : "";
 }
 let defQueue = [], defBusy = 0;
@@ -185,16 +244,47 @@ async function load(){
   render();
 }
 
-$("#today").onclick = () => { view.today = true; render(); };
-$("#all").onclick = () => { view.today = false; render(); };
-$("#book").onchange = e => {
-  view.book = e.target.value;
+function syncUrl(){
   const u = new URL(location.href);
   view.book ? u.searchParams.set("book", view.book) : u.searchParams.delete("book");
+  view.tab !== "today" ? u.searchParams.set("tab", view.tab) : u.searchParams.delete("tab");
   history.replaceState(null, "", u);
+}
+for (const b of document.querySelectorAll(".seg button"))
+  b.onclick = () => { view.tab = b.dataset.tab; GRADED.clear(); syncUrl(); render(); };
+$("#book").onchange = e => { view.book = e.target.value; syncUrl(); render(); };
+
+async function grade(id, knew, cardEl){
+  for (const b of cardEl.querySelectorAll(".grade button")) b.disabled = true;
+  let out = null;
+  try {
+    const r = await fetch(`/api/vocab/${id}/review`, {method:"POST",
+      headers:{"Content-Type":"application/json"}, body:JSON.stringify({knew})});
+    if (Auth.bounced(r)) return;
+    if (r.ok) out = await r.json();
+  } catch (_) {}
+  if (!out){
+    for (const b of cardEl.querySelectorAll(".grade button")) b.disabled = false;
+    alert("Couldn’t save that — try again.");
+    return;
+  }
+  const w = WORDS.find(x => x.id === id);
+  Object.assign(w, {due_at: out.due_at, reviewed_at: out.reviewed_at, reviews: out.reviews});
+  GRADED.set(id, {knew, due_at: out.due_at});
   render();
-};
+}
+
 $("#list").addEventListener("click", async e => {
+  const rv = e.target.closest(".reveal");
+  if (rv){
+    const id = +rv.dataset.id, el = rv.closest(".w");
+    REVEALED.add(id);
+    rv.hidden = true;
+    el.querySelector(".ans").hidden = false;
+    return;
+  }
+  const gb = e.target.closest(".grade button");
+  if (gb){ grade(+gb.dataset.id, gb.classList.contains("yes"), gb.closest(".w")); return; }
   const b = e.target.closest(".del");
   if (!b) return;
   const w = WORDS.find(x => x.id === +b.dataset.id);
