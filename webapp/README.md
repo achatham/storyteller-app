@@ -278,6 +278,17 @@ reading, the highlights are the book's own saved words plus every word of its
 default kid's, wherever they were first met. Deleting a book keeps the kids'
 words (their book just shows as deleted); deleting a kid removes their words.
 
+Each word is filed under its **headword**, the form worth learning and reviewing:
+"devoured" -> "devour", "attentively" -> "attentive", "leaves" -> "leaf" or
+"leave" depending on the sentence. Rules can't do this well (irregular verbs,
+homographs, "hardly" isn't "hard"), so `webapp/lemma.py` asks the text model,
+giving it the sentence. That takes a couple of seconds, so the toast says
+"Saving..." meanwhile. The headword is what's deduplicated, defined and reviewed;
+every printed form is kept in `vocab.forms` so the reader highlights the words as
+printed and `/vocab` shows "seen as ...". If the model call fails, the printed
+form is used. Words saved before headwords existed are re-filed by a one-time pass
+at startup (`lemma.backfill`), merging any that turn out to be the same word.
+
 `/vocab` filters by kid (and by book), and shows today's new words, the words
 due for review, or all of them. Picking a word already on that kid's list keeps
 its original sentence and date and counts the repeat (`seen_count`).

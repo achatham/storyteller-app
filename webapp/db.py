@@ -284,6 +284,9 @@ CREATE TABLE IF NOT EXISTS kids (
 -- words are unique per book (the two partial indexes below). `book_id` and
 -- `context`/`page` say where the word was first met. book_id is SET NULL on
 -- book delete so a kid keeps the words (and progress) from a book that's gone.
+-- `word` is the headword it's learned under ("devour"), picked by the text model
+-- (webapp/lemma); `forms` is a JSON list of how it was printed ("devoured", ...),
+-- NULL for words saved before headwords existed (lemma.backfill fixes those).
 -- seen_count/last_seen_at record re-picks of a word already on the list.
 -- Spaced repetition (FSRS, see webapp/srs.py): `srs` is the scheduler's card
 -- state as JSON, `due_at` when it next wants the word (NULL = never reviewed,
@@ -293,6 +296,7 @@ CREATE TABLE IF NOT EXISTS vocab (
     book_id      INTEGER REFERENCES books(id) ON DELETE SET NULL,
     kid_id       INTEGER REFERENCES kids(id) ON DELETE CASCADE,
     word         TEXT NOT NULL,
+    forms        TEXT,
     context      TEXT,
     page         INTEGER,
     created_at   REAL,
@@ -340,7 +344,7 @@ def conn() -> sqlite3.Connection:
     return c
 
 
-_VOCAB_COLS = ("id", "book_id", "kid_id", "word", "context", "page", "created_at",
+_VOCAB_COLS = ("id", "book_id", "kid_id", "word", "forms", "context", "page", "created_at",
                "last_seen_at", "seen_count", "srs", "due_at", "reviewed_at", "reviews")
 
 
@@ -415,6 +419,9 @@ def init():
         if "progress" not in bcols:   # live phase/step/ETA inputs (JSON), see bake_progress
             c.execute("ALTER TABLE batch_bake ADD COLUMN progress TEXT")
         lcols = {r["name"] for r in c.execute("PRAGMA table_info(reading_log)")}
+        vcols = {r["name"] for r in c.execute("PRAGMA table_info(vocab)")}
+        if "forms" not in vcols:   # printed forms of a headword (webapp/lemma)
+            c.execute("ALTER TABLE vocab ADD COLUMN forms TEXT")
         if "kid_id" not in cols:   # a book's default kid for vocab words
             c.execute("ALTER TABLE books ADD COLUMN kid_id INTEGER "
                       "REFERENCES kids(id) ON DELETE SET NULL")
@@ -1663,6 +1670,21 @@ _VOCAB_SELECT = ("SELECT v.*, b.title AS title, k.name AS kid_name FROM vocab v 
                  "LEFT JOIN books b ON b.id=v.book_id LEFT JOIN kids k ON k.id=v.kid_id ")
 
 
+def _vrow(r) -> dict:
+    d = dict(r)
+    d["forms"] = json.loads(d.get("forms") or "null") or [d["word"]]
+    return d
+
+
+def _add_forms(have, more) -> str:
+    """forms JSON: the old list plus any new forms, first-seen order kept."""
+    out = list(json.loads(have or "null") or [])
+    for f in more:
+        if f and f not in out:
+            out.append(f)
+    return json.dumps(out, ensure_ascii=False)
+
+
 def _vocab_find(c, kid_id, book_id, word):
     """The row a word would collide with: the kid's own copy, or (unassigned)
     this book's."""
@@ -1672,39 +1694,59 @@ def _vocab_find(c, kid_id, book_id, word):
                      (book_id, word)).fetchone()
 
 
-def vocab_add(book_id, word, context=None, page=None, kid_id=None) -> dict:
+def _vocab_merge(c, src, dst) -> int:
+    """Fold row `src` into `dst` (the same word on the same list): dst keeps its
+    own card and first-met sentence, adds src's re-picks and forms, takes over
+    src's review history, and inherits src's card if it had never been graded.
+    Returns dst's id."""
+    keep = dst["id"]
+    c.execute("UPDATE vocab SET seen_count=seen_count+?, last_seen_at=MAX(last_seen_at,?), "
+              "context=COALESCE(context,?), page=COALESCE(page,?), forms=? WHERE id=?",
+              (src["seen_count"] or 1, src["last_seen_at"] or 0, src["context"], src["page"],
+               _add_forms(dst["forms"] or json.dumps([dst["word"]]),
+                          json.loads(src["forms"] or "null") or [src["word"]]), keep))
+    if not dst["srs"] and src["srs"]:
+        c.execute("UPDATE vocab SET srs=?, due_at=?, reviewed_at=?, reviews=? WHERE id=?",
+                  (src["srs"], src["due_at"], src["reviewed_at"], src["reviews"], keep))
+    c.execute("UPDATE vocab_reviews SET vocab_id=? WHERE vocab_id=?", (keep, src["id"]))
+    c.execute("DELETE FROM vocab WHERE id=?", (src["id"],))
+    return keep
+
+
+def vocab_add(book_id, word, context=None, page=None, kid_id=None, form=None) -> dict:
     """Add a word to a kid's list (or the book's unassigned pile when kid_id is
-    None), or note that it was picked again.
+    None), or note that it was picked again. `word` is the headword it's learned
+    under (webapp/lemma) and `form` how it was printed, if different.
 
     Returns the row plus `new`: False when the word was already on that list, in
     which case its original sentence and date are kept (that's when it was
-    *new*) and only the re-pick is counted."""
+    *new*); the re-pick is counted and a new form remembered."""
     now = time.time()
+    forms = [form or word]
     with conn() as c:
         r = _vocab_find(c, kid_id, book_id, word)
         new = r is None
         if new:
             try:
-                c.execute("INSERT INTO vocab(book_id,kid_id,word,context,page,created_at,"
-                          "last_seen_at) VALUES (?,?,?,?,?,?,?)",
-                          (book_id, kid_id, word, context, page, now, now))
+                c.execute("INSERT INTO vocab(book_id,kid_id,word,forms,context,page,created_at,"
+                          "last_seen_at) VALUES (?,?,?,?,?,?,?,?)",
+                          (book_id, kid_id, word, json.dumps(forms, ensure_ascii=False),
+                           context, page, now, now))
             except sqlite3.IntegrityError:   # a concurrent save of the same word won
                 new = False
         if not new:
             r = _vocab_find(c, kid_id, book_id, word)
-            c.execute("UPDATE vocab SET seen_count=seen_count+1, last_seen_at=? WHERE id=?",
-                      (now, r["id"]))
+            c.execute("UPDATE vocab SET seen_count=seen_count+1, last_seen_at=?, forms=? WHERE id=?",
+                      (now, _add_forms(r["forms"] or json.dumps([r["word"]]), forms), r["id"]))
         rid = _vocab_find(c, kid_id, book_id, word)["id"]
         row = c.execute(_VOCAB_SELECT + "WHERE v.id=?", (rid,)).fetchone()
-    return {**dict(row), "new": new}
+    return {**_vrow(row), "new": new}
 
 
 def vocab_assign(vocab_id, kid_id) -> dict | None:
     """Move a word to another kid (or back to unassigned with None). If that kid
-    already has the word, the two merge into the existing row: it keeps its own
-    card and first-met sentence, adds the re-pick count, takes over this row's
-    review history, and inherits its card if it had never been graded. Returns
-    the surviving row, or None if there is no such word."""
+    already has the word, the two merge into the existing row (see _vocab_merge).
+    Returns the surviving row, or None if there is no such word."""
     with conn() as c:
         src = c.execute("SELECT * FROM vocab WHERE id=?", (vocab_id,)).fetchone()
         if not src:
@@ -1716,18 +1758,33 @@ def vocab_assign(vocab_id, kid_id) -> dict | None:
         elif dst["id"] == vocab_id:
             keep = vocab_id
         else:
-            keep = dst["id"]
-            c.execute("UPDATE vocab SET seen_count=seen_count+?, last_seen_at=MAX(last_seen_at,?), "
-                      "context=COALESCE(context,?), page=COALESCE(page,?) WHERE id=?",
-                      (src["seen_count"] or 1, src["last_seen_at"] or 0, src["context"],
-                       src["page"], keep))
-            if not dst["srs"] and src["srs"]:
-                c.execute("UPDATE vocab SET srs=?, due_at=?, reviewed_at=?, reviews=? WHERE id=?",
-                          (src["srs"], src["due_at"], src["reviewed_at"], src["reviews"], keep))
-            c.execute("UPDATE vocab_reviews SET vocab_id=? WHERE vocab_id=?", (keep, vocab_id))
-            c.execute("DELETE FROM vocab WHERE id=?", (vocab_id,))
+            keep = _vocab_merge(c, src, dst)
         row = c.execute(_VOCAB_SELECT + "WHERE v.id=?", (keep,)).fetchone()
-    return {**dict(row), "merged": keep != vocab_id}
+    return {**_vrow(row), "merged": keep != vocab_id}
+
+
+def vocab_without_forms() -> list[dict]:
+    """Words saved before headwords existed (see lemma.backfill)."""
+    with conn() as c:
+        return [dict(r) for r in c.execute("SELECT id, word, context FROM vocab WHERE forms IS NULL")]
+
+
+def vocab_set_headword(vocab_id, word) -> int | None:
+    """Re-file a word under headword `word`, keeping its current word as a form;
+    merges into the list's existing row for that headword if there is one.
+    Returns the surviving id."""
+    with conn() as c:
+        src = c.execute("SELECT * FROM vocab WHERE id=?", (vocab_id,)).fetchone()
+        if not src:
+            return None
+        forms = _add_forms(src["forms"], [src["word"]])
+        dst = _vocab_find(c, src["kid_id"], src["book_id"], word)
+        if dst is None or dst["id"] == vocab_id:
+            c.execute("UPDATE vocab SET word=?, forms=? WHERE id=?", (word, forms, vocab_id))
+            return vocab_id
+        c.execute("UPDATE vocab SET forms=? WHERE id=?", (forms, vocab_id))
+        src = c.execute("SELECT * FROM vocab WHERE id=?", (vocab_id,)).fetchone()
+        return _vocab_merge(c, src, dst)
 
 
 def vocab_list(book_id=None, since=None) -> list[dict]:
@@ -1744,23 +1801,26 @@ def vocab_list(book_id=None, since=None) -> list[dict]:
     sql = (_VOCAB_SELECT + (f"WHERE {' AND '.join(where)} " if where else "")
            + "ORDER BY v.created_at DESC")
     with conn() as c:
-        return [dict(r) for r in c.execute(sql, params)]
+        return [_vrow(r) for r in c.execute(sql, params)]
 
 
 def vocab_words_for_reader(book_id) -> list[str]:
     """The words to highlight while reading a book: everything saved from it, plus
     every word of its default kid's (from any book) -- a word a child is learning
-    shows up wherever they meet it again."""
+    shows up wherever they meet it again. Headwords and every printed form."""
+    out = set()
     with conn() as c:
-        return [r["word"] for r in c.execute(
-            "SELECT DISTINCT word FROM vocab WHERE book_id=? OR kid_id="
-            "(SELECT kid_id FROM books WHERE id=?)", (book_id, book_id))]
+        for r in c.execute("SELECT word, forms FROM vocab WHERE book_id=? OR kid_id="
+                           "(SELECT kid_id FROM books WHERE id=?)", (book_id, book_id)):
+            out.add(r["word"])
+            out.update(json.loads(r["forms"] or "null") or [])
+    return sorted(out)
 
 
 def vocab_get(vocab_id) -> dict | None:
     with conn() as c:
         r = c.execute(_VOCAB_SELECT + "WHERE v.id=?", (vocab_id,)).fetchone()
-    return dict(r) if r else None
+    return _vrow(r) if r else None
 
 
 def vocab_record_review(vocab_id, book_id, srs_json, due_at, rating, log_json, now):

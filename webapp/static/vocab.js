@@ -209,7 +209,9 @@
   // The saved word's headline: whose list it's on, or a nudge to pick someone.
   function headline(cur) {
     const name = cur.kid_id != null ? kidName(cur.kid_id) : null;
-    const w = `<b>${esc(cur.word)}</b>`;
+    // the headword it's learned under, and the printed form if that differs
+    const w = `<b>${esc(cur.word)}</b>` + (cur.form && cur.form !== cur.word
+      ? ` <span style="opacity:.7">(${esc(cur.form)})</span>` : "");
     if (!cur.isNew) return name ? `${w} <span style="opacity:.7">· on ${esc(name)}’s list</span>`
                                 : `${w} <span style="opacity:.7">· on the list</span>`;
     if (name) return `Saved ${w} for ${esc(name)}`;
@@ -341,6 +343,9 @@
     // chips move it if this one is someone else's
     const body = { word: hit.word, context: sentenceOf(opts.root, hit.node, hit.start),
                    page: opts.getPage ? opts.getPage() : null };
+    // the server asks the text model for the word's headword ("devoured" ->
+    // "devour"), which takes a couple of seconds -- say something meanwhile
+    showToast(`Saving <b>${esc(hit.word)}</b>…`, null, 15000);
     let r, row;
     try {
       r = await fetch(`/api/books/${opts.bookId}/vocab`, { method: "POST",
@@ -354,15 +359,17 @@
       return;
     }
     await ctx.loaded;   // kid names for the toast
-    const cur = { id: row.id, word: row.word, kid_id: row.kid_id ?? null, isNew: row.new };
+    const form = hit.word.toLowerCase().replace(/['’]s$/, "");
+    const cur = { id: row.id, word: row.word, form, kid_id: row.kid_id ?? null, isNew: row.new };
+    const words = [row.word, ...(row.forms || [])];
     let tok;
+    for (const w of words) saved.add(w);
+    markSaved();
     if (!row.new) {
       tok = showToast(headline(cur));
     } else {
-      saved.add(row.word);
-      markSaved();
       tok = showToast(headline(cur), () => {
-        saved.delete(row.word);
+        for (const w of words) saved.delete(w);
         markSaved();
         fetch(`/api/vocab/${cur.id}`, { method: "DELETE" }).catch(() => {});
       });

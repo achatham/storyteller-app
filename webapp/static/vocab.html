@@ -157,10 +157,13 @@ function when(t){
   return t >= midnight() ? d.toLocaleTimeString([], {hour:"numeric", minute:"2-digit"})
                          : d.toLocaleDateString([], {month:"short", day:"numeric"});
 }
-// the saved sentence with the word picked out (any case, possessive included)
+// the saved sentence with the word picked out (any printed form, any case,
+// possessive included)
 function context(w){
   if (!w.context) return "";
-  const re = new RegExp(`(^|[^\\p{L}])(${w.word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})(?=[^\\p{L}]|$)`, "iu");
+  const alts = [...new Set([...(w.forms || []), w.word])].sort((a, b) => b.length - a.length)
+    .map(x => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  const re = new RegExp(`(^|[^\\p{L}])(${alts})(?=[^\\p{L}]|$)`, "iu");
   const m = re.exec(w.context);
   if (!m) return esc(w.context);
   const at = m.index + m[1].length, end = at + m[2].length;
@@ -168,7 +171,9 @@ function context(w){
 }
 
 function card(w){
+  const seen = (w.forms || []).filter(f => f !== w.word);
   const meta = [when(w.created_at), w.page != null ? `page ${w.page + 1}` : "",
+                seen.length ? `seen as “${seen.map(esc).join("”, “")}”` : "",
                 !w.reviews ? "new" : `reviewed ${w.reviews}×`,
                 w.due_at && !isDue(w) ? `next ${dueLabel(w.due_at)}` : (w.reviews ? "due today" : "")
                ].filter(Boolean).join(" · ");

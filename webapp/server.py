@@ -53,7 +53,7 @@ from fastapi.staticfiles import StaticFiles
 from pipeline import costs
 from pipeline.config import STYLES
 
-from . import bake_progress, continuity, cover, db, define, flow, scene, srs
+from . import bake_progress, continuity, cover, db, define, flow, lemma, scene, srs
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 
@@ -221,6 +221,9 @@ def _shutdown_local_jobs():
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _resume_interrupted_work()
+    # words saved before headwords existed get one now (a model call each, so
+    # off the startup path; a no-op once they all have one)
+    asyncio.get_running_loop().run_in_executor(None, _safe_backfill)
     try:
         yield
     finally:
@@ -240,6 +243,13 @@ async def harden_http(request: Request, call_next):
     response.headers.setdefault("Referrer-Policy", "same-origin")
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     return response
+
+
+def _safe_backfill():
+    try:
+        lemma.backfill()
+    except Exception as e:  # noqa: BLE001
+        print(f"  [lemma] backfill failed: {type(e).__name__}: {str(e)[:160]}", flush=True)
 
 
 @app.get("/sw.js")
@@ -1306,7 +1316,8 @@ def api_book_vocab(book_id: int):
 
 @app.post("/api/books/{book_id}/vocab")
 def api_vocab_add(book_id: int, body: dict = Body(...)):
-    """Save a word from this book (the reader's long-press). It goes to
+    """Save a word from this book (the reader's long-press), under its headword
+    (webapp/lemma: the model reads the sentence; takes a couple of seconds). It goes to
     `kid_id` if the body names one (null = unassigned), else to the book's
     default kid. Re-picking a word already on that list is not an error; the
     response says `new: false`."""
@@ -1322,7 +1333,10 @@ def api_vocab_add(book_id: int, body: dict = Body(...)):
     except (TypeError, ValueError):
         page = None
     kid_id = _kid_ref(body["kid_id"]) if "kid_id" in body else book.get("kid_id")
-    return db.vocab_add(book_id, word, context, page, kid_id)
+    # filed under its headword ("devoured" -> "devour"), so tenses and plurals
+    # don't become separate cards; the printed form is kept alongside
+    head = lemma.headword(word, context)
+    return db.vocab_add(book_id, head, context, page, kid_id, form=word)
 
 
 @app.patch("/api/vocab/{vocab_id}")
@@ -1357,7 +1371,7 @@ def api_vocab_definition(vocab_id: int):
     if not w:
         raise HTTPException(404, "no such word")
     try:
-        d = define.define(w["word"], w["context"], w["title"])
+        d = define.define(w["word"], w["context"], w["title"], form=w["forms"][0])
     except costs.BudgetExceeded as e:
         raise HTTPException(402, str(e))
     except Exception as e:  # noqa: BLE001

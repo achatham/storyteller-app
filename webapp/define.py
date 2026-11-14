@@ -23,7 +23,7 @@ from pipeline.config import DEFINE_MODEL
 
 from . import db
 
-PROMPT_VERSION = 1
+PROMPT_VERSION = 2
 FIRESTORE_PROJECT = os.environ.get("STORY_FIRESTORE_PROJECT", "")
 FIRESTORE_DATABASE = os.environ.get("STORY_FIRESTORE_DATABASE", "(default)")
 FIRESTORE_COLLECTION = os.environ.get("STORY_FIRESTORE_COLLECTION", "vocab_definitions")
@@ -42,11 +42,13 @@ PROMPT = """A parent is reading a book aloud to a young child (about 5 to 8 year
 old) and the child asked what a word means. Explain it the way a kind, clear
 grown-up would.
 
-Word: {word}
+Word: {word}{form}
 The sentence it appeared in{book}: "{context}"
 
 Give the meaning the word has IN THAT SENTENCE (if it has several meanings, pick
-the one used there).
+the one used there). If the sentence prints a different form of it ("attentively"
+for "attentive"), still define the word above, in its own form and part of
+speech, and use that form in the example; the sentence only shows which meaning.
 
 - definition: one or two short sentences a six-year-old understands. Use plain,
   everyday words and something concrete they know. Do not use the word itself or
@@ -123,8 +125,9 @@ def _lock_for(key):
         return _key_locks.setdefault(key, threading.Lock())
 
 
-def _generate(word, context, title):
-    prompt = PROMPT.format(word=word, context=context or word,
+def _generate(word, context, title, form=None):
+    prompt = PROMPT.format(word=word, context=context or form or word,
+                           form=f' (printed as "{form}" in the sentence)' if form and form != word else "",
                            book=f' (from the book "{title}")' if title else "")
     with costs.run_as("vocab"):
         out = gem.text_json(prompt, SCHEMA, model=DEFINE_MODEL, thinking_level="low")
@@ -149,8 +152,10 @@ def _cache_call(fn, *args):
         return None
 
 
-def define(word: str, context: str | None = None, title: str | None = None) -> dict:
-    """The cached definition of `word` as used in `context`, generating (and
+def define(word: str, context: str | None = None, title: str | None = None,
+           form: str | None = None) -> dict:
+    """The cached definition of `word` (a headword) as used in `context`, where
+    it may be printed as `form` ("devoured" for "devour"), generating (and
     caching) it on first request. Adds `cached`: whether it came from the cache."""
     key = cache_key(word, context)
     with _lock_for(key):
@@ -158,7 +163,7 @@ def define(word: str, context: str | None = None, title: str | None = None) -> d
         hit = c and _cache_call(c.get, key)
         if hit and hit.get("definition"):
             return {**hit, "cached": True}
-        rec = _generate(word, context, title)
+        rec = _generate(word, context, title, form)
         if not rec["definition"]:
             raise ValueError("empty definition")
         if c:
