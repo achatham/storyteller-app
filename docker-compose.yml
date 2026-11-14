@@ -34,10 +34,16 @@ services:
       STORY_MAX_UPLOADS_PER_MINUTE: "${STORY_MAX_UPLOADS_PER_MINUTE:-6}" # per-client abuse guard
       STORY_BOOK_BUDGET_USD: "${STORY_BOOK_BUDGET_USD:-}" # optional hard USD limit/book
       STORY_BOOK_BUDGETS: "${STORY_BOOK_BUDGETS:-}" # per-book overrides, "28:140,31:60"
-      # All text steps default to STORY_TEXT_MODEL (gemini-3.8-flash). Text spend
+      # Vocab definitions are cached in Firestore when a project is set, else in the
+      # app DB. The service-account key lives outside the repo, mounted read-only.
+      STORY_FIRESTORE_PROJECT: "${STORY_FIRESTORE_PROJECT:-}"
+      STORY_FIRESTORE_DATABASE: "${STORY_FIRESTORE_DATABASE:-(default)}"
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/firestore.json
+      # All text steps default to STORY_TEXT_MODEL (gemini-4-hydrogen). Text spend
       # is negligible next to image generation, so we favour the stronger model
       # for reliable variant picks + cast inclusion (set STORY_ANALYZE_MODEL etc.
       # to gemini-3.1-flash-lite if you ever want to trade quality for cost).
     volumes:
       - ./data:/data  # sqlite DB + scratch work dirs + logs persist here
+      - ${HOME}/.secrets/storyteller:/secrets:ro  # firestore.json (service-account key)
     restart: unless-stopped

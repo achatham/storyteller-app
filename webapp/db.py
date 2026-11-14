@@ -289,6 +289,14 @@ CREATE TABLE IF NOT EXISTS vocab (
     UNIQUE (book_id, word)
 );
 CREATE INDEX IF NOT EXISTS vocab_created ON vocab(created_at);
+-- Local fallback cache for child-friendly vocab definitions, used only when
+-- Firestore isn't configured (see webapp/define.py). Keyed by word + a hash of
+-- the sentence it came from; `json` is the same record Firestore would hold.
+CREATE TABLE IF NOT EXISTS definitions (
+    key        TEXT PRIMARY KEY,
+    json       TEXT NOT NULL,
+    created_at REAL
+);
 """
 
 
@@ -1569,6 +1577,26 @@ def vocab_list(book_id=None, since=None) -> list[dict]:
            + " ORDER BY v.created_at DESC")
     with conn() as c:
         return [dict(r) for r in c.execute(sql, params)]
+
+
+def vocab_get(vocab_id) -> dict | None:
+    with conn() as c:
+        r = c.execute("SELECT v.*, b.title AS title FROM vocab v JOIN books b ON b.id=v.book_id "
+                      "WHERE v.id=?", (vocab_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def definition_get(key) -> dict | None:
+    with conn() as c:
+        r = c.execute("SELECT json FROM definitions WHERE key=?", (key,)).fetchone()
+    return json.loads(r["json"]) if r else None
+
+
+def definition_put(key, record: dict):
+    with conn() as c:
+        c.execute("INSERT INTO definitions(key,json,created_at) VALUES (?,?,?) "
+                  "ON CONFLICT(key) DO UPDATE SET json=excluded.json, created_at=excluded.created_at",
+                  (key, json.dumps(record, ensure_ascii=False), time.time()))
 
 
 def vocab_delete(vocab_id) -> bool:

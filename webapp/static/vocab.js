@@ -5,6 +5,10 @@
 // root is the element holding the book text, getPage() returns the current
 // global page index (or null). Both readers share this file.
 //
+// After a save the toast fetches a child-friendly definition of the word
+// (/api/vocab/{id}/definition, generated once and cached server-side), so it can
+// be read out on the spot. Long-pressing a word already on the list shows it too.
+//
 // The word under the finger is found with the caret-from-point APIs rather than
 // by wrapping every word in a <span>: the text is laid out in CSS columns and
 // re-paginated on resize, and thousands of extra nodes would make that slower
@@ -85,38 +89,73 @@
     #vocabMark { position:fixed; z-index:45; pointer-events:none; border-radius:4px;
       background:rgba(240,196,90,.55); transition:opacity .6s ease .5s; }
     #vocabToast { position:fixed; left:50%; bottom:44px; transform:translateX(-50%); z-index:55;
-      display:flex; align-items:center; gap:14px; max-width:92vw;
-      background:rgba(43,38,34,.92); color:#fffdf8; font-family:system-ui,sans-serif;
-      font-size:.9rem; padding:9px 10px 9px 16px; border-radius:999px;
+      display:flex; align-items:center; gap:14px; width:max-content; max-width:min(560px, 92vw);
+      background:rgba(43,38,34,.94); color:#fffdf8; font-family:system-ui,sans-serif;
+      font-size:.9rem; padding:10px 10px 10px 16px; border-radius:16px;
       box-shadow:0 6px 20px rgba(0,0,0,.25); }
     #vocabToast[hidden] { display:none; }
-    #vocabToast b { font-family:Georgia,serif; font-size:1rem; }
-    #vocabToast button { font:inherit; font-size:.85rem; color:#f0c45a; background:none;
+    #vocabToast .txt { flex:1; min-width:0; }
+    #vocabToast b { font-family:Georgia,serif; font-size:1.05rem; }
+    #vocabToast i { color:#c9b896; font-size:.8rem; margin-left:4px; }
+    #vocabToast .def { font-family:Georgia,serif; font-size:1rem; line-height:1.4; margin-top:4px; }
+    #vocabToast .def:empty { display:none; }
+    #vocabToast .def.wait { color:#c9b896; font-family:system-ui,sans-serif; font-size:.85rem; }
+    #vocabToast button { font:inherit; font-size:.85rem; color:#f0c45a; background:none; align-self:center;
       border:1px solid rgba(240,196,90,.5); border-radius:999px; padding:5px 12px; cursor:pointer; }
     #vocabToast button[hidden] { display:none; }
     mark.vocab-word { background:rgba(240,196,90,.3); color:inherit; border-radius:3px;
       box-shadow:0 1px 0 rgba(200,150,40,.55); }`;
   document.head.appendChild(css);
 
-  let toast, toastT;
-  function showToast(html, undo) {
+  // The toast says what happened and then, once it arrives, what the word means.
+  // Each showing gets a token so a definition that comes back late can't land in
+  // a newer toast. Tapping the toast (outside Undo) dismisses it.
+  let toast, toastT, toastTok = 0;
+  function showToast(html, undo, ms) {
     if (!toast) {
       toast = document.createElement("div");
       toast.id = "vocabToast";
       toast.hidden = true;
-      toast.innerHTML = `<span></span><button type="button">Undo</button>`;
+      toast.innerHTML = `<div class="txt"><div class="head"></div><div class="def"></div></div>` +
+                        `<button type="button">Undo</button>`;
       // keep taps on the toast from reaching the reader's page-turn handlers
       for (const ev of ["click", "touchstart", "touchend", "pointerdown"])
         toast.addEventListener(ev, e => e.stopPropagation());
+      toast.addEventListener("click", e => { if (!e.target.closest("button")) toast.hidden = true; });
       document.body.appendChild(toast);
     }
-    toast.firstElementChild.innerHTML = html;
-    const btn = toast.lastElementChild;
+    toast.querySelector(".head").innerHTML = html;
+    const def = toast.querySelector(".def");
+    def.textContent = ""; def.className = "def";
+    const btn = toast.querySelector("button");
     btn.hidden = !undo;
     btn.onclick = undo ? () => { undo(); toast.hidden = true; } : null;
     toast.hidden = false;
+    holdToast(ms || (undo ? 4500 : 2500));
+    return ++toastTok;
+  }
+  function holdToast(ms) {
     clearTimeout(toastT);
-    toastT = setTimeout(() => { toast.hidden = true; }, undo ? 4500 : 2500);
+    toastT = setTimeout(() => { toast.hidden = true; }, ms);
+  }
+
+  // Fetch the word's definition into the toast `tok`, if it's still showing.
+  async function showDefinition(id, tok) {
+    const def = toast.querySelector(".def");
+    def.className = "def wait"; def.textContent = "Looking it up…";
+    holdToast(12000);
+    let d = null;
+    try {
+      const r = await fetch(`/api/vocab/${id}/definition`);
+      if (r.ok) d = await r.json();
+    } catch (_) {}
+    if (tok !== toastTok || toast.hidden) return;
+    if (!d || !d.definition) { def.textContent = "Couldn’t look that one up just now"; holdToast(2500); return; }
+    def.className = "def";
+    def.textContent = d.definition;
+    if (d.part_of_speech) toast.querySelector(".head").insertAdjacentHTML("beforeend", `<i>${esc(d.part_of_speech)}</i>`);
+    // long enough to read aloud: ~4s plus a beat per word
+    holdToast(4000 + 350 * d.definition.split(/\s+/).length);
   }
 
   function mark(rect) {
@@ -209,14 +248,18 @@
                                            : "Couldn’t save that word");
       return;
     }
-    if (!row.new) { showToast(`<b>${esc(row.word)}</b> is already on the list`); return; }
+    if (!row.new) {
+      showDefinition(row.id, showToast(`<b>${esc(row.word)}</b> <span style="opacity:.7">· on the list</span>`));
+      return;
+    }
     saved.add(row.word);
     markSaved();
-    showToast(`Saved <b>${esc(row.word)}</b>`, () => {
+    const tok = showToast(`Saved <b>${esc(row.word)}</b>`, () => {
       saved.delete(row.word);
       markSaved();
       fetch(`/api/vocab/${row.id}`, { method: "DELETE" }).catch(() => {});
     });
+    showDefinition(row.id, tok);
   }
 
   function attach(opts) {

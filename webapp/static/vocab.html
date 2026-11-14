@@ -36,6 +36,10 @@
        border-radius:12px; padding:12px 8px 12px 16px; margin-bottom:8px; }
   .w .body { flex:1; min-width:0; }
   .w .word { font-size:1.35rem; }
+  .w .word i { font-size:.8rem; color:var(--muted); margin-left:6px; font-family:system-ui,sans-serif; }
+  .w .def { font-size:1.05rem; line-height:1.45; margin-top:4px; }
+  .w .def.wait { color:var(--muted); font-family:system-ui,sans-serif; font-size:.85rem; }
+  .w .ex { font-size:.92rem; font-style:italic; color:#5c4b38; margin-top:3px; }
   .w .ctx { font-size:.95rem; line-height:1.45; color:#5c4b38; margin-top:3px; }
   .w .ctx mark { background:rgba(240,196,90,.45); color:inherit; border-radius:3px; padding:0 2px; }
   .w .meta { font-family:system-ui,sans-serif; font-size:.75rem; color:var(--muted); margin-top:5px; }
@@ -109,13 +113,51 @@ function render(){
       const meta = [when(w.created_at), w.page != null ? `page ${w.page + 1}` : "",
                     w.seen_count > 1 ? `picked ${w.seen_count}×` : ""].filter(Boolean).join(" · ");
       html += `<div class="w"><div class="body">
-          <div class="word">${esc(w.word)}</div>
-          ${w.context ? `<div class="ctx">${context(w)}</div>` : ""}
+          <div class="word">${esc(w.word)}<i></i></div>
+          <div class="def wait" data-def="${w.id}">${DEFS.has(w.id) ? "" : "Looking it up…"}</div>
+          <div class="ex"></div>
+          ${w.context ? `<div class="ctx">From the book: ${context(w)}</div>` : ""}
           <div class="meta">${meta}</div>
         </div><button class="del" data-id="${w.id}" title="Remove" aria-label="Remove ${esc(w.word)}">✕</button></div>`;
     }
   }
   $("#list").innerHTML = html;
+  loadDefinitions(rows);
+}
+
+// Definitions are generated on first request (a couple of seconds each) and
+// cached on the server, so fetch them after the list is on screen, a few at a
+// time, and keep them for re-renders when the filter changes.
+const DEFS = new Map();   // vocab id -> definition record, or null if it failed
+function paintDef(id){
+  const el = document.querySelector(`[data-def="${id}"]`);
+  if (!el) return;
+  const d = DEFS.get(id), card = el.closest(".w");
+  if (!d){ el.textContent = "Couldn’t look this one up — reload to try again"; return; }
+  el.classList.remove("wait");
+  el.textContent = d.definition;
+  card.querySelector(".word i").textContent = d.part_of_speech || "";
+  card.querySelector(".ex").textContent = d.example ? `“${d.example}”` : "";
+}
+let defQueue = [], defBusy = 0;
+const defInflight = new Set();
+function loadDefinitions(rows){
+  for (const w of rows) if (DEFS.has(w.id)) paintDef(w.id);
+  defQueue = rows.filter(w => !DEFS.has(w.id) && !defInflight.has(w.id)).map(w => w.id);
+  while (defBusy < 3 && defQueue.length) pumpDefs();
+}
+async function pumpDefs(){
+  const id = defQueue.shift();
+  if (id == null) return;
+  defBusy++; defInflight.add(id);
+  try {
+    const r = await fetch(`/api/vocab/${id}/definition`);
+    if (Auth.bounced(r)) return;
+    DEFS.set(id, r.ok ? await r.json() : null);
+  } catch (_) { DEFS.set(id, null); }
+  finally { defBusy--; defInflight.delete(id); }
+  paintDef(id);
+  pumpDefs();
 }
 
 function fillBooks(){

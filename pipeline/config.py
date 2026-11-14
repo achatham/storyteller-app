@@ -246,15 +246,19 @@ COVER_IMAGE_MODEL = os.environ.get("STORY_COVER_IMAGE_MODEL", SHEET_IMAGE_MODEL)
 LITE_IMAGE_MODEL = os.environ.get("STORY_LITE_IMAGE_MODEL", "gemini-3.1-flash-lite-image")
 # general default (used when a caller doesn't specify) = the page model
 IMAGE_MODEL = os.environ.get("STORY_IMAGE_MODEL", PAGE_IMAGE_MODEL)
-TEXT_MODEL = os.environ.get("STORY_TEXT_MODEL", "gemini-3.8-flash")
-# The strongest text model, for the few once-per-book (or once-per-window) steps where
-# judgement matters more than volume: cataloguing the registry, the whole-book roster
-# review, the continuity review. Gemini 4 Argon (~2.7x flash per token). Its output cap
-# is 32K, half of flash's -- fine here, the largest registry call has needed ~13K.
-STRONG_TEXT_MODEL = os.environ.get("STORY_STRONG_TEXT_MODEL", "gemini-4-argon")
+# Every text step runs on Gemini 4 Hydrogen (2026-11-13): one model for the bulk
+# steps, the once-per-book judgement steps and the cheap classifiers alike. Text
+# spend is small next to image generation, so a single strong model beats juggling
+# tiers. Its output cap is 65K, so the big registry/roster calls fit as they did on
+# flash. The role names below stay so any one step can still be pointed elsewhere.
+TEXT_MODEL = os.environ.get("STORY_TEXT_MODEL", "gemini-4-hydrogen")
+# For the few once-per-book (or once-per-window) steps where judgement matters
+# more than volume: cataloguing the registry, the whole-book roster review, the
+# continuity review. Same model as TEXT_MODEL unless overridden.
+STRONG_TEXT_MODEL = os.environ.get("STORY_STRONG_TEXT_MODEL", TEXT_MODEL)
 # Per-step text models (default to TEXT_MODEL). Low-sensitivity steps -- image
 # critique and the chapter-skeleton classification -- can be pointed at a cheaper
-# model (e.g. gemini-3.1-flash-lite) without much quality risk. Segmentation now
+# model via env without much quality risk. Segmentation now
 # only emits page-start anchors (not verbatim text), so it is much cheaper and
 # also tolerant of a lighter model; registry/discovery is identity-critical.
 ANALYZE_MODEL = os.environ.get("STORY_ANALYZE_MODEL", TEXT_MODEL)
@@ -266,11 +270,13 @@ REGISTRY_THINK = os.environ.get("STORY_REGISTRY_THINK", "high")
 CRITIQUE_MODEL = os.environ.get("STORY_CRITIQUE_MODEL", TEXT_MODEL)
 CHAPTER_MODEL = os.environ.get("STORY_CHAPTER_MODEL", TEXT_MODEL)
 # Tagging which recurring settings/props appear on each page is a narrow,
-# low-stakes classification, so it defaults to the cheap model.
-PROP_MODEL = os.environ.get("STORY_PROP_MODEL", "gemini-3.1-flash-lite")
+# low-stakes classification; a cheap model (gemini-3.1-flash-lite) is fine via env.
+PROP_MODEL = os.environ.get("STORY_PROP_MODEL", TEXT_MODEL)
 # Cleaning a book's title/author out of its filename + container metadata is a
-# trivial normalization, so it defaults to the cheap model too.
-META_MODEL = os.environ.get("STORY_META_MODEL", "gemini-3.1-flash-lite")
+# trivial normalization; same story.
+META_MODEL = os.environ.get("STORY_META_MODEL", TEXT_MODEL)
+# Child-friendly definitions for vocabulary words (webapp/define).
+DEFINE_MODEL = os.environ.get("STORY_DEFINE_MODEL", TEXT_MODEL)
 # The whole-book roster review (webapp/roster_review) runs once per book and has to
 # reason across every chapter's cast (and every sheet) at once.
 ROSTER_REVIEW_MODEL = os.environ.get("STORY_ROSTER_REVIEW_MODEL", STRONG_TEXT_MODEL)

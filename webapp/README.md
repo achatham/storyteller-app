@@ -103,7 +103,7 @@ Reads `GEMINI_API_KEY` from `.env` (same as the CLI pipeline).
 - **Upload** (`POST /api/books`) stores the file in SQLite and spawns
   `python -m webapp.process <id>`, which reuses the env-driven pipeline to:
   extract text → build the entity **registry** (the character/variant catalogue,
-  on the strong text model, Gemini 4 Argon, at `thinking_level=high`) → **segment** each chapter
+  on the strong text model at `thinking_level=high`) → **segment** each chapter
   into read-aloud pages. Finally it **warms the first `STORY_WARM_PAGES` page
   images** (default 2) so the book opens instantly. Status is shown live on the hub.
 - **A refused character design falls back to the wardrobe.** The safety filter
@@ -189,7 +189,7 @@ four pages. Every extra id is a separate sheet, and the same person ends up look
 like different people.
 
 `webapp/roster_review.py` runs once per import, on the strong text model
-(`STORY_ROSTER_REVIEW_MODEL`, Gemini 4 Argon). It sees every registry look with its
+(`STORY_ROSTER_REVIEW_MODEL`). It sees every registry look with its
 page count, every chapter-local character, **and the drawn reference sheets as
 images**. It returns fixes, which code validates before anything is written:
 
@@ -256,7 +256,7 @@ then redraws only the pages marked *revise* / *regenerate* (revise seeds the dra
 loop with the current picture + the critic's edit instruction; a revise the critic
 rejects falls through to the normal escalate/redraw path). New reference sheets
 are drawn lazily the first time a redrawn page needs them. "Apply plan only" skips
-the redraws. A review is text-model only (~$0.08 per window on Argon); applying costs image
+the redraws. A review is text-model only (a few cents per window); applying costs image
 generations for the pages it redraws.
 
 ## Vocabulary words
@@ -279,6 +279,23 @@ Saved words are highlighted wherever they come up again in that book, in either
 reader, including a possessive form ("captain's"). Those few words are wrapped
 in `<mark>`s, and a MutationObserver re-marks each newly rendered page or
 chapter, so the readers don't have to call anything after they render.
+
+### Definitions
+
+Each saved word gets a child-friendly definition (plus part of speech and a fresh
+example sentence) from the text model, generated the first time anyone asks:
+the reader's toast fetches it right after a long-press, and `/vocab` fills them
+in as the list loads. `webapp/define.py` asks for the meaning the word has *in
+the sentence it was saved from*, so the cache key is the word plus a hash of that
+sentence (and a prompt version) -- "spot" in "the black spot" and in "a spot of
+tea" are cached separately. A definition costs about a tenth of a cent and is
+billed to the `vocab` run, not to any book's budget.
+
+The cache is Firestore when `STORY_FIRESTORE_PROJECT` is set (collection
+`vocab_definitions`; the container reads the service-account key from
+`~/.secrets/storyteller/firestore.json`), otherwise the `definitions` table in
+the app DB. A Firestore error never fails a lookup: the definition is generated
+and served, and caching is tried again on the next request.
 
 ## Config (env)
 
@@ -305,15 +322,18 @@ chapter, so the readers don't have to call anything after they render.
 | `STORY_LITE_IMAGE_MODEL` | `gemini-3.1-flash-lite-image` | manual roster-sheet tweaks in the roster editor (always lite) |
 | `STORY_COVER_SIZE` / `STORY_COVER_MAXW` / `STORY_COVER_QUALITY` | `2K` / `1024` / `82` | cover generation size, stored width, WebP quality |
 | `STORY_COVER_CAST` | `3` | max characters on a cover |
-| `STORY_TEXT_MODEL` | `gemini-3.8-flash` | default for all text steps |
+| `STORY_TEXT_MODEL` | `gemini-4-hydrogen` | every text step defaults to it, including the roles below |
 | `STORY_ANALYZE_MODEL` | = text model | segmentation (page anchors + briefs) |
-| `STORY_STRONG_TEXT_MODEL` | `gemini-4-argon` | the once-per-book judgement steps below default to it |
+| `STORY_STRONG_TEXT_MODEL` | = text model | the once-per-book judgement steps below default to it |
 | `STORY_REGISTRY_MODEL` | = strong model | entity discovery/expansion (identity-critical) |
 | `STORY_CONTINUITY_MODEL` | = strong model | the 5-page continuity review |
 | `STORY_REGISTRY_THINK` | `high` | thinking level for the registry step (minimal/low/medium/high) |
 | `STORY_CRITIQUE_MODEL` | = text model | image quality scoring (low-sensitivity) |
 | `STORY_CHAPTER_MODEL` | = text model | chapter skeleton classification (low-sensitivity) |
 | `STORY_ROSTER_REVIEW_MODEL` | = strong model | whole-book roster review (sees every sheet) |
+| `STORY_PROP_MODEL` / `STORY_META_MODEL` | = text model | per-page setting/prop tags; title/author cleanup |
+| `STORY_DEFINE_MODEL` | = text model | child-friendly vocab definitions |
+| `STORY_FIRESTORE_PROJECT` / `STORY_FIRESTORE_DATABASE` | unset / `(default)` | cache vocab definitions in Firestore; unset = the app's SQLite DB |
 | `STORY_ROSTER_REVIEW` / `STORY_ROSTER_REVIEW_REDRAWS` | `1` / `12` | turn the roster review off (`0`); cap on sheets it may redraw |
 
 Per-book choices (art style, illustration cadence, audience age) are set in the
