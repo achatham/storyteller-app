@@ -403,5 +403,5 @@ only each page's *start anchor* (a short verbatim snippet) and the page text is
 sliced from the source in code (exact, no hallucination). Because that step is now
 low-stakes, the low-sensitivity text steps can run on a cheaper model — e.g. set
 `STORY_ANALYZE_MODEL`, `STORY_CRITIQUE_MODEL`, and `STORY_CHAPTER_MODEL` to
-`gemini-3.1-flash-lite` for ~80% off the text spend. Keep `STORY_REGISTRY_MODEL`
+`gemini-3.5-flash-lite` for a fraction of the text spend. Keep `STORY_REGISTRY_MODEL`
 on the stronger model (it pins character identity for the whole book).

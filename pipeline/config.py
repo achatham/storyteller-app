@@ -270,7 +270,7 @@ REGISTRY_THINK = os.environ.get("STORY_REGISTRY_THINK", "high")
 CRITIQUE_MODEL = os.environ.get("STORY_CRITIQUE_MODEL", TEXT_MODEL)
 CHAPTER_MODEL = os.environ.get("STORY_CHAPTER_MODEL", TEXT_MODEL)
 # Tagging which recurring settings/props appear on each page is a narrow,
-# low-stakes classification; a cheap model (gemini-3.1-flash-lite) is fine via env.
+# low-stakes classification; a cheap model (gemini-3.5-flash-lite) is fine via env.
 PROP_MODEL = os.environ.get("STORY_PROP_MODEL", TEXT_MODEL)
 # Cleaning a book's title/author out of its filename + container metadata is a
 # trivial normalization; same story.

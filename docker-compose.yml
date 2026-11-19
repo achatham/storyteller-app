@@ -42,7 +42,7 @@ services:
       # All text steps default to STORY_TEXT_MODEL (gemini-4-hydrogen). Text spend
       # is negligible next to image generation, so we favour the stronger model
       # for reliable variant picks + cast inclusion (set STORY_ANALYZE_MODEL etc.
-      # to gemini-3.1-flash-lite if you ever want to trade quality for cost).
+      # to gemini-3.5-flash-lite if you ever want to trade quality for cost).
     volumes:
       - ./data:/data  # sqlite DB + scratch work dirs + logs persist here
       - ${HOME}/.secrets/storyteller:/secrets:ro  # firestore.json (service-account key)
