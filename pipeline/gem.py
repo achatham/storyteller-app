@@ -216,16 +216,21 @@ def _coerce_json(raw: str | None, reason: str = "") -> dict:
 
 
 def text_json(prompt: str, schema: dict | None = None, model: str = TEXT_MODEL,
-              thinking_level: str | None = None) -> dict:
+              thinking_level: str | None = None, timeout: float | None = None,
+              tries: int = 4) -> dict:
     """Call the text model and parse a JSON object out of the response.
     Empty/garbage responses are retried (not crash-on-None).
 
     thinking_level (Gemini 3 models): minimal|low|medium|high. None = model
-    default (dynamic). Raise it for reasoning-heavy steps like the registry."""
+    default (dynamic). Raise it for reasoning-heavy steps like the registry.
+    timeout (seconds, per attempt) and tries bound interactive calls a person
+    is waiting on; the defaults (no timeout, 4 tries) suit background work."""
     kwargs = dict(response_mime_type="application/json", response_schema=schema,
                   temperature=0.6)
     if thinking_level:
         kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_level)
+    if timeout:
+        kwargs["http_options"] = types.HttpOptions(timeout=int(timeout * 1000))
     cfg = types.GenerateContentConfig(**kwargs)
 
     def _go():
@@ -233,7 +238,7 @@ def text_json(prompt: str, schema: dict | None = None, model: str = TEXT_MODEL,
         _record_usage(resp, model, "text")
         return _coerce_json(resp.text, _block_reason(resp))
 
-    return _retry(_go, what="text_json")
+    return _retry(_go, tries=tries, what="text_json")
 
 
 def generate_image(prompt: str, refs: list[Path] | None = None, out_path: Path | None = None,

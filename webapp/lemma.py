@@ -17,6 +17,10 @@ from pipeline.config import DEFINE_MODEL
 
 from . import db
 
+# The reader waits on this before it highlights the word, so a slow model must not
+# hold the save: past this (per attempt, two attempts) the printed form is used.
+HEADWORD_TIMEOUT = 8.0
+
 SCHEMA = {"type": "object", "properties": {"headword": {"type": "string"}},
           "required": ["headword"]}
 
@@ -52,7 +56,8 @@ def headword(form: str, context: str | None = None) -> str:
     try:
         with costs.run_as("vocab"):
             out = gem.text_json(PROMPT.format(form=form, context=context or form), SCHEMA,
-                                model=DEFINE_MODEL, thinking_level="low")
+                                model=DEFINE_MODEL, thinking_level="low",
+                                timeout=HEADWORD_TIMEOUT, tries=2)
         return _clean(out.get("headword")) or form
     except Exception as e:  # noqa: BLE001 -- never let this block a save
         print(f"  [lemma] {form!r} failed: {type(e).__name__}: {str(e)[:120]}", flush=True)

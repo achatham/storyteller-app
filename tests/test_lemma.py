@@ -19,7 +19,7 @@ def setup(monkeypatch, tmp_path, answers):
     server.db.init()
     asked = []
 
-    def fake(prompt, schema=None, model=None, thinking_level=None):
+    def fake(prompt, schema=None, model=None, thinking_level=None, **_):
         form = prompt.split('"')[1]
         asked.append(form)
         if form not in answers:

@@ -282,7 +282,7 @@ Each word is filed under its **headword**, the form worth learning and reviewing
 "devoured" -> "devour", "attentively" -> "attentive", "leaves" -> "leaf" or
 "leave" depending on the sentence. Rules can't do this well (irregular verbs,
 homographs, "hardly" isn't "hard"), so `webapp/lemma.py` asks the text model,
-giving it the sentence. That takes a couple of seconds, so the toast says
+giving it the sentence. That takes a few seconds (capped, see `HEADWORD_TIMEOUT`), so the toast says
 "Saving..." meanwhile. The headword is what's deduplicated, defined and reviewed;
 every printed form is kept in `vocab.forms` so the reader highlights the words as
 printed and `/vocab` shows "seen as ...". If the model call fails, the printed
@@ -367,7 +367,7 @@ parameters later.
 | `STORY_LITE_IMAGE_MODEL` | `gemini-3.1-flash-lite-image` | manual roster-sheet tweaks in the roster editor (always lite) |
 | `STORY_COVER_SIZE` / `STORY_COVER_MAXW` / `STORY_COVER_QUALITY` | `2K` / `1024` / `82` | cover generation size, stored width, WebP quality |
 | `STORY_COVER_CAST` | `3` | max characters on a cover |
-| `STORY_TEXT_MODEL` | `gemini-4-hydrogen` | every text step defaults to it, including the roles below |
+| `STORY_TEXT_MODEL` | `gemini-4-hydrogen` | every text step defaults to it, including the roles below (except vocab) |
 | `STORY_ANALYZE_MODEL` | = text model | segmentation (page anchors + briefs) |
 | `STORY_STRONG_TEXT_MODEL` | = text model | the once-per-book judgement steps below default to it |
 | `STORY_REGISTRY_MODEL` | = strong model | entity discovery/expansion (identity-critical) |
@@ -377,7 +377,7 @@ parameters later.
 | `STORY_CHAPTER_MODEL` | = text model | chapter skeleton classification (low-sensitivity) |
 | `STORY_ROSTER_REVIEW_MODEL` | = strong model | whole-book roster review (sees every sheet) |
 | `STORY_PROP_MODEL` / `STORY_META_MODEL` | = text model | per-page setting/prop tags; title/author cleanup |
-| `STORY_DEFINE_MODEL` | = text model | child-friendly vocab definitions |
+| `STORY_DEFINE_MODEL` | `gemini-3.8-flash` | vocab headwords + child-friendly definitions (interactive, so a fast model) |
 | `STORY_FIRESTORE_PROJECT` / `STORY_FIRESTORE_DATABASE` | unset / `(default)` | cache vocab definitions in Firestore; unset = the app's SQLite DB |
 | `STORY_ROSTER_REVIEW` / `STORY_ROSTER_REVIEW_REDRAWS` | `1` / `12` | turn the roster review off (`0`); cap on sheets it may redraw |
 
