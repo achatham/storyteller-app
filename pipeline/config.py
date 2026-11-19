@@ -279,7 +279,7 @@ META_MODEL = os.environ.get("STORY_META_MODEL", TEXT_MODEL)
 # The one text step a child waits on mid-page, so it gets a fast model rather than
 # TEXT_MODEL: in Nov 2026 Hydrogen took 35-130s per tiny request (queueing, not
 # thinking), which left every long-pressed word un-highlighted for minutes, while
-# 3.8 flash picks the same headwords in 2-5s.
+# 3.8 flash picks the same headwords in 2-5s. webapp/lemma caps the headword call at 10s regardless.
 DEFINE_MODEL = os.environ.get("STORY_DEFINE_MODEL", "gemini-3.8-flash")
 # The whole-book roster review (webapp/roster_review) runs once per book and has to
 # reason across every chapter's cast (and every sheet) at once.
