@@ -281,6 +281,10 @@ META_MODEL = os.environ.get("STORY_META_MODEL", TEXT_MODEL)
 # thinking), which left every long-pressed word un-highlighted for minutes, while
 # 3.8 flash picks the same headwords in 2-5s. webapp/lemma caps the headword call at 10s regardless.
 DEFINE_MODEL = os.environ.get("STORY_DEFINE_MODEL", "gemini-3.8-flash")
+# The headword pick (webapp/lemma) sits on the long-press save itself, and is a narrow
+# call: flash-lite gets the hard cases right (leaves -> leaf, hardly/better kept) in
+# ~1s, where 3.8 flash took 2-8s, uncomfortably near lemma's 10s cap.
+LEMMA_MODEL = os.environ.get("STORY_LEMMA_MODEL", "gemini-3.1-flash-lite")
 # The whole-book roster review (webapp/roster_review) runs once per book and has to
 # reason across every chapter's cast (and every sheet) at once.
 ROSTER_REVIEW_MODEL = os.environ.get("STORY_ROSTER_REVIEW_MODEL", STRONG_TEXT_MODEL)

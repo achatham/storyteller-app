@@ -377,7 +377,8 @@ parameters later.
 | `STORY_CHAPTER_MODEL` | = text model | chapter skeleton classification (low-sensitivity) |
 | `STORY_ROSTER_REVIEW_MODEL` | = strong model | whole-book roster review (sees every sheet) |
 | `STORY_PROP_MODEL` / `STORY_META_MODEL` | = text model | per-page setting/prop tags; title/author cleanup |
-| `STORY_DEFINE_MODEL` | `gemini-3.8-flash` | vocab headwords + child-friendly definitions (interactive, so a fast model) |
+| `STORY_DEFINE_MODEL` | `gemini-3.8-flash` | child-friendly vocab definitions (interactive, so a fast model) |
+| `STORY_LEMMA_MODEL` | `gemini-3.1-flash-lite` | the headword a long-pressed word is filed under (on the save path, ~1s) |
 | `STORY_FIRESTORE_PROJECT` / `STORY_FIRESTORE_DATABASE` | unset / `(default)` | cache vocab definitions in Firestore; unset = the app's SQLite DB |
 | `STORY_ROSTER_REVIEW` / `STORY_ROSTER_REVIEW_REDRAWS` | `1` / `12` | turn the roster review off (`0`); cap on sheets it may redraw |
 

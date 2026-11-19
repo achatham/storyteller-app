@@ -13,7 +13,7 @@ and what gets defined and reviewed; every form actually seen is kept beside it
 model call fails the form itself is used, so saving a word never fails on this.
 """
 from pipeline import costs, gem
-from pipeline.config import DEFINE_MODEL
+from pipeline.config import LEMMA_MODEL
 
 from . import db
 
@@ -57,7 +57,7 @@ def headword(form: str, context: str | None = None) -> str:
     try:
         with costs.run_as("vocab"):
             out = gem.text_json(PROMPT.format(form=form, context=context or form), SCHEMA,
-                                model=DEFINE_MODEL, thinking_level="low",
+                                model=LEMMA_MODEL, thinking_level="low",
                                 timeout=HEADWORD_TIMEOUT, tries=1)
         return _clean(out.get("headword")) or form
     except Exception as e:  # noqa: BLE001 -- never let this block a save
